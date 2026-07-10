@@ -17,6 +17,11 @@ replacement callback wrapper per frame. Active decoded leases anchor their
 surface pool and shared `MetalContext`, so mailbox leases can safely outlive a
 decoder rebuild. The capacities are source-constructor parameters, with 16/8
 defaults for the production configuration.
+Surface capacities below four are rejected by both the source and decoded
+surface pool: the mailbox can retain three slots while the callback needs a
+fourth slot for forward progress. The focused probe verifies that capacities
+1, 2, and 3 all fail construction; ticket capacity remains valid from 1
+through 64.
 
 Decode submission returns a typed result that distinguishes a normal fixed-pool
 drop from stale input and recoverable VideoToolbox failure. Synchronous VT
@@ -37,6 +42,14 @@ compressed sample resets the backoff. Errors are lane-local and bounded to 512
 bytes. Format changes retain their format description across sample lifetime,
 advance the decoder generation, drain the prior session, and rebuild only that
 lane.
+
+Source control flow uses explicit fatal/recoverable failure kinds and a normal
+EOF result; it never classifies errors by message text. Unsupported media,
+malformed compressed samples, missing required hardware, and invalid
+capabilities fail immediately. AVAssetReader and VideoToolbox operational
+errors reconnect with backoff even when no finite run duration was configured.
+EOF is successful for an unbounded file run and fatal only when it arrives
+before a finite configured duration.
 
 #### TDD evidence
 
@@ -62,6 +75,11 @@ IOSurface, and zero steady C++ hot-path allocations after warmup. Native VT/CV
 calls are outside the C++ allocation scopes and remain covered by the existing
 native-object metrics.
 
+A final constructor regression was added before the four-surface minimum. Its
+RED run failed with `decoded surface capacity below four was not rejected`;
+the same focused check is green for capacities 1, 2, and 3 after the pool/source
+validation change.
+
 #### Verification
 
 Normal full build and C++ tests:
@@ -76,7 +94,7 @@ Python regression suite:
 
 ```text
 .venv/bin/python -m unittest discover -s python/tests -v
-Ran 19 tests in 3.140s
+Ran 19 tests in 3.313s
 OK
 ```
 
@@ -86,13 +104,14 @@ Single 4K stream:
 build/macos/metal_decode_probe \
   /Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K/20260629_172532_cam1.mp4 \
   --frames 120
-cam1 3840x2160 measured_fps=29.97 hardware=true callbacks=125
-minimum_callbacks=120 published=125 dropped=0 consumed=118 host_copies=0
+cam1 3840x2160 measured_fps=29.97 hardware=true callbacks=124
+minimum_callbacks=120 published=124 dropped=0 consumed=120 host_copies=0
 ```
 
-The same run verified 16 fixed tickets, one session/callback wrapper, 250
-texture wrappers for 125 publications, zero pool exhaustion, 125 submitted
-decodes/125 callbacks, and zero decoder errors.
+The latest focused run delivered 124 callbacks/publications and also verified
+16 fixed tickets, one session/callback wrapper, two texture wrappers per
+publication, zero pool exhaustion, equal submitted/callback counts, and zero
+decoder errors.
 
 Six independent real-time lanes for 10 seconds:
 

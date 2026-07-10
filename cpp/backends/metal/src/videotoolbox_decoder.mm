@@ -34,6 +34,14 @@ std::uint64_t initial_mask(std::uint32_t capacity) {
                         : (std::uint64_t{1} << capacity) - 1;
 }
 
+std::uint64_t surface_initial_mask(std::uint32_t capacity) {
+  if (capacity < 4 || capacity > 64) {
+    throw std::invalid_argument(
+        "decoded surface pool capacity must be between 4 and 64");
+  }
+  return initial_mask(capacity);
+}
+
 std::runtime_error vt_error(const char* operation, OSStatus status) {
   return std::runtime_error(std::string(operation) + " failed (OSStatus " +
                             std::to_string(status) + ")");
@@ -81,7 +89,7 @@ class MetalDecodedSurfacePool final
       : context_(std::move(context)),
         capacity_(capacity),
         slots_(std::make_unique<MetalDecodedSurface[]>(capacity)),
-        free_mask_(initial_mask(capacity)) {
+        free_mask_(surface_initial_mask(capacity)) {
     for (std::uint32_t index = 0; index < capacity_; ++index) {
       slots_[index].pool_index = index;
       slots_[index].owner = this;
@@ -89,7 +97,8 @@ class MetalDecodedSurfacePool final
   }
 
   ~MetalDecodedSurfacePool() noexcept {
-    if (free_mask_.load(std::memory_order_acquire) != initial_mask(capacity_)) {
+    if (free_mask_.load(std::memory_order_acquire) !=
+        surface_initial_mask(capacity_)) {
       std::terminate();
     }
   }
@@ -165,9 +174,7 @@ void release_surface(void* native) noexcept {
 struct DecodeTicket final {
   std::uint32_t pool_index{};
   std::uint32_t camera_index{};
-  std::uint64_t display_sequence{};
   std::uint64_t decoder_generation{};
-  CMTime pts{kCMTimeInvalid};
   std::chrono::steady_clock::time_point arrived_at{};
   swim::core::LatestFrameMailbox* mailbox{};
   void* decoder{};
@@ -257,7 +264,9 @@ class VideoToolboxDecoder::Impl final {
     if (format_description == nullptr ||
         CMFormatDescriptionGetMediaType(format_description) != kCMMediaType_Video ||
         CMFormatDescriptionGetMediaSubType(format_description) != kCMVideoCodecType_H264) {
-      throw std::invalid_argument("VideoToolbox decoder requires an H.264 video format");
+      throw DecoderConfigurationError{
+          DecoderConfigurationFailure::invalid_format,
+          "VideoToolbox decoder requires an H.264 video format"};
     }
 
     std::lock_guard lock(session_mutex_);
@@ -282,7 +291,17 @@ class VideoToolboxDecoder::Impl final {
         (__bridge CFDictionaryRef)destination_attributes, &callback, &session_);
     if (status != noErr || session_ == nullptr) {
       session_ = nullptr;
-      throw vt_error("VTDecompressionSessionCreate", status);
+      const auto failure =
+          status == kVTCouldNotFindVideoDecoderErr
+              ? DecoderConfigurationFailure::hardware_unavailable
+              : status == kVTVideoDecoderUnsupportedDataFormatErr ||
+                        status == paramErr
+                    ? DecoderConfigurationFailure::invalid_format
+                    : DecoderConfigurationFailure::operational;
+      throw DecoderConfigurationError{
+          failure,
+          "VTDecompressionSessionCreate failed (OSStatus " +
+              std::to_string(status) + ")"};
     }
     metrics_.native_callback_wrappers.fetch_add(1, std::memory_order_relaxed);
 
@@ -299,14 +318,14 @@ class VideoToolboxDecoder::Impl final {
     hardware_.store(hardware, std::memory_order_release);
     if (!hardware) {
       destroy_session_locked();
-      throw std::runtime_error("hardware-accelerated VideoToolbox decode is required");
+      throw DecoderConfigurationError{
+          DecoderConfigurationFailure::hardware_unavailable,
+          "hardware-accelerated VideoToolbox decode is required"};
     }
   }
 
   DecodeSubmitResult decode(CMSampleBufferRef sample,
-                            std::uint64_t decoder_generation,
-                            std::uint64_t display_sequence,
-                            CMTime pts) noexcept {
+                            std::uint64_t decoder_generation) noexcept {
     if (sample == nullptr || !CMSampleBufferDataIsReady(sample) ||
         CMSampleBufferGetNumSamples(sample) != 1 ||
         decoder_generation != generation_.load(std::memory_order_acquire)) {
@@ -318,9 +337,7 @@ class VideoToolboxDecoder::Impl final {
       ticket = tickets_.try_acquire();
       if (ticket != nullptr) {
         ticket->camera_index = camera_index_;
-        ticket->display_sequence = display_sequence;
         ticket->decoder_generation = decoder_generation;
-        ticket->pts = pts;
         ticket->arrived_at = std::chrono::steady_clock::now();
         ticket->mailbox = &mailbox_;
         ticket->decoder = this;
@@ -421,7 +438,6 @@ class VideoToolboxDecoder::Impl final {
                                      CMTime presentation_time,
                                      CMTime presentation_duration) noexcept {
     static_cast<void>(refcon);
-    static_cast<void>(presentation_time);
     static_cast<void>(presentation_duration);
     auto* ticket = static_cast<DecodeTicket*>(source_refcon);
     if (ticket == nullptr || ticket->decoder == nullptr) {
@@ -655,9 +671,8 @@ void VideoToolboxDecoder::configure(
 }
 
 DecodeSubmitResult VideoToolboxDecoder::decode(
-    CMSampleBufferRef sample, std::uint64_t decoder_generation,
-    std::uint64_t display_sequence, CMTime pts) noexcept {
-  return impl_->decode(sample, decoder_generation, display_sequence, pts);
+    CMSampleBufferRef sample, std::uint64_t decoder_generation) noexcept {
+  return impl_->decode(sample, decoder_generation);
 }
 
 void VideoToolboxDecoder::wait_for_asynchronous_frames() { impl_->wait(); }

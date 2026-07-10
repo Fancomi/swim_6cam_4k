@@ -12,6 +12,9 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
+#include <string>
+#include <utility>
 
 namespace swim::metal {
 
@@ -53,6 +56,24 @@ enum class DecodeSubmitResult : std::uint8_t {
   stale_or_invalid,
 };
 
+enum class DecoderConfigurationFailure : std::uint8_t {
+  invalid_format,
+  hardware_unavailable,
+  operational,
+};
+
+class DecoderConfigurationError final : public std::runtime_error {
+ public:
+  DecoderConfigurationError(DecoderConfigurationFailure failure,
+                            std::string message)
+      : std::runtime_error(std::move(message)), failure_(failure) {}
+
+  DecoderConfigurationFailure failure() const noexcept { return failure_; }
+
+ private:
+  DecoderConfigurationFailure failure_;
+};
+
 class VideoToolboxDecoder final {
  public:
   VideoToolboxDecoder(
@@ -74,9 +95,7 @@ class VideoToolboxDecoder final {
   // The sample and format description remain owned by the caller. VideoToolbox
   // retains everything needed after this function returns.
   DecodeSubmitResult decode(CMSampleBufferRef sample,
-                            std::uint64_t decoder_generation,
-                            std::uint64_t display_sequence,
-                            CMTime pts) noexcept;
+                            std::uint64_t decoder_generation) noexcept;
 
   void wait_for_asynchronous_frames();
   void drain();

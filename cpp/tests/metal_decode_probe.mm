@@ -121,6 +121,26 @@ void require(bool condition, const std::string& message) {
   }
 }
 
+void verify_surface_capacity_contract(
+    const std::shared_ptr<swim::metal::MetalContext>& context,
+    const std::filesystem::path& path) {
+  for (std::uint32_t capacity = 1; capacity < 4; ++capacity) {
+    swim::core::LatestFrameMailbox mailbox;
+    swim::core::RuntimeCounters counters;
+    bool rejected = false;
+    try {
+      swim::metal::Mp4VideoToolboxSource source(
+          context, {"cam1", path}, 0, mailbox, counters,
+          swim::core::RunMode::benchmark, std::chrono::milliseconds{0}, 16,
+          capacity);
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    require(rejected,
+            "decoded surface capacity below four was not rejected");
+  }
+}
+
 void validate_frame(const swim::core::FrameLease& frame,
                     std::size_t camera, std::uint64_t& previous_sequence,
                     CMTime& previous_pts) {
@@ -182,6 +202,7 @@ int run(const Options& options) {
   const auto warmup_frames = std::min<std::uint64_t>(
       30, std::max<std::uint64_t>(1, minimum_callbacks / 4));
   auto context = make_context();
+  verify_surface_capacity_contract(context, options.paths.front());
   std::array<swim::core::LatestFrameMailbox, kMaximumLanes> mailboxes;
   std::array<swim::core::RuntimeCounters, kMaximumLanes> counters;
   std::vector<std::unique_ptr<swim::metal::Mp4VideoToolboxSource>> sources;

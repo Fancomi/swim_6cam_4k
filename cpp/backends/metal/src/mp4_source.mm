@@ -23,6 +23,27 @@ namespace {
 
 constexpr std::size_t kMaximumLaneErrorBytes = 512;
 
+enum class LaneFailureKind : std::uint8_t {
+  fatal,
+  recoverable,
+};
+
+class LaneFailure final : public std::runtime_error {
+ public:
+  LaneFailure(LaneFailureKind kind, std::string message)
+      : std::runtime_error(std::move(message)), kind_(kind) {}
+
+  LaneFailureKind kind() const noexcept { return kind_; }
+
+ private:
+  LaneFailureKind kind_;
+};
+
+enum class ReaderOutcome : std::uint8_t {
+  stopped_or_duration_reached,
+  normal_eof,
+};
+
 std::string ns_error(NSString* prefix, NSError* error) {
   const char* detail =
       error == nil ? nullptr : error.localizedDescription.UTF8String;
@@ -100,9 +121,10 @@ class Mp4VideoToolboxSource::Impl final {
       throw std::invalid_argument("MP4 source duration must not be negative");
     }
     if (ticket_capacity_ == 0 || ticket_capacity_ > 64 ||
-        surface_capacity_ == 0 || surface_capacity_ > 64) {
+        surface_capacity_ < 4 || surface_capacity_ > 64) {
       throw std::invalid_argument(
-          "MP4 decoder pool capacities must be between 1 and 64");
+          "MP4 decoder ticket capacity must be 1..64 and surface capacity "
+          "must be 4..64");
     }
   }
 
@@ -182,9 +204,34 @@ class Mp4VideoToolboxSource::Impl final {
 
   [[noreturn]] static void throw_decoder_error(
       const VideoToolboxDecoder& decoder) {
-    throw std::runtime_error(
+    throw LaneFailure{
+        LaneFailureKind::recoverable,
         "recoverable VideoToolbox decode error (OSStatus " +
-        std::to_string(decoder.recoverable_error_status()) + ")");
+            std::to_string(decoder.recoverable_error_status()) + ")"};
+  }
+
+  static void configure_decoder(
+      VideoToolboxDecoder& decoder,
+      CMVideoFormatDescriptionRef format_description) {
+    try {
+      decoder.configure(format_description);
+    } catch (const DecoderConfigurationError& error) {
+      const auto kind =
+          error.failure() == DecoderConfigurationFailure::operational
+              ? LaneFailureKind::recoverable
+              : LaneFailureKind::fatal;
+      throw LaneFailure{kind, error.what()};
+    } catch (const std::invalid_argument& error) {
+      throw LaneFailure{LaneFailureKind::fatal, error.what()};
+    }
+  }
+
+  static void drain_decoder(VideoToolboxDecoder& decoder) {
+    try {
+      decoder.drain();
+    } catch (const std::exception& error) {
+      throw LaneFailure{LaneFailureKind::recoverable, error.what()};
+    }
   }
 
   void set_error(std::string message, bool fatal) noexcept {
@@ -202,7 +249,8 @@ class Mp4VideoToolboxSource::Impl final {
   }
 
   bool sleep_interruptibly(std::chrono::milliseconds delay) const noexcept {
-    const auto until = std::chrono::steady_clock::now() + delay;
+    const auto until =
+        std::min(std::chrono::steady_clock::now() + delay, deadline_);
     while (!stop_requested_.load(std::memory_order_acquire)) {
       const auto now = std::chrono::steady_clock::now();
       if (now >= until) {
@@ -241,13 +289,14 @@ class Mp4VideoToolboxSource::Impl final {
     }
   }
 
-  void run_reader_once(VideoToolboxDecoder& decoder,
-                       swim::core::CameraHealthTracker& health) {
+  ReaderOutcome run_reader_once(VideoToolboxDecoder& decoder,
+                                swim::core::CameraHealthTracker& health) {
     @autoreleasepool {
       const auto path = source_.path.string();
       NSString* ns_path = [NSString stringWithUTF8String:path.c_str()];
       if (ns_path == nil) {
-        throw std::runtime_error("MP4 source path is not valid UTF-8");
+        throw LaneFailure{LaneFailureKind::fatal,
+                          "MP4 source path is not valid UTF-8"};
       }
       AVURLAsset* asset = [AVURLAsset
           URLAssetWithURL:[NSURL fileURLWithPath:ns_path]
@@ -264,12 +313,14 @@ class Mp4VideoToolboxSource::Impl final {
                   }];
       dispatch_semaphore_wait(tracks_loaded, DISPATCH_TIME_FOREVER);
       if (track_error != nil) {
-        throw std::runtime_error(
-            ns_error(@"cannot load MP4 video tracks", track_error));
+        throw LaneFailure{
+            LaneFailureKind::recoverable,
+            ns_error(@"cannot load MP4 video tracks", track_error)};
       }
       AVAssetTrack* track = tracks.firstObject;
       if (track == nil) {
-        throw std::runtime_error("MP4 source has no video track");
+        throw LaneFailure{LaneFailureKind::fatal,
+                          "MP4 source has no video track"};
       }
       CMVideoFormatDescriptionRef initial_format = nullptr;
       for (id value in track.formatDescriptions) {
@@ -279,42 +330,47 @@ class Mp4VideoToolboxSource::Impl final {
         }
         if (CMFormatDescriptionGetMediaSubType(description) !=
             kCMVideoCodecType_H264) {
-          throw std::runtime_error("MP4 video track is not H.264/avc1");
+          throw LaneFailure{LaneFailureKind::fatal,
+                            "MP4 video track is not H.264/avc1"};
         }
         initial_format = description;
         break;
       }
       if (initial_format == nullptr) {
-        throw std::runtime_error("MP4 video track has no H.264 format");
+        throw LaneFailure{LaneFailureKind::fatal,
+                          "MP4 video track has no H.264 format"};
       }
 
       NSError* reader_error = nil;
       AVAssetReader* reader =
           [[AVAssetReader alloc] initWithAsset:asset error:&reader_error];
       if (reader == nil) {
-        throw std::runtime_error(ns_error(@"cannot create AVAssetReader",
-                                          reader_error));
+        throw LaneFailure{
+            LaneFailureKind::recoverable,
+            ns_error(@"cannot create AVAssetReader", reader_error)};
       }
       AVAssetReaderTrackOutput* output =
           [[AVAssetReaderTrackOutput alloc] initWithTrack:track
                                           outputSettings:nil];
       output.alwaysCopiesSampleData = NO;
       if (![reader canAddOutput:output]) {
-        throw std::runtime_error("cannot attach compressed video output");
+        throw LaneFailure{LaneFailureKind::fatal,
+                          "cannot attach compressed video output"};
       }
       [reader addOutput:output];
 
-      decoder.configure(initial_format);
+      configure_decoder(decoder, initial_format);
       hardware_.store(decoder.using_hardware_acceleration(),
                       std::memory_order_release);
       generation_.store(decoder.generation(), std::memory_order_release);
       if (!hardware_.load(std::memory_order_acquire)) {
-        throw std::runtime_error(
-            "VideoToolbox hardware acceleration is required");
+        throw LaneFailure{LaneFailureKind::fatal,
+                          "VideoToolbox hardware acceleration is required"};
       }
       if (![reader startReading]) {
-        throw std::runtime_error(
-            ns_error(@"cannot start compressed MP4 reading", reader.error));
+        throw LaneFailure{
+            LaneFailureKind::recoverable,
+            ns_error(@"cannot start compressed MP4 reading", reader.error)};
       }
 
       RetainedVideoFormat submitted_format{initial_format};
@@ -340,8 +396,9 @@ class Mp4VideoToolboxSource::Impl final {
         if (sample_count != 1) {
           counters_.malformed.fetch_add(1, std::memory_order_relaxed);
           CFRelease(sample);
-          throw std::runtime_error(
-              "compressed MP4 sample must contain exactly one access unit");
+          throw LaneFailure{
+              LaneFailureKind::fatal,
+              "compressed MP4 sample must contain exactly one access unit"};
         }
         if (CMSampleBufferGetImageBuffer(sample) != nullptr ||
             sample_bytes == 0 || !CMSampleBufferDataIsReady(sample)) {
@@ -352,14 +409,15 @@ class Mp4VideoToolboxSource::Impl final {
           const auto data_ready = CMSampleBufferDataIsReady(sample);
           counters_.malformed.fetch_add(1, std::memory_order_relaxed);
           CFRelease(sample);
-          throw std::runtime_error(
+          throw LaneFailure{
+              LaneFailureKind::fatal,
               "AVAssetReader output was not compressed sample data "
               "(image_buffer=" +
-              std::to_string(has_image_buffer) + ", data_buffer=" +
-              std::to_string(has_data_buffer) + ", samples=" +
-              std::to_string(sample_count) + ", bytes=" +
-              std::to_string(sample_bytes) + ", ready=" +
-              std::to_string(data_ready) + ")");
+                  std::to_string(has_image_buffer) + ", data_buffer=" +
+                  std::to_string(has_data_buffer) + ", samples=" +
+                  std::to_string(sample_count) + ", bytes=" +
+                  std::to_string(sample_bytes) + ", ready=" +
+                  std::to_string(data_ready) + ")"};
         }
         counters_.received.fetch_add(1, std::memory_order_relaxed);
         health.on_frame(std::chrono::steady_clock::now());
@@ -372,21 +430,19 @@ class Mp4VideoToolboxSource::Impl final {
                 kCMVideoCodecType_H264) {
           counters_.malformed.fetch_add(1, std::memory_order_relaxed);
           CFRelease(sample);
-          continue;
+          throw LaneFailure{LaneFailureKind::fatal,
+                            "compressed sample is not H.264/avc1"};
         }
         if (!CMFormatDescriptionEqual(format, submitted_format.get())) {
-          decoder.configure(format);
+          configure_decoder(decoder, format);
           generation_.store(decoder.generation(), std::memory_order_release);
           submitted_format.reset(format);
         }
-        const auto sequence =
-            next_sequence_.fetch_add(1, std::memory_order_relaxed) + 1;
         if (decoder.has_recoverable_error()) {
           CFRelease(sample);
           throw_decoder_error(decoder);
         }
-        const auto submit_result = decoder.decode(
-            sample, decoder.generation(), sequence, pts);
+        const auto submit_result = decoder.decode(sample, decoder.generation());
         CFRelease(sample);
         if (submit_result == DecodeSubmitResult::recoverable_error ||
             decoder.has_recoverable_error()) {
@@ -396,7 +452,7 @@ class Mp4VideoToolboxSource::Impl final {
           counters_.malformed.fetch_add(1, std::memory_order_relaxed);
         }
       }
-      decoder.drain();
+      drain_decoder(decoder);
       if (decoder.has_recoverable_error()) {
         throw_decoder_error(decoder);
       }
@@ -405,18 +461,19 @@ class Mp4VideoToolboxSource::Impl final {
           (run_duration_.count() > 0 &&
            std::chrono::steady_clock::now() >= deadline_)) {
         [reader cancelReading];
-        return;
+        return ReaderOutcome::stopped_or_duration_reached;
       }
       if (reader.status == AVAssetReaderStatusCompleted) {
         if (run_duration_.count() > 0) {
-          throw std::runtime_error(
-              "MP4 reached EOF before the configured run duration");
+          throw LaneFailure{
+              LaneFailureKind::fatal,
+              "MP4 reached EOF before the configured run duration"};
         }
-        completed_.store(true, std::memory_order_release);
-        return;
+        return ReaderOutcome::normal_eof;
       }
-      throw std::runtime_error(
-          ns_error(@"compressed MP4 reader failed", reader.error));
+      throw LaneFailure{
+          LaneFailureKind::recoverable,
+          ns_error(@"compressed MP4 reader failed", reader.error)};
     }
   }
 
@@ -434,16 +491,16 @@ class Mp4VideoToolboxSource::Impl final {
         while (!stop_requested_.load(std::memory_order_acquire) &&
                std::chrono::steady_clock::now() < deadline_) {
           try {
-            run_reader_once(decoder, health);
+            const auto outcome = run_reader_once(decoder, health);
+            if (outcome == ReaderOutcome::normal_eof) {
+              completed_.store(true, std::memory_order_release);
+            }
             break;
-          } catch (const std::exception& error) {
+          } catch (const LaneFailure& error) {
             decoder.invalidate();
             generation_.store(decoder.generation(), std::memory_order_release);
             set_error(error.what(), false);
-            if (std::string{error.what()}.find("EOF before") !=
-                    std::string::npos ||
-                run_duration_.count() == 0 ||
-                std::chrono::steady_clock::now() >= deadline_) {
+            if (error.kind() == LaneFailureKind::fatal) {
               throw;
             }
             counters_.reconnects.fetch_add(1, std::memory_order_relaxed);
@@ -483,7 +540,6 @@ class Mp4VideoToolboxSource::Impl final {
   std::atomic_bool completed_{false};
   std::atomic_bool hardware_{false};
   std::atomic_uint64_t generation_{0};
-  std::atomic_uint64_t next_sequence_{0};
   mutable std::mutex error_mutex_;
   std::string last_error_;
   mutable std::mutex stats_mutex_;
