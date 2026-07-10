@@ -117,12 +117,30 @@ TEST_CASE(preview_close_rejects_offers_and_releases_pending_leases) {
   LeaseState rejected;
   CHECK(mailbox.offer(TrackedLease{pending}));
 
-  mailbox.close_and_clear();
+  CHECK(mailbox.close_and_clear());
   CHECK(!mailbox.accepting());
   CHECK(!mailbox.has_pending());
+  CHECK_EQ(mailbox.drops(), 1u);
   CHECK_EQ(pending.references.load(std::memory_order_relaxed), 0u);
   CHECK(!mailbox.offer(TrackedLease{rejected}));
   CHECK_EQ(rejected.references.load(std::memory_order_relaxed), 0u);
+}
+
+TEST_CASE(preview_close_without_a_pending_value_reports_no_discard) {
+  swim::metal::PreviewMailbox<std::uint64_t> mailbox;
+  CHECK(!mailbox.close_and_clear());
+  CHECK_EQ(mailbox.drops(), 0u);
+}
+
+TEST_CASE(preview_timeout_and_late_callback_settle_one_presentation_once) {
+  swim::metal::PreviewPresentationAccounting accounting;
+  accounting.begin();
+  CHECK(accounting.account_once());   // timeout owns the drop
+  CHECK(!accounting.account_once());  // late callback cannot double-count
+
+  accounting.begin();
+  CHECK(accounting.account_once());   // callback owns the present
+  CHECK(!accounting.account_once());  // timeout cannot double-count
 }
 
 TEST_CASE(preview_mailbox_offer_allocates_no_application_heap_memory) {

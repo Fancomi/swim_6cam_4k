@@ -278,11 +278,17 @@ class MetalPreview::Impl final
       return;
     }
     stop_requested_.store(true, std::memory_order_release);
-    mailbox_.close_and_clear();
+    if (mailbox_.close_and_clear()) {
+      preview_drops_.fetch_add(1, std::memory_order_relaxed);
+    }
     [timer_ invalidate];
     timer_ = nil;
     if (!present_gate_.close_and_wait_until(
             std::chrono::steady_clock::now() + kDrainTimeout)) {
+      if (present_gate_.pending() != 0 &&
+          present_accounting_.account_once()) {
+        preview_drops_.fetch_add(1, std::memory_order_relaxed);
+      }
       flush_metrics();
       destroy_ui();
       throw std::runtime_error("timed out waiting for Metal preview presentation");
@@ -395,13 +401,16 @@ class MetalPreview::Impl final
 
     auto owner = shared_from_this();
     MetalOutputLease retained_output = std::move(output);
+    present_accounting_.begin();
     native_callback_wrappers_.fetch_add(1, std::memory_order_relaxed);
     [command addCompletedHandler:^(id<MTLCommandBuffer> completed) {
       static_cast<void>(retained_output.texture());
-      if (completed.status == MTLCommandBufferStatusCompleted) {
-        owner->preview_presents_.fetch_add(1, std::memory_order_relaxed);
-      } else {
-        owner->preview_drops_.fetch_add(1, std::memory_order_relaxed);
+      if (owner->present_accounting_.account_once()) {
+        if (completed.status == MTLCommandBufferStatusCompleted) {
+          owner->preview_presents_.fetch_add(1, std::memory_order_relaxed);
+        } else {
+          owner->preview_drops_.fetch_add(1, std::memory_order_relaxed);
+        }
       }
       owner->present_gate_.complete();
       owner->present_in_flight_.store(false, std::memory_order_release);
@@ -458,6 +467,7 @@ class MetalPreview::Impl final
   std::atomic_uint64_t preview_presents_{0};
   std::atomic_uint64_t native_command_buffers_{0};
   std::atomic_uint64_t native_callback_wrappers_{0};
+  PreviewPresentationAccounting present_accounting_;
   std::atomic_bool present_in_flight_{false};
   std::atomic_bool stop_requested_{false};
   std::atomic_bool closed_{false};

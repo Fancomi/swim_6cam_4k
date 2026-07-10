@@ -82,13 +82,32 @@ class PreviewMailbox final {
     return drops_.load(std::memory_order_relaxed);
   }
 
-  void close_and_clear() noexcept {
+  bool close_and_clear() noexcept {
     accepting_.store(false, std::memory_order_release);
-    middle_.store(front_, std::memory_order_release);
+    const auto previous = middle_.exchange(front_, std::memory_order_acq_rel);
+    const bool discarded = (previous & kDirty) != 0;
+    if (discarded) {
+      drops_.fetch_add(1, std::memory_order_relaxed);
+    }
     for (auto& slot : slots_) {
       slot = T{};
     }
+    return discarded;
   }
+};
+
+// Exactly-once settlement shared by the bounded timeout path and a possibly
+// late native presentation callback. Only one preview command may be in flight.
+class PreviewPresentationAccounting final {
+ public:
+  void begin() noexcept { accounted_.store(false, std::memory_order_release); }
+
+  bool account_once() noexcept {
+    return !accounted_.exchange(true, std::memory_order_acq_rel);
+  }
+
+ private:
+  std::atomic_bool accounted_{true};
 };
 
 // Main-thread Cocoa/CAMetalLayer presenter. offer() is a non-blocking serial
