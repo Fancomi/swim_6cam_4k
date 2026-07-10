@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <new>
 #include <optional>
@@ -17,7 +18,7 @@
 #include <thread>
 #include <utility>
 
-#if !defined(NDEBUG) && (defined(__unix__) || defined(__APPLE__))
+#if defined(__unix__) || defined(__APPLE__)
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -86,6 +87,23 @@ TEST_CASE(histogram_snapshot_clamps_samples_and_resets_source) {
   histogram.observe(7ms);
   CHECK_EQ(snapshot.count(), 4u);
   CHECK_EQ(snapshot.percentile(0.50), 10ms);
+}
+
+TEST_CASE(histogram_rejects_non_finite_quantiles) {
+  swim::core::FixedLatencyHistogram histogram;
+  histogram.observe(10ms);
+
+  CHECK_THROWS_WITH(
+      histogram.percentile(std::numeric_limits<double>::quiet_NaN()),
+      "histogram quantile must be finite");
+  CHECK_THROWS_WITH(
+      histogram.percentile(std::numeric_limits<double>::infinity()),
+      "histogram quantile must be finite");
+
+  const auto snapshot = histogram.snapshot_and_reset();
+  CHECK_THROWS_WITH(
+      snapshot.percentile(-std::numeric_limits<double>::infinity()),
+      "histogram quantile must be finite");
 }
 
 TEST_CASE(runtime_counter_snapshot_is_immutable_and_resets_every_counter) {
@@ -188,6 +206,37 @@ TEST_CASE(fixed_pool_rejects_capacities_outside_one_to_sixty_four) {
                     "fixed pool capacity must be between 1 and 64");
   CHECK_THROWS_WITH((swim::core::FixedSlotPool<std::uint64_t>{65}),
                     "fixed pool capacity must be between 1 and 64");
+}
+
+TEST_CASE(fixed_pool_destruction_is_clean_after_all_leases_are_released) {
+  auto pool =
+      std::make_unique<swim::core::FixedSlotPool<std::uint64_t>>(1);
+  {
+    auto lease = pool->try_acquire();
+    CHECK(lease.has_value());
+  }
+  pool.reset();
+}
+
+TEST_CASE(fixed_pool_destruction_with_an_outstanding_lease_terminates) {
+#if defined(__unix__) || defined(__APPLE__)
+  const auto child = fork();
+  CHECK(child >= 0);
+  if (child == 0) {
+    std::set_terminate([] { std::_Exit(87); });
+    auto pool =
+        std::make_unique<swim::core::FixedSlotPool<std::uint64_t>>(1);
+    auto lease = pool->try_acquire();
+    pool.reset();
+    static_cast<void>(lease);
+    std::_Exit(0);
+  }
+
+  int status = 0;
+  CHECK_EQ(waitpid(child, &status, 0), child);
+  CHECK(WIFEXITED(status));
+  CHECK_EQ(WEXITSTATUS(status), 87);
+#endif
 }
 
 TEST_CASE(fixed_pool_exhaustion_reuses_the_released_stable_slot) {

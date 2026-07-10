@@ -14,7 +14,9 @@ inline constexpr std::size_t kMetricsCacheLineBytes = 128;
 
 class FixedLatencyHistogramSnapshot {
  public:
-  std::chrono::milliseconds percentile(double quantile) const noexcept;
+  // Finite quantiles are clamped to [0, 1]. Non-finite values throw
+  // std::invalid_argument.
+  std::chrono::milliseconds percentile(double quantile) const;
   std::uint64_t count() const noexcept;
 
  private:
@@ -34,7 +36,9 @@ class FixedLatencyHistogram {
   static constexpr std::size_t kBucketCount = kMaximumMilliseconds + 1;
 
   void observe(std::chrono::milliseconds latency) noexcept;
-  std::chrono::milliseconds percentile(double quantile) const noexcept;
+  // Finite quantiles are clamped to [0, 1]. Non-finite values throw
+  // std::invalid_argument.
+  std::chrono::milliseconds percentile(double quantile) const;
   FixedLatencyHistogramSnapshot snapshot_and_reset() noexcept;
   std::uint64_t count() const noexcept;
 

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 namespace swim::core {
 
@@ -11,7 +12,10 @@ template <std::size_t Size>
 std::chrono::milliseconds percentile_of(
     const std::array<std::uint64_t, Size>& buckets,
     std::uint64_t count,
-    double quantile) noexcept {
+    double quantile) {
+  if (!std::isfinite(quantile)) {
+    throw std::invalid_argument("histogram quantile must be finite");
+  }
   if (count == 0) {
     return std::chrono::milliseconds{0};
   }
@@ -42,7 +46,7 @@ FixedLatencyHistogramSnapshot::FixedLatencyHistogramSnapshot(
     : buckets_(buckets), count_(count) {}
 
 std::chrono::milliseconds FixedLatencyHistogramSnapshot::percentile(
-    double quantile) const noexcept {
+    double quantile) const {
   return percentile_of(buckets_, count_, quantile);
 }
 
@@ -60,7 +64,7 @@ void FixedLatencyHistogram::observe(
 }
 
 std::chrono::milliseconds FixedLatencyHistogram::percentile(
-    double quantile) const noexcept {
+    double quantile) const {
   return percentile_of(buckets_, count_, quantile);
 }
 

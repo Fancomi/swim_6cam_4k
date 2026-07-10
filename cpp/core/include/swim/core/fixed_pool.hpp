@@ -19,6 +19,10 @@ struct FixedSlotPoolTestAccess;
 template <class T>
 class FixedSlotPool final {
  public:
+  // Lifetime contract: this pool must outlive every Lease, and destruction
+  // must not race any pool operation. Destruction with an owned slot rejects
+  // the contract violation by terminating before the slots or mask are
+  // destroyed, in every build type.
   class Lease final {
    public:
     Lease(const Lease&) = delete;
@@ -64,6 +68,13 @@ class FixedSlotPool final {
       : capacity_(capacity),
         slots_(allocate_slots(capacity)),
         free_mask_(initial_free_mask(capacity)) {}
+
+  ~FixedSlotPool() noexcept {
+    if (free_mask_.load(std::memory_order_acquire) !=
+        initial_free_mask(capacity_)) {
+      std::terminate();
+    }
+  }
 
   FixedSlotPool(const FixedSlotPool&) = delete;
   FixedSlotPool& operator=(const FixedSlotPool&) = delete;
