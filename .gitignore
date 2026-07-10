@@ -1,0 +1,15 @@
+# Local environment and OS metadata
+.DS_Store
+.venv/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Large/generated render artifacts
+outputs/videos/*
+!outputs/videos/.gitkeep
+outputs/logs/*
+!outputs/logs/.gitkeep
+outputs/data/*.fbx
+
