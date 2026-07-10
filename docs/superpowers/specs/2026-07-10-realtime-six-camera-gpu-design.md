@@ -211,11 +211,13 @@ accept a new frame, that output drops the pending composite; it does not block
 decode or render. Rendering also has a fixed in-flight limit enforced by GPU
 completion primitives.
 
-All access-unit buffers, descriptor pools, command-support objects, and output
-surfaces are created
-during startup or warm-up. Production measurements must not perform a
-per-frame heap allocation. Pool exhaustion increments a metric and applies the
-documented drop policy; it never grows the pool implicitly.
+All application-owned access-unit buffers, descriptors, in-flight records, and
+output surfaces come from fixed pools created during startup or warm-up.
+Production measurements must not perform an application-owned per-frame heap
+allocation. Small command and texture-wrapper objects that Metal or
+VideoToolbox requires remain framework-managed and are measured separately.
+Pool exhaustion increments a metric and applies the documented drop policy; it
+never grows the pool implicitly.
 
 ## 8. GPU Data Paths
 
@@ -230,10 +232,11 @@ The same surface can be a Metal render target, a preview texture, and a
 VideoToolbox encoder input. Command-buffer completion handlers retain all six
 input leases and the output lease until GPU work completes.
 
-The local file experiment accepts the six raw H.264 dataset streams. An Annex-B
-parser supplies access units to VideoToolbox. When an elementary stream has no
-usable presentation timestamps, real-time replay assigns timestamps from frame
-index at `30000/1001`; benchmark replay is unpaced.
+The local file experiment accepts the six H.264 MP4 files through AVFoundation.
+`AVAssetReaderTrackOutput` yields compressed sample buffers to the explicit
+VideoToolbox decode lane, preserving source presentation timestamps without a
+CPU pixel conversion. Real-time replay follows those timestamps; benchmark
+replay is unpaced.
 
 ### 8.2 Ubuntu EGL/CUDA
 
@@ -268,7 +271,7 @@ then uploads all static buffers and textures once. A frame uses a single FP16
 accumulation target. Each camera draw performs:
 
 1. NV12-plane sampling;
-2. shader YUV-to-linear-color conversion using the frame color description;
+2. shader YUV-to-target-R'G'B' conversion using the frame color description;
 3. FBX UV deformation and bilinear mirrored sampling;
 4. multiplication by the precomputed normalized feather weight;
 5. additive accumulation into the final content region.
@@ -295,9 +298,9 @@ render rate, preview/encode outputs, stale thresholds, fixed-pool capacities,
 and benchmark duration. Command-line switches can override scalar settings for
 experiments, but the resolved configuration is written into every result.
 
-The initial source type is an H.264 elementary-stream file. The later Ubuntu
-camera source implements the same source contract and produces identical frame
-metadata. No live-source behavior leaks into the renderer.
+The initial source type is an H.264 MP4 file. The later Ubuntu camera source
+implements the same compressed-sample source contract and produces identical
+frame metadata. No live-source behavior leaks into the renderer.
 
 ## 11. Failure Handling
 
@@ -398,7 +401,8 @@ The Metal milestone is accepted when:
   copy;
 - decode and render never wait for another camera, preview, or encoding;
 - per-camera latest-frame-age `p99` is at most two input frame periods;
-- production hot-path per-frame heap allocation count is zero after warm-up;
+- production hot-path application-owned per-frame heap allocation count is zero
+  after warm-up; framework-managed allocation behavior is reported separately;
 - all surface and in-flight counts stay within configured fixed limits;
 - process and GPU memory show no sustained growth or leaked resources;
 - no partial, corrupt, or misidentified frame reaches the renderer;
@@ -416,8 +420,8 @@ real-time requirement; 30 fps is not treated as the performance ceiling.
    mailbox, metrics, and concurrency tests.
 3. Implement Metal rendering with synthetic resident textures and pass the
    still-image golden tests.
-4. Implement Annex-B input and VideoToolbox decode for 1, then 2, 4, and 6
-   streams.
+4. Implement AVFoundation MP4 input and VideoToolbox decode for 1, then 2, 4,
+   and 6 streams.
 5. Add latest-frame real-time replay, preview, hardware encoding, the full
    performance matrix, and the ten-minute soak.
 6. Profile and optimize only measured bottlenecks until the local acceptance
