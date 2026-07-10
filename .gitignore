@@ -1,6 +1,6 @@
 # Local environment and OS metadata
 .DS_Store
-.venv/
+.venv
 .worktrees/
 .superpowers/
 
