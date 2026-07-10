@@ -9,9 +9,9 @@ adapters, renders one six-frame snapshot per absolute cadence tick, and performs
 ordered signal-safe shutdown with a final JSON metrics line.
 
 After the review fix wave, the final uncontended 10-second headless run submitted
-and successfully completed 299 frames. Completion FPS was measured over the exact
+and successfully completed 300 frames. Completion FPS was measured over the exact
 steady-clock interval from the first accepted submit through the last
-successful GPU completion: 29.950 fps. All six sources remained healthy, the
+successful GPU completion: 30.046 fps. All six sources remained healthy, the
 configured pools remained bounded, and decoded pixel host copies remained zero.
 
 ## TDD evidence
@@ -149,16 +149,15 @@ build/macos/swim_realtime --config configs/macos_20260629.conf \
 Review-fix final metrics:
 
 ```json
-{"final":true,"received":1836,"decoded":1836,"published":1836,"overwritten":24,"reused":3,"render_submissions":299,"render_completions":299,"render_drops":6,"render_active_ns":10000000000,"render_first_submit_ns":2716271520728125,"render_last_completion_ns":2716281504189375,"render_completion_interval_ns":9983461250,"render_fps":29.950,"render_inflight_capacity":3,"render_inflight_high_water":3,"render_inflight_pool_misses":1,"render_output_capacity":4,"render_output_high_water":3,"render_output_pool_misses":0,"frame_age_ms_p99":[31,32,33,30,33,33],"pool_exhaustion":1,"decoded_pixel_host_copies":0,"native_texture_wrappers":3672,"native_command_buffers":299,"native_decode_tickets":96,"sources_healthy":6,"output_width":5002,"output_height":2102}
+{"final":true,"received":1824,"decoded":1824,"published":1824,"overwritten":85,"reused":83,"render_submissions":300,"render_completions":300,"render_drops":5,"render_active_ns":10000000000,"render_first_submit_ns":2716370743962375,"render_last_completion_ns":2716380728542458,"render_completion_interval_ns":9984580083,"render_fps":30.046,"render_inflight_capacity":3,"render_inflight_high_water":1,"render_inflight_pool_misses":0,"render_output_capacity":4,"render_output_high_water":1,"render_output_pool_misses":0,"frame_age_ms_p99":[40,40,40,40,41,41],"pool_exhaustion":0,"decoded_pixel_host_copies":0,"native_texture_wrappers":3648,"native_command_buffers":300,"native_decode_tickets":96,"sources_healthy":6,"output_width":5002,"output_height":2102}
 ```
 
 The not-ready drops occurred during decoder startup before the first complete
 six-frame snapshot. They are counted but excluded from the configured active
-interval. All 299 accepted submissions completed successfully. The 96 native
+interval. All 300 accepted submissions completed successfully. The 96 native
 decode tickets equal the fixed six-lane capacity of 16 tickets per lane;
 configured in-flight/output capacities were 3/4, their high-water marks were
-3/3, with one counted in-flight backpressure miss and no output-pool miss. All
-six frame-age p99 values were at most 33 ms.
+1/1, with no pool misses. All six frame-age p99 values were at most 41 ms.
 
 ### Signal shutdown
 
