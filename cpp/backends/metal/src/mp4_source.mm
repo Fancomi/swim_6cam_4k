@@ -97,7 +97,8 @@ class Mp4VideoToolboxSource::Impl final {
        swim::core::LatestFrameMailbox& mailbox,
        swim::core::RuntimeCounters& counters, swim::core::RunMode mode,
        std::chrono::milliseconds run_duration,
-       std::uint32_t ticket_capacity, std::uint32_t surface_capacity)
+       std::uint32_t ticket_capacity, std::uint32_t surface_capacity,
+       swim::core::RunLifecycle* lifecycle)
       : context_(std::move(context)),
         source_(std::move(source)),
         camera_index_(camera_index),
@@ -106,7 +107,8 @@ class Mp4VideoToolboxSource::Impl final {
         mode_(mode),
         run_duration_(run_duration),
         ticket_capacity_(ticket_capacity),
-        surface_capacity_(surface_capacity) {
+        surface_capacity_(surface_capacity),
+        lifecycle_(lifecycle) {
     if (context_ == nullptr || context_->device == nil ||
         context_->texture_cache == nullptr) {
       throw std::invalid_argument("MP4 source requires a valid Metal context");
@@ -249,9 +251,9 @@ class Mp4VideoToolboxSource::Impl final {
   }
 
   bool sleep_interruptibly(std::chrono::milliseconds delay) const noexcept {
-    const auto until =
-        std::min(std::chrono::steady_clock::now() + delay, deadline_);
-    while (!stop_requested_.load(std::memory_order_acquire)) {
+    const auto until = std::min(std::chrono::steady_clock::now() + delay,
+                                effective_deadline());
+    while (!termination_requested(std::chrono::steady_clock::now())) {
       const auto now = std::chrono::steady_clock::now();
       if (now >= until) {
         return true;
@@ -281,7 +283,7 @@ class Mp4VideoToolboxSource::Impl final {
     const auto target = first_wall + std::chrono::duration_cast<
         std::chrono::steady_clock::duration>(
         std::chrono::duration<double>{seconds});
-    while (!stop_requested_.load(std::memory_order_acquire) &&
+    while (!termination_requested(std::chrono::steady_clock::now()) &&
            std::chrono::steady_clock::now() < target) {
       std::this_thread::sleep_until(
           std::min(target, std::chrono::steady_clock::now() +
@@ -311,7 +313,15 @@ class Mp4VideoToolboxSource::Impl final {
                     track_error = error;
                     dispatch_semaphore_signal(tracks_loaded);
                   }];
-      dispatch_semaphore_wait(tracks_loaded, DISPATCH_TIME_FOREVER);
+      while (dispatch_semaphore_wait(
+                 tracks_loaded,
+                 dispatch_time(DISPATCH_TIME_NOW,
+                               10 * static_cast<std::int64_t>(NSEC_PER_MSEC))) !=
+             0) {
+        if (termination_requested(std::chrono::steady_clock::now())) {
+          return ReaderOutcome::stopped_or_duration_reached;
+        }
+      }
       if (track_error != nil) {
         throw LaneFailure{
             LaneFailureKind::recoverable,
@@ -376,11 +386,7 @@ class Mp4VideoToolboxSource::Impl final {
       RetainedVideoFormat submitted_format{initial_format};
       CMTime first_pts = kCMTimeInvalid;
       std::chrono::steady_clock::time_point first_wall{};
-      while (!stop_requested_.load(std::memory_order_acquire)) {
-        if (run_duration_.count() > 0 &&
-            std::chrono::steady_clock::now() >= deadline_) {
-          break;
-        }
+      while (!termination_requested(std::chrono::steady_clock::now())) {
         CMSampleBufferRef sample = [output copyNextSampleBuffer];
         if (sample == nullptr) {
           break;
@@ -457,13 +463,24 @@ class Mp4VideoToolboxSource::Impl final {
         throw_decoder_error(decoder);
       }
       generation_.store(decoder.generation(), std::memory_order_release);
-      if (stop_requested_.load(std::memory_order_acquire) ||
-          (run_duration_.count() > 0 &&
-           std::chrono::steady_clock::now() >= deadline_)) {
+      const auto finished_at = std::chrono::steady_clock::now();
+      if (termination_requested(finished_at)) {
         [reader cancelReading];
         return ReaderOutcome::stopped_or_duration_reached;
       }
       if (reader.status == AVAssetReaderStatusCompleted) {
+        if (lifecycle_ != nullptr) {
+          const auto disposition = lifecycle_->classify_eof(finished_at);
+          if (disposition == swim::core::SourceEofDisposition::normal_after_stop ||
+              disposition ==
+                  swim::core::SourceEofDisposition::normal_after_deadline) {
+            return ReaderOutcome::stopped_or_duration_reached;
+          }
+          lifecycle_->request_stop();
+          throw LaneFailure{
+              LaneFailureKind::fatal,
+              swim::core::source_eof_failure_message(disposition)};
+        }
         if (run_duration_.count() > 0) {
           throw LaneFailure{
               LaneFailureKind::fatal,
@@ -488,8 +505,7 @@ class Mp4VideoToolboxSource::Impl final {
                                   surface_capacity_, mailbox_, counters_);
       try {
         swim::core::CameraHealthTracker health;
-        while (!stop_requested_.load(std::memory_order_acquire) &&
-               std::chrono::steady_clock::now() < deadline_) {
+        while (!termination_requested(std::chrono::steady_clock::now())) {
           try {
             const auto outcome = run_reader_once(decoder, health);
             if (outcome == ReaderOutcome::normal_eof) {
@@ -522,6 +538,17 @@ class Mp4VideoToolboxSource::Impl final {
     running_.store(false, std::memory_order_release);
   }
 
+  std::chrono::steady_clock::time_point effective_deadline() const noexcept {
+    return lifecycle_ == nullptr ? deadline_ : lifecycle_->deadline();
+  }
+
+  bool termination_requested(
+      std::chrono::steady_clock::time_point now) const noexcept {
+    return stop_requested_.load(std::memory_order_acquire) ||
+           (lifecycle_ != nullptr ? lifecycle_->should_stop(now)
+                                  : now >= deadline_);
+  }
+
   std::shared_ptr<MetalContext> context_;
   swim::core::SourceConfig source_;
   std::uint32_t camera_index_{};
@@ -531,6 +558,7 @@ class Mp4VideoToolboxSource::Impl final {
   std::chrono::milliseconds run_duration_;
   std::uint32_t ticket_capacity_{};
   std::uint32_t surface_capacity_{};
+  swim::core::RunLifecycle* lifecycle_{};
   std::chrono::steady_clock::time_point deadline_{};
   mutable std::mutex thread_mutex_;
   std::thread worker_;
@@ -551,10 +579,11 @@ Mp4VideoToolboxSource::Mp4VideoToolboxSource(
     std::uint32_t camera_index, swim::core::LatestFrameMailbox& mailbox,
     swim::core::RuntimeCounters& counters, swim::core::RunMode mode,
     std::chrono::milliseconds run_duration, std::uint32_t ticket_capacity,
-    std::uint32_t surface_capacity)
+    std::uint32_t surface_capacity, swim::core::RunLifecycle* lifecycle)
     : impl_(std::make_unique<Impl>(
           std::move(context), std::move(source), camera_index, mailbox,
-          counters, mode, run_duration, ticket_capacity, surface_capacity)) {}
+          counters, mode, run_duration, ticket_capacity, surface_capacity,
+          lifecycle)) {}
 
 Mp4VideoToolboxSource::~Mp4VideoToolboxSource() = default;
 

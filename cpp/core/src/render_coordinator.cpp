@@ -14,11 +14,13 @@ namespace swim::core {
 RenderCoordinator::RenderCoordinator(Mailboxes& mailboxes,
                                      IRenderer& renderer,
                                      const AppConfig& config,
-                                     RuntimeCounters& metrics) noexcept
+                                     RuntimeCounters& metrics,
+                                     RunLifecycle& lifecycle) noexcept
     : mailboxes_(mailboxes),
       renderer_(renderer),
       config_(config),
-      metrics_(metrics) {}
+      metrics_(metrics),
+      lifecycle_(lifecycle) {}
 
 std::chrono::nanoseconds RenderCoordinator::cadence_offset(
     std::uint64_t tick_index, std::uint32_t fps_num,
@@ -110,6 +112,7 @@ RenderSubmitResult RenderCoordinator::tick(Clock::time_point sampled_at) {
   switch (result) {
     case RenderSubmitResult::accepted:
       metrics_.render_submissions.fetch_add(1, std::memory_order_relaxed);
+      static_cast<void>(lifecycle_.mark_active(Clock::now()));
       return result;
     case RenderSubmitResult::not_ready:
     case RenderSubmitResult::backpressure:
@@ -141,17 +144,17 @@ void RenderCoordinator::run(std::stop_token token) {
   std::mutex stop_mutex;
   std::uint64_t tick_index = 0;
 
-  while (!token.stop_requested() && Clock::now() < finish_at &&
+  while (!token.stop_requested() && !lifecycle_.stop_requested() &&
+         Clock::now() < finish_at &&
          (active_started != Clock::time_point{} ||
           Clock::now() < warmup_finish)) {
-    const auto result = tick(Clock::now());
+    const auto sampled_at = Clock::now();
+    const auto result = tick(sampled_at);
     const bool accepted = result == RenderSubmitResult::accepted;
     if (accepted && active_started == Clock::time_point{}) {
-      active_started = Clock::now();
+      active_started = lifecycle_.active_started_at();
       cadence_epoch = active_started;
-      if (config_.duration.count() > 0) {
-        finish_at = active_started + config_.duration;
-      }
+      finish_at = lifecycle_.deadline();
       tick_index = 0;
     }
     if (config_.mode == RunMode::benchmark) {

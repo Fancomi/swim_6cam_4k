@@ -95,6 +95,8 @@ struct RuntimeCounters final {
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_active_ns{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_first_submit_ns{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_last_completion_ns{};
+  // One runtime renderer writes these startup/final gauges. They are exchanged
+  // only by the single final snapshot after renderer drain.
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_inflight_capacity{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_inflight_high_water{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_inflight_pool_misses{};

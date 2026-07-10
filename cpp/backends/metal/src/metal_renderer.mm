@@ -1,5 +1,6 @@
 #include <swim/metal/metal_renderer.hpp>
 #include <swim/metal/videotoolbox_decoder.hpp>
+#include <swim/core/render_completion_gate.hpp>
 
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
@@ -339,8 +340,11 @@ std::uint64_t seconds_to_nanoseconds(double seconds) noexcept {
 
 }  // namespace
 
-class MetalStitchRenderer::Impl final {
+class MetalStitchRenderer::Impl final
+    : public std::enable_shared_from_this<MetalStitchRenderer::Impl> {
  public:
+  friend class MetalStitchRenderer;
+  static constexpr auto kDrainTimeout = std::chrono::seconds{5};
   struct CameraResources final {
     id<MTLBuffer> vertices = nil;
     id<MTLBuffer> indices = nil;
@@ -417,7 +421,7 @@ class MetalStitchRenderer::Impl final {
     allocate_accumulation_textures();
   }
 
-  ~Impl() { drain(); }
+  ~Impl() { drain_noexcept(); }
 
   bool submit(const std::array<MetalFrameView, 6>& frames,
               const std::array<swim::core::FrameLease, 6>* leases,
@@ -434,6 +438,9 @@ class MetalStitchRenderer::Impl final {
         return false;
       }
     }
+    if (!completion_gate_.try_accept()) {
+      return false;
+    }
 
     InFlightRecord* record = nullptr;
     for (std::uint32_t index = 0; index < inflight_count_; ++index) {
@@ -447,6 +454,7 @@ class MetalStitchRenderer::Impl final {
     }
     if (record == nullptr) {
       record_pool_miss(true);
+      completion_gate_.complete();
       return false;
     }
     const auto in_use =
@@ -461,6 +469,7 @@ class MetalStitchRenderer::Impl final {
       inflight_in_use_.fetch_sub(1, std::memory_order_relaxed);
       record->busy.store(false, std::memory_order_release);
       record_pool_miss(false);
+      completion_gate_.complete();
       return false;
     }
     if (metrics_ != nullptr) {
@@ -490,7 +499,7 @@ class MetalStitchRenderer::Impl final {
       result.diagnostic_command_buffer = command;
 
       auto* completed_record = record;
-      auto* owner = this;
+      auto owner = shared_from_this();
       [command addCompletedHandler:^(id<MTLCommandBuffer> completed) {
         if (completed.status != MTLCommandBufferStatusCompleted) {
           owner->record_fatal(
@@ -503,6 +512,7 @@ class MetalStitchRenderer::Impl final {
         completed_record->output = {};
         owner->inflight_in_use_.fetch_sub(1, std::memory_order_relaxed);
         completed_record->busy.store(false, std::memory_order_release);
+        owner->completion_gate_.complete();
       }];
       record_first_submit();
       [command commit];
@@ -516,6 +526,7 @@ class MetalStitchRenderer::Impl final {
       record->busy.store(false, std::memory_order_release);
       result.output = {};
       result.diagnostic_command_buffer = nil;
+      completion_gate_.complete();
       return false;
     } catch (...) {
       record_fatal("unknown Metal command submission failure");
@@ -526,6 +537,7 @@ class MetalStitchRenderer::Impl final {
       record->busy.store(false, std::memory_order_release);
       result.output = {};
       result.diagnostic_command_buffer = nil;
+      completion_gate_.complete();
       return false;
     }
   }
@@ -580,22 +592,18 @@ class MetalStitchRenderer::Impl final {
   }
 
   void drain() {
-    // Completion release-stores busy only after all retained resources are
-    // cleared, so drain needs no cross-thread ARC command-buffer field.
-    for (;;) {
-      bool pending = false;
-      for (std::uint32_t index = 0; index < inflight_count_; ++index) {
-        auto& record = in_flight_[index];
-        if (!record.busy.load(std::memory_order_acquire)) {
-          continue;
-        }
-        pending = true;
-      }
-      if (!pending) {
-        return;
-      }
-      std::this_thread::yield();
+    if (drain_timed_out_.load(std::memory_order_acquire)) {
+      flush_completion_metrics();
+      throw std::runtime_error("timed out waiting for Metal render completion");
     }
+    if (!completion_gate_.close_and_wait_until(
+            std::chrono::steady_clock::now() + kDrainTimeout)) {
+      drain_timed_out_.store(true, std::memory_order_release);
+      record_fatal("timed out waiting for Metal render completion");
+      flush_completion_metrics();
+      throw std::runtime_error("timed out waiting for Metal render completion");
+    }
+    flush_completion_metrics();
   }
 
  private:
@@ -632,26 +640,43 @@ class MetalStitchRenderer::Impl final {
   }
 
   void record_first_submit() noexcept {
-    if (metrics_ == nullptr) {
-      return;
-    }
     auto expected = std::uint64_t{0};
-    metrics_->render_first_submit_ns.compare_exchange_strong(
+    first_submit_ns_.compare_exchange_strong(
         expected, steady_nanoseconds(), std::memory_order_relaxed,
         std::memory_order_relaxed);
   }
 
   void record_completion() noexcept {
-    if (metrics_ != nullptr) {
-      metrics_->render_completions.fetch_add(1, std::memory_order_relaxed);
-      const auto completed_at = steady_nanoseconds();
-      auto last = metrics_->render_last_completion_ns.load(
-          std::memory_order_relaxed);
-      while (completed_at > last &&
-             !metrics_->render_last_completion_ns.compare_exchange_weak(
-                 last, completed_at, std::memory_order_relaxed,
-                 std::memory_order_relaxed)) {
-      }
+    completed_count_.fetch_add(1, std::memory_order_relaxed);
+    swim::core::record_atomic_max(last_completion_ns_, steady_nanoseconds());
+  }
+
+  void flush_completion_metrics() noexcept {
+    if (completion_metrics_flushed_.exchange(true,
+                                             std::memory_order_acq_rel)) {
+      return;
+    }
+    auto* metrics = std::exchange(metrics_, nullptr);
+    if (metrics == nullptr) {
+      return;
+    }
+    metrics->render_completions.fetch_add(
+        completed_count_.load(std::memory_order_relaxed),
+        std::memory_order_relaxed);
+    auto expected = std::uint64_t{0};
+    metrics->render_first_submit_ns.compare_exchange_strong(
+        expected, first_submit_ns_.load(std::memory_order_relaxed),
+        std::memory_order_relaxed, std::memory_order_relaxed);
+    swim::core::record_atomic_max(
+        metrics->render_last_completion_ns,
+        last_completion_ns_.load(std::memory_order_relaxed));
+  }
+
+  void drain_noexcept() noexcept {
+    try {
+      drain();
+    } catch (...) {
+      flush_completion_metrics();
     }
   }
 
@@ -888,6 +913,12 @@ class MetalStitchRenderer::Impl final {
   swim::core::RuntimeCounters* metrics_;
   std::atomic_uint32_t inflight_in_use_{0};
   std::atomic_uint32_t inflight_high_water_{0};
+  swim::core::RenderCompletionGate completion_gate_;
+  std::atomic_uint64_t completed_count_{0};
+  std::atomic_uint64_t first_submit_ns_{0};
+  std::atomic_uint64_t last_completion_ns_{0};
+  std::atomic_bool completion_metrics_flushed_{false};
+  std::atomic_bool drain_timed_out_{false};
   std::atomic_bool fatal_error_{false};
   mutable std::mutex fatal_error_mutex_;
   std::string fatal_error_message_;
@@ -898,10 +929,17 @@ MetalStitchRenderer::MetalStitchRenderer(
     const swim::core::RuntimeAsset& asset,
     const swim::core::AppConfig& config,
     swim::core::RuntimeCounters* metrics)
-    : impl_(std::make_unique<Impl>(std::move(context), asset, config,
+    : impl_(std::make_shared<Impl>(std::move(context), asset, config,
                                    metrics)) {}
 
-MetalStitchRenderer::~MetalStitchRenderer() = default;
+MetalStitchRenderer::~MetalStitchRenderer() {
+  if (impl_ != nullptr) {
+    try {
+      impl_->drain();
+    } catch (...) {
+    }
+  }
+}
 
 bool MetalStitchRenderer::submit(
     const std::array<MetalFrameView, 6>& frames,

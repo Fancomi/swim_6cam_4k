@@ -4,6 +4,8 @@
 #include <swim/core/metrics.hpp>
 #include <swim/core/render_coordinator.hpp>
 #include <swim/core/runtime_validation.hpp>
+#include <swim/core/run_lifecycle.hpp>
+#include <swim/core/runtime_start.hpp>
 
 #if defined(SWIM_HAS_METAL_BACKEND)
 #include <swim/metal/metal_backend.hpp>
@@ -199,21 +201,6 @@ std::array<std::unique_ptr<swim::core::ISource>, 6> make_six_sources(
   return sources;
 }
 
-void start_sources(
-    std::array<std::unique_ptr<swim::core::ISource>, 6>& sources,
-    std::array<swim::core::LatestFrameMailbox, 6>& mailboxes) {
-  try {
-    for (std::size_t camera = 0; camera < sources.size(); ++camera) {
-      sources[camera]->start(mailboxes[camera]);
-    }
-  } catch (...) {
-    for (auto& source : sources) {
-      source->stop();
-    }
-    throw;
-  }
-}
-
 void stop_sources(
     std::array<std::unique_ptr<swim::core::ISource>, 6>& sources) noexcept {
   for (auto& source : sources) {
@@ -221,22 +208,70 @@ void stop_sources(
   }
 }
 
+// Installed before any backend component exists. It owns no native pointers,
+// so setup failures at every phase can still emit exactly one final line.
+class FinalMetricsGuard final {
+ public:
+  FinalMetricsGuard(const swim::core::AppConfig& config,
+                    const swim::core::RuntimeAsset& asset,
+                    swim::core::RuntimeCounters& metrics,
+                    std::chrono::steady_clock::time_point started_at) noexcept
+      : config_(config),
+        asset_(asset),
+        metrics_(metrics),
+        started_at_(started_at) {}
+
+  ~FinalMetricsGuard() noexcept {
+    if (emitted_) {
+      return;
+    }
+    try {
+      emit(healthy_sources_);
+    } catch (const std::exception& error) {
+      std::cerr << "final metrics error: " << error.what() << '\n';
+    } catch (...) {
+      std::cerr << "final metrics error: unknown failure\n";
+    }
+  }
+
+  void emit(std::size_t healthy_sources) {
+    if (emitted_) {
+      return;
+    }
+    healthy_sources_ = healthy_sources;
+    const auto elapsed = std::chrono::steady_clock::now() - started_at_;
+    const auto snapshot = metrics_.snapshot_and_reset();
+    emitted_ = true;
+    write_final_metrics(config_, snapshot, elapsed, healthy_sources_,
+                        asset_.encoded_width, asset_.encoded_height);
+  }
+
+ private:
+  const swim::core::AppConfig& config_;
+  const swim::core::RuntimeAsset& asset_;
+  swim::core::RuntimeCounters& metrics_;
+  std::chrono::steady_clock::time_point started_at_;
+  std::size_t healthy_sources_{};
+  bool emitted_{};
+};
+
 class RuntimeFinalizer final {
  public:
   RuntimeFinalizer(
       const swim::core::AppConfig& config,
-      const swim::core::RuntimeAsset& asset,
-      swim::core::RuntimeCounters& metrics, swim::core::IBackend& backend,
+      swim::core::IBackend& backend,
       swim::core::IRenderer& renderer,
       std::array<std::unique_ptr<swim::core::ISource>, 6>& sources,
-      std::chrono::steady_clock::time_point started_at) noexcept
+      swim::core::RunLifecycle& lifecycle,
+      swim::core::RuntimeStartState& start_state,
+      FinalMetricsGuard& final_metrics) noexcept
       : config_(config),
-        asset_(asset),
-        metrics_(metrics),
         backend_(backend),
         renderer_(renderer),
         sources_(sources),
-        started_at_(started_at) {}
+        lifecycle_(lifecycle),
+        start_state_(start_state),
+        final_metrics_(final_metrics) {}
 
   ~RuntimeFinalizer() noexcept {
     if (finalized_) {
@@ -251,13 +286,12 @@ class RuntimeFinalizer final {
     }
   }
 
-  void mark_sources_started() noexcept { sources_started_ = true; }
-
   void finalize() {
     if (finalized_) {
       return;
     }
     backend_.stop_main_loop();
+    lifecycle_.request_stop();
     render_thread.request_stop();
     if (render_thread.joinable()) {
       render_thread.join();
@@ -266,10 +300,7 @@ class RuntimeFinalizer final {
     if (signal_monitor.joinable()) {
       signal_monitor.join();
     }
-    if (sources_started_) {
-      stop_sources(sources_);
-      sources_started_ = false;
-    }
+    stop_sources(sources_);
 
     std::exception_ptr cleanup_error = render_error;
     try {
@@ -288,20 +319,22 @@ class RuntimeFinalizer final {
           std::make_exception_ptr(std::runtime_error(std::move(message)));
     }
 
-    std::size_t healthy_sources = 0;
+    std::array<bool, 6> failed{};
+    bool started_source_failed = false;
     for (std::size_t camera = 0; camera < sources_.size(); ++camera) {
-      if (!sources_[camera]->failed()) {
-        ++healthy_sources;
-      } else {
+      failed[camera] = sources_[camera]->failed();
+      if (start_state_.started(camera) && failed[camera]) {
+        started_source_failed = true;
         std::cerr << "source " << config_.sources[camera].camera_id
                   << " failed: " << sources_[camera]->last_error() << '\n';
       }
     }
-    const auto elapsed = std::chrono::steady_clock::now() - started_at_;
-    const auto snapshot = metrics_.snapshot_and_reset();
+    if (started_source_failed && !cleanup_error) {
+      cleanup_error = std::make_exception_ptr(
+          std::runtime_error("one or more source lanes failed"));
+    }
     finalized_ = true;
-    write_final_metrics(config_, snapshot, elapsed, healthy_sources,
-                        asset_.encoded_width, asset_.encoded_height);
+    final_metrics_.emit(start_state_.healthy_count(failed));
     if (cleanup_error) {
       std::rethrow_exception(cleanup_error);
     }
@@ -313,66 +346,73 @@ class RuntimeFinalizer final {
 
  private:
   const swim::core::AppConfig& config_;
-  const swim::core::RuntimeAsset& asset_;
-  swim::core::RuntimeCounters& metrics_;
   swim::core::IBackend& backend_;
   swim::core::IRenderer& renderer_;
   std::array<std::unique_ptr<swim::core::ISource>, 6>& sources_;
-  std::chrono::steady_clock::time_point started_at_;
-  bool sources_started_{};
+  swim::core::RunLifecycle& lifecycle_;
+  swim::core::RuntimeStartState& start_state_;
+  FinalMetricsGuard& final_metrics_;
   bool finalized_{};
 };
 
 int run_runtime(const swim::core::AppConfig& config,
                 const swim::core::RuntimeAsset& asset) {
-#if defined(SWIM_HAS_METAL_BACKEND)
-  swim::metal::register_metal_backend();
-#endif
   swim::core::RuntimeCounters metrics;
-  auto backend = swim::core::BackendRegistry::instance().create(config.backend);
-  backend->bind_metrics(metrics);
-  auto renderer = backend->make_renderer(asset, config);
-  // Mailboxes precede publishers so reverse destruction can never destroy a
-  // mailbox while a source object still owns its address.
-  std::array<swim::core::LatestFrameMailbox, 6> mailboxes;
-  auto sources = make_six_sources(*backend, config);
+  swim::core::RunLifecycle lifecycle{config.duration};
+  swim::core::RuntimeStartState start_state;
   const auto started_at = std::chrono::steady_clock::now();
-  RuntimeFinalizer finalizer{config, asset, metrics, *backend, *renderer,
-                             sources, started_at};
-  start_sources(sources, mailboxes);
-  finalizer.mark_sources_started();
-
-  finalizer.render_thread = std::jthread([&](std::stop_token token) {
-    try {
-      swim::core::RenderCoordinator coordinator{mailboxes, *renderer, config,
-                                                 metrics};
-      coordinator.run(token);
-    } catch (...) {
-      finalizer.render_error = std::current_exception();
-    }
-    backend->stop_main_loop();
-  });
-
-  finalizer.signal_monitor = std::jthread([&](std::stop_token token) {
-    while (!token.stop_requested()) {
-      if (signal_requested != 0) {
-        finalizer.render_thread.request_stop();
-        backend->stop_main_loop();
-        return;
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds{10});
-    }
-  });
-
+  FinalMetricsGuard final_metrics{config, asset, metrics, started_at};
   try {
+#if defined(SWIM_HAS_METAL_BACKEND)
+    swim::metal::register_metal_backend();
+#endif
+    auto backend =
+        swim::core::BackendRegistry::instance().create(config.backend);
+    backend->bind_metrics(metrics);
+    backend->bind_lifecycle(lifecycle);
+    auto renderer = backend->make_renderer(asset, config);
+    // Mailboxes precede publishers so reverse destruction can never destroy a
+    // mailbox while a source object still owns its address.
+    std::array<swim::core::LatestFrameMailbox, 6> mailboxes;
+    auto sources = make_six_sources(*backend, config);
+    RuntimeFinalizer finalizer{config, *backend, *renderer, sources,
+                               lifecycle, start_state, final_metrics};
+
+    swim::core::start_sources_recorded(sources, mailboxes, start_state);
+
+    finalizer.render_thread = std::jthread([&](std::stop_token token) {
+      try {
+        swim::core::RenderCoordinator coordinator{
+            mailboxes, *renderer, config, metrics, lifecycle};
+        coordinator.run(token);
+      } catch (...) {
+        finalizer.render_error = std::current_exception();
+      }
+      backend->stop_main_loop();
+    });
+
+    finalizer.signal_monitor = std::jthread([&](std::stop_token token) {
+      while (!token.stop_requested()) {
+        if (signal_requested != 0) {
+          lifecycle.request_stop();
+          finalizer.render_thread.request_stop();
+          backend->stop_main_loop();
+          return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+      }
+    });
+
     backend->run_main_loop(finalizer.render_thread.get_stop_token());
     finalizer.finalize();
   } catch (...) {
     const auto primary_error = std::current_exception();
     try {
-      finalizer.finalize();
+      final_metrics.emit(start_state.started_count());
     } catch (const std::exception& cleanup_error) {
       std::cerr << "runtime cleanup error: " << cleanup_error.what() << '\n';
+    } catch (...) {
+      std::cerr << "runtime cleanup error: unknown failure\n";
     }
     std::rethrow_exception(primary_error);
   }

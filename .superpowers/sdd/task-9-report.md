@@ -8,12 +8,11 @@ shared Metal context for rendering and all VideoToolbox lanes, starts six source
 adapters, renders one six-frame snapshot per absolute cadence tick, and performs
 ordered signal-safe shutdown with a final JSON metrics line.
 
-After the review fix wave, the final 10-second headless run submitted and
-successfully completed 300 frames. Completion FPS was measured over the exact
+After the review fix wave, the final uncontended 10-second headless run submitted
+and successfully completed 299 frames. Completion FPS was measured over the exact
 steady-clock interval from the first accepted submit through the last
-successful GPU completion: 30.050 fps. All six sources remained healthy, the
-configured pools remained bounded without exhaustion, and decoded pixel host
-copies remained zero.
+successful GPU completion: 29.950 fps. All six sources remained healthy, the
+configured pools remained bounded, and decoded pixel host copies remained zero.
 
 ## TDD evidence
 
@@ -80,6 +79,23 @@ The coordinator tests now cover:
   renderer, snapshots render-thread-only age histograms, writes final metrics,
   and then rethrows the original failure. Native sources always receive zero
   lane-local duration, leaving the global render interval/signal as stop owner.
+- A process-wide `RunLifecycle` now owns activation, the finite deadline, and
+  explicit stop. The coordinator activates it only after the first accepted
+  submit; all MP4 lanes classify EOF against that same state. EOF before
+  activation, before the deadline, or in an unbounded run before explicit stop
+  is fatal and requests global stop. EOF at/after the deadline or after stop is
+  normal. Track loading polls this lifecycle every 10 ms rather than waiting on
+  an unbounded semaphore.
+- A pointer-free final-metrics guard is installed immediately after runtime
+  counters, before backend lookup or native construction. It emits exactly one
+  final JSON line on backend, renderer, source-construction, source-start, and
+  running failures. Per-lane start state is marked only after `start()` returns,
+  and health includes only successfully started, nonfailed lanes.
+- Metal drain is terminal and bounded to five seconds. A mutex/CV completion
+  gate atomically closes against new submissions, while completion blocks hold
+  `shared_ptr<Impl>` so late callbacks cannot access freed renderer pools or
+  context. Callback-updated completion timestamps/counts remain Impl-owned and
+  are flushed once during terminal drain, before external metrics can die.
 
 ## Verification
 
@@ -97,7 +113,9 @@ render coordinator and metrics snapshot/reset contracts.
 ctest --test-dir build/macos --output-on-failure
 ```
 
-Result: 7/7 tests passed.
+Result: 8/8 tests passed. The added runtime setup test executes an unknown
+backend failure and requires exactly one final JSON line with
+`sources_healthy=0`.
 
 ### Metal golden regression
 
@@ -131,16 +149,16 @@ build/macos/swim_realtime --config configs/macos_20260629.conf \
 Review-fix final metrics:
 
 ```json
-{"final":true,"received":1851,"decoded":1851,"published":1851,"overwritten":16,"reused":2,"render_submissions":300,"render_completions":300,"render_drops":9,"render_active_ns":10000000000,"render_first_submit_ns":2714816614147166,"render_last_completion_ns":2714826597606833,"render_completion_interval_ns":9983459667,"render_fps":30.050,"render_inflight_capacity":3,"render_inflight_high_water":1,"render_inflight_pool_misses":0,"render_output_capacity":4,"render_output_high_water":1,"render_output_pool_misses":0,"frame_age_ms_p99":[16,29,30,29,30,27],"pool_exhaustion":0,"decoded_pixel_host_copies":0,"native_texture_wrappers":3702,"native_command_buffers":300,"native_decode_tickets":96,"sources_healthy":6,"output_width":5002,"output_height":2102}
+{"final":true,"received":1836,"decoded":1836,"published":1836,"overwritten":24,"reused":3,"render_submissions":299,"render_completions":299,"render_drops":6,"render_active_ns":10000000000,"render_first_submit_ns":2716271520728125,"render_last_completion_ns":2716281504189375,"render_completion_interval_ns":9983461250,"render_fps":29.950,"render_inflight_capacity":3,"render_inflight_high_water":3,"render_inflight_pool_misses":1,"render_output_capacity":4,"render_output_high_water":3,"render_output_pool_misses":0,"frame_age_ms_p99":[31,32,33,30,33,33],"pool_exhaustion":1,"decoded_pixel_host_copies":0,"native_texture_wrappers":3672,"native_command_buffers":299,"native_decode_tickets":96,"sources_healthy":6,"output_width":5002,"output_height":2102}
 ```
 
-The nine not-ready drops occurred during decoder startup before the first complete
+The not-ready drops occurred during decoder startup before the first complete
 six-frame snapshot. They are counted but excluded from the configured active
-interval. All 300 accepted submissions completed successfully. The 96 native
+interval. All 299 accepted submissions completed successfully. The 96 native
 decode tickets equal the fixed six-lane capacity of 16 tickets per lane;
 configured in-flight/output capacities were 3/4, their high-water marks were
-1/1, both miss counts were zero, and all six frame-age p99 values were at most
-30 ms.
+3/3, with one counted in-flight backpressure miss and no output-pool miss. All
+six frame-age p99 values were at most 33 ms.
 
 ### Signal shutdown
 

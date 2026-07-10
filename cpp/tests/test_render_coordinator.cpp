@@ -2,6 +2,7 @@
 
 #include <swim/core/backend.hpp>
 #include <swim/core/render_coordinator.hpp>
+#include <swim/core/run_lifecycle.hpp>
 
 #include <array>
 #include <atomic>
@@ -9,6 +10,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -74,8 +76,11 @@ class FakeRenderer final : public swim::core::IRenderer {
 };
 
 struct CoordinatorFixture {
-  explicit CoordinatorFixture(FakeRenderer& renderer)
-      : coordinator(mailboxes, renderer, config, metrics) {}
+  explicit CoordinatorFixture(FakeRenderer& renderer,
+                              swim::core::AppConfig initial_config = {})
+      : config(std::move(initial_config)),
+        lifecycle(config.duration),
+        coordinator(mailboxes, renderer, config, metrics, lifecycle) {}
 
   void publish(std::uint32_t camera, std::uint64_t sequence,
                std::chrono::steady_clock::time_point arrived_at) {
@@ -92,6 +97,7 @@ struct CoordinatorFixture {
   std::array<swim::core::LatestFrameMailbox, 6> mailboxes;
   swim::core::AppConfig config;
   swim::core::RuntimeCounters metrics;
+  swim::core::RunLifecycle lifecycle;
   swim::core::RenderCoordinator coordinator;
 };
 
@@ -183,10 +189,11 @@ TEST_CASE(coordinator_counts_real_sequence_gap_after_replacement) {
 TEST_CASE(coordinator_finite_duration_starts_at_first_accepted_submit) {
   FakeRenderer renderer;
   renderer.reject_first = 3;
-  CoordinatorFixture fixture{renderer};
-  fixture.config.fps_num = 100;
-  fixture.config.fps_den = 1;
-  fixture.config.duration = 1s;
+  swim::core::AppConfig config;
+  config.fps_num = 100;
+  config.fps_den = 1;
+  config.duration = 1s;
+  CoordinatorFixture fixture{renderer, std::move(config)};
   fixture.coordinator.run({});
 
   CHECK(renderer.snapshots.size() >= 103u);
@@ -199,9 +206,10 @@ TEST_CASE(coordinator_finite_duration_starts_at_first_accepted_submit) {
 
 TEST_CASE(coordinator_zero_duration_runs_until_stop_is_requested) {
   FakeRenderer renderer;
-  CoordinatorFixture fixture{renderer};
-  fixture.config.mode = swim::core::RunMode::benchmark;
-  fixture.config.duration = 0s;
+  swim::core::AppConfig config;
+  config.mode = swim::core::RunMode::benchmark;
+  config.duration = 0s;
+  CoordinatorFixture fixture{renderer, std::move(config)};
   std::jthread worker([&](std::stop_token token) {
     fixture.coordinator.run(token);
   });
@@ -220,4 +228,24 @@ TEST_CASE(coordinator_uses_exact_integer_rational_cadence) {
            66'733'333ns);
   CHECK_EQ(swim::core::RenderCoordinator::cadence_offset(3, 30'000, 1'001),
            100'100'000ns);
+  CHECK_EQ(swim::core::RenderCoordinator::cadence_offset(30'000, 30'000,
+                                                         1'001),
+           1'001s);
+}
+
+TEST_CASE(coordinator_first_accepted_submit_activates_global_lifecycle) {
+  const auto t0 = std::chrono::steady_clock::now();
+  FakeRenderer renderer;
+  renderer.reject_first = 1;
+  CoordinatorFixture fixture{renderer};
+  fixture.publish_all(1, t0);
+  CHECK_EQ(fixture.coordinator.tick(t0),
+           swim::core::RenderSubmitResult::backpressure);
+  CHECK(!fixture.lifecycle.active());
+  CHECK_EQ(fixture.coordinator.tick(t0 + 1ms),
+           swim::core::RenderSubmitResult::accepted);
+  CHECK(fixture.lifecycle.active());
+  CHECK(fixture.lifecycle.active_started_at() >= t0);
+  CHECK_EQ(fixture.lifecycle.deadline(),
+           fixture.lifecycle.active_started_at() + fixture.config.duration);
 }

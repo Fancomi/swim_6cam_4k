@@ -1,6 +1,7 @@
 #include "test_support.hpp"
 
 #include <swim/core/backend.hpp>
+#include <swim/core/runtime_start.hpp>
 
 #include <atomic>
 #include <condition_variable>
@@ -23,6 +24,23 @@ class NullSource final : public swim::core::ISource {
 
  private:
   swim::core::LatestFrameMailbox* output_{};
+};
+
+class ThrowingStartSource final : public swim::core::ISource {
+ public:
+  explicit ThrowingStartSource(bool throws) : throws_(throws) {}
+  void start(swim::core::LatestFrameMailbox&) override {
+    if (throws_) {
+      throw std::runtime_error("injected source start failure");
+    }
+    started_ = true;
+  }
+  void stop() noexcept override { stopped_ = true; }
+  bool started_{};
+  bool stopped_{};
+
+ private:
+  bool throws_{};
 };
 
 class NullRenderer final : public swim::core::IRenderer {
@@ -145,4 +163,23 @@ TEST_CASE(registry_rejects_duplicate_names_and_null_factories) {
 TEST_CASE(global_backend_registry_is_stable) {
   CHECK(&swim::core::BackendRegistry::instance() ==
         &swim::core::BackendRegistry::instance());
+}
+
+TEST_CASE(recorded_source_start_stops_all_and_excludes_throwing_lane) {
+  std::array<std::unique_ptr<swim::core::ISource>, 6> sources;
+  std::array<ThrowingStartSource*, 6> views{};
+  for (std::size_t camera = 0; camera < sources.size(); ++camera) {
+    auto source = std::make_unique<ThrowingStartSource>(camera == 2);
+    views[camera] = source.get();
+    sources[camera] = std::move(source);
+  }
+  std::array<swim::core::LatestFrameMailbox, 6> mailboxes;
+  swim::core::RuntimeStartState state;
+  CHECK_THROWS_WITH(
+      swim::core::start_sources_recorded(sources, mailboxes, state),
+      "injected source start failure");
+  CHECK_EQ(state.started_count(), 2u);
+  for (const auto* source : views) {
+    CHECK(source->stopped_);
+  }
 }

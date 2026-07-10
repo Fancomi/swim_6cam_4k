@@ -52,6 +52,7 @@ add_executable(swim_core_tests
   cpp/tests/test_config.cpp
   cpp/tests/test_frame_mailbox.cpp
   cpp/tests/test_render_coordinator.cpp
+  cpp/tests/test_run_lifecycle.cpp
   cpp/tests/test_metrics.cpp)
 target_link_libraries(swim_core_tests PRIVATE swim_core)
 target_compile_definitions(swim_core_tests PRIVATE
@@ -91,6 +92,13 @@ add_swim_cli_error_test(swim_cli_requires_config requires_config)
 add_swim_cli_error_test(swim_cli_rejects_missing_config_path missing_path)
 add_swim_cli_error_test(swim_cli_rejects_repeated_config repeated_config)
 add_swim_cli_error_test(swim_cli_rejects_unknown_override unknown_override)
+
+add_test(
+  NAME swim_runtime_setup_failure_writes_final_metrics
+  COMMAND ${CMAKE_COMMAND}
+          "-DSWIM_REALTIME=$<TARGET_FILE:swim_realtime>"
+          "-DREPOSITORY_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/AssertRuntimeFinalMetrics.cmake")
 
 if(APPLE)
   enable_language(OBJCXX)

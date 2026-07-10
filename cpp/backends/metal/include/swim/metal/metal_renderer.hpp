@@ -31,6 +31,7 @@ class MetalStitchRenderer final {
   // Diagnostic-only synchronization. Production submission never waits or
   // reads output pixels on the CPU.
   void wait_for_completion(MetalRenderResult& result);
+  // Terminal shutdown operation. Submissions after drain begins are rejected.
   void drain();
   bool has_fatal_error() const noexcept;
   std::string fatal_error_message() const;
@@ -42,7 +43,7 @@ class MetalStitchRenderer final {
 
  private:
   class Impl;
-  std::unique_ptr<Impl> impl_;
+  std::shared_ptr<Impl> impl_;
 };
 
 }  // namespace swim::metal

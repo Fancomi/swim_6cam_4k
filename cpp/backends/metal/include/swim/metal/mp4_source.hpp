@@ -3,6 +3,7 @@
 #include <swim/core/config.hpp>
 #include <swim/core/latest_frame_mailbox.hpp>
 #include <swim/core/metrics.hpp>
+#include <swim/core/run_lifecycle.hpp>
 #include <swim/metal/metal_frame.hpp>
 #include <swim/metal/videotoolbox_decoder.hpp>
 
@@ -26,7 +27,8 @@ class Mp4VideoToolboxSource final {
       swim::core::RunMode mode = swim::core::RunMode::benchmark,
       std::chrono::milliseconds run_duration = std::chrono::milliseconds{0},
       std::uint32_t ticket_capacity = 16,
-      std::uint32_t surface_capacity = 8);
+      std::uint32_t surface_capacity = 8,
+      swim::core::RunLifecycle* lifecycle = nullptr);
   ~Mp4VideoToolboxSource();
 
   Mp4VideoToolboxSource(const Mp4VideoToolboxSource&) = delete;

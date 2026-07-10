@@ -5,6 +5,7 @@
 #include <swim/core/frame.hpp>
 #include <swim/core/latest_frame_mailbox.hpp>
 #include <swim/core/metrics.hpp>
+#include <swim/core/run_lifecycle.hpp>
 
 #include <array>
 #include <chrono>
@@ -59,6 +60,7 @@ class IBackend {
   virtual std::unique_ptr<IRenderer> make_renderer(
       const RuntimeAsset& asset, const AppConfig& config) = 0;
   virtual void bind_metrics(RuntimeCounters&) noexcept {}
+  virtual void bind_lifecycle(RunLifecycle&) noexcept {}
   virtual void run_main_loop(std::stop_token token) = 0;
   virtual void stop_main_loop() noexcept = 0;
 };

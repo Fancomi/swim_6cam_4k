@@ -153,18 +153,20 @@ class MetalSourceAdapter final : public swim::core::ISource {
                      swim::core::SourceConfig source,
                      std::uint32_t camera_index,
                      const swim::core::AppConfig& config,
-                     swim::core::RuntimeCounters& metrics)
+                     swim::core::RuntimeCounters& metrics,
+                     swim::core::RunLifecycle& lifecycle)
       : context_(std::move(context)),
         source_(std::move(source)),
         camera_index_(camera_index),
         config_(config),
-        metrics_(metrics) {}
+        metrics_(metrics),
+        lifecycle_(lifecycle) {}
 
   void start(swim::core::LatestFrameMailbox& output) override {
     source_impl_ = std::make_unique<Mp4VideoToolboxSource>(
         context_, source_, camera_index_, output, metrics_, config_.mode,
         std::chrono::milliseconds{0},
-        config_.decode_ticket_pool, config_.decode_surface_pool);
+        config_.decode_ticket_pool, config_.decode_surface_pool, &lifecycle_);
     source_impl_->start();
   }
 
@@ -192,6 +194,7 @@ class MetalSourceAdapter final : public swim::core::ISource {
   std::uint32_t camera_index_;
   swim::core::AppConfig config_;
   swim::core::RuntimeCounters& metrics_;
+  swim::core::RunLifecycle& lifecycle_;
   std::unique_ptr<Mp4VideoToolboxSource> source_impl_;
 };
 
@@ -203,14 +206,21 @@ class MetalBackend final : public swim::core::IBackend {
     metrics_ = &metrics;
   }
 
+  void bind_lifecycle(swim::core::RunLifecycle& lifecycle) noexcept override {
+    lifecycle_ = &lifecycle;
+  }
+
   std::unique_ptr<swim::core::ISource> make_source(
       const swim::core::SourceConfig& source,
       std::uint32_t camera_index) override {
     if (!config_ready_) {
       throw std::logic_error("Metal renderer must be created before sources");
     }
+    if (lifecycle_ == nullptr) {
+      throw std::logic_error("Metal lifecycle must be bound before sources");
+    }
     return std::make_unique<MetalSourceAdapter>(
-        context_, source, camera_index, config_, *metrics_);
+        context_, source, camera_index, config_, *metrics_, *lifecycle_);
   }
 
   std::unique_ptr<swim::core::IRenderer> make_renderer(
@@ -240,6 +250,7 @@ class MetalBackend final : public swim::core::IBackend {
   swim::core::AppConfig config_;
   swim::core::RuntimeCounters fallback_metrics_;
   swim::core::RuntimeCounters* metrics_{&fallback_metrics_};
+  swim::core::RunLifecycle* lifecycle_{};
   bool config_ready_{};
   std::mutex loop_mutex_;
   std::condition_variable_any loop_condition_;
