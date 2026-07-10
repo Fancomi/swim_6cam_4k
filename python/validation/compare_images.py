@@ -8,9 +8,21 @@ import cv2
 import numpy as np
 
 
-MIN_PSNR = 45.0
-MIN_SSIM = 0.995
+LOGICAL_WIDTH = 5001
+LOGICAL_HEIGHT = 2101
+ENCODED_WIDTH = 5002
+ENCODED_HEIGHT = 2102
+MIN_PSNR = 48.0
+MIN_SSIM = 0.9995
+MAX_LOCAL_MAE = 1.25
+MAX_LOCAL_RMSE = 3.75
 DIFFERENCE_AMPLIFICATION = 4.0
+
+LOCAL_REGIONS = {
+    "center": (slice(1050, 1051), slice(0, LOGICAL_WIDTH)),
+    "last_row": (slice(2100, 2101), slice(0, LOGICAL_WIDTH)),
+    "last_column": (slice(0, LOGICAL_HEIGHT), slice(5000, 5001)),
+}
 
 
 def compute_global_ssim(a, b):
@@ -35,27 +47,95 @@ def _read_color(path):
     return image.astype(np.float32)
 
 
+def _read_candidate(path):
+    image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if image is None:
+        raise ValueError(f"cannot read image: {path}")
+    if image.ndim != 3 or image.shape[2] not in (3, 4):
+        raise ValueError("candidate must be an RGB or RGBA image")
+    height, width = image.shape[:2]
+    if (height, width) != (ENCODED_HEIGHT, ENCODED_WIDTH):
+        raise ValueError(
+            "candidate dimensions must be "
+            f"{ENCODED_WIDTH}x{ENCODED_HEIGHT}, got {width}x{height}"
+        )
+
+    right_padding = image[:, LOGICAL_WIDTH]
+    bottom_padding = image[LOGICAL_HEIGHT]
+    if np.any(right_padding[:, :3] != 0) or np.any(
+        bottom_padding[:, :3] != 0
+    ):
+        raise ValueError("candidate padding must be exactly black")
+    if image.shape[2] == 4 and (
+        np.any(right_padding[:, 3] != 255)
+        or np.any(bottom_padding[:, 3] != 255)
+    ):
+        raise ValueError("candidate padding must be exactly opaque")
+    return image
+
+
 def _comparison_arrays(reference, candidate):
     a = _read_color(reference)
-    b = _read_color(candidate)
-    cropped = b[: a.shape[0], : a.shape[1]]
-    if a.shape != cropped.shape:
+    if a.shape != (LOGICAL_HEIGHT, LOGICAL_WIDTH, 3):
         raise ValueError(
-            f"candidate is smaller than reference: {b.shape} vs {a.shape}"
+            "reference dimensions must be "
+            f"{LOGICAL_WIDTH}x{LOGICAL_HEIGHT}, got "
+            f"{a.shape[1]}x{a.shape[0]}"
         )
-    return a, cropped
+    encoded = _read_candidate(candidate)
+    b = encoded[:LOGICAL_HEIGHT, :LOGICAL_WIDTH, :3].astype(np.float32)
+    return a, b
+
+
+def _error_metrics(difference):
+    absolute = np.abs(difference)
+    return {
+        "mae": float(absolute.mean()),
+        "rmse": float(np.sqrt(np.mean(difference * difference))),
+    }
 
 
 def compare(reference, candidate):
     a, b = _comparison_arrays(reference, candidate)
-    mse = float(np.mean((a - b) ** 2))
+    difference = a - b
+    mse = float(np.mean(difference * difference))
     psnr = (
         float("inf")
         if mse == 0
         else float(20 * np.log10(255) - 10 * np.log10(mse))
     )
     ssim = compute_global_ssim(a, b)
-    return {"psnr": psnr, "ssim": ssim}
+    local = {
+        name: _error_metrics(difference[region])
+        for name, region in LOCAL_REGIONS.items()
+    }
+    duplicate_last_row = not np.array_equal(
+        a[2100, :5000], a[2099, :5000]
+    ) and np.array_equal(b[2100, :5000], b[2099, :5000])
+    duplicate_last_column = not np.array_equal(
+        a[:2100, 5000], a[:2100, 4999]
+    ) and np.array_equal(b[:2100, 5000], b[:2100, 4999])
+    return {
+        "psnr": psnr,
+        "ssim": ssim,
+        "local": local,
+        "duplicates": {
+            "last_row": duplicate_last_row,
+            "last_column": duplicate_last_column,
+        },
+    }
+
+
+def passes_acceptance(metrics):
+    if metrics["psnr"] < MIN_PSNR or metrics["ssim"] < MIN_SSIM:
+        return False
+    if any(metrics["duplicates"].values()):
+        return False
+    return all(
+        region["mae"] <= MAX_LOCAL_MAE
+        and region["rmse"] <= MAX_LOCAL_RMSE
+        for region in metrics["local"].values()
+    )
 
 
 def difference_path(candidate):
@@ -87,11 +167,17 @@ def run_cli(argv: Sequence[str] | None = None):
         parser.error(str(error))
     print(
         f"PSNR={metrics['psnr']:.6f} SSIM={metrics['ssim']:.9f} "
+        f"center_MAE={metrics['local']['center']['mae']:.6f} "
+        f"center_RMSE={metrics['local']['center']['rmse']:.6f} "
+        f"last_row_MAE={metrics['local']['last_row']['mae']:.6f} "
+        f"last_row_RMSE={metrics['local']['last_row']['rmse']:.6f} "
+        f"last_column_MAE={metrics['local']['last_column']['mae']:.6f} "
+        f"last_column_RMSE={metrics['local']['last_column']['rmse']:.6f} "
+        f"last_row_duplicate={metrics['duplicates']['last_row']} "
+        f"last_column_duplicate={metrics['duplicates']['last_column']} "
         f"diff={output}"
     )
-    return int(
-        metrics["psnr"] < MIN_PSNR or metrics["ssim"] < MIN_SSIM
-    )
+    return int(not passes_acceptance(metrics))
 
 
 def main():
