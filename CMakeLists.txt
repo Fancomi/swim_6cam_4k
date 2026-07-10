@@ -168,6 +168,15 @@ if(APPLE)
   target_link_libraries(metal_decode_probe PRIVATE swim_metal_decode)
   swim_enable_warnings(metal_decode_probe)
   swim_enable_sanitizers(metal_decode_probe)
+
+  add_executable(metal_preview_test
+    cpp/tests/test_main.cpp
+    cpp/tests/metal_preview_test.mm)
+  target_compile_options(metal_preview_test PRIVATE -fobjc-arc)
+  target_link_libraries(metal_preview_test PRIVATE swim_metal_renderer)
+  swim_enable_warnings(metal_preview_test)
+  swim_enable_sanitizers(metal_preview_test)
+  add_test(NAME metal_preview_test COMMAND metal_preview_test)
 endif()
 
 if(NOT APPLE)
