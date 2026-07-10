@@ -1098,7 +1098,7 @@ fps_den=1001
 preview=true
 encode=false
 diagnostic_replacement=false
-encode_path=outputs/videos/pool_metal.h264
+encode_path=outputs/videos/pool_metal.h265
 stale_ms=100
 replace_ms=1000
 decode_surface_pool=8
@@ -1612,7 +1612,7 @@ git commit -m "feat: add non-blocking Metal preview"
 
 ---
 
-### Task 11: Add Bounded VideoToolbox H.264 Encoding
+### Task 11: Add Bounded VideoToolbox Hardware HEVC Encoding
 
 **Files:**
 - Create: `cpp/backends/metal/include/swim/metal/metal_encoder.hpp`
@@ -1625,7 +1625,10 @@ git commit -m "feat: add non-blocking Metal preview"
 
 **Interfaces:**
 - Consumes: completed BGRA `CVPixelBufferRef` output leases and monotonic frame PTS.
-- Produces: `MetalEncoder::offer(MetalOutputLease, CMTime) -> bool`, Annex-B H.264 output, encode/drop/timing metrics.
+- Produces: `MetalEncoder::offer(MetalOutputLease, CMTime) -> bool`, Annex-B HEVC output, encode/drop/timing metrics.
+
+The detailed contract and hardware capability evidence are in
+`docs/superpowers/specs/2026-07-11-hardware-hevc-output-design.md`.
 
 - [ ] **Step 1: Write a failing fixed-capacity encoder-input test**
 
@@ -1642,6 +1645,11 @@ TEST_CASE(encoder_input_saturation_drops_without_blocking_renderer) {
 }
 ```
 
+Also specify length-prefixed multi-NAL to Annex-B conversion, truncated and
+zero-length rejection, VPS/SPS/PPS insertion on keyframes, non-contiguous block
+input, and callback-owned output-lease lifetime. Use codec-neutral
+`write_length_prefixed_nals_as_annex_b`; the payload is not an AVCC structure.
+
 `EncoderInputGate` is a thin backend-local wrapper around
 `FixedSlotPool<EncoderInputRecord>`. Each record contains one
 `MetalOutputLease`, CMTime PTS, and submission sequence. `try_acquire()` returns
@@ -1656,36 +1664,55 @@ Expected: FAIL because the encoder input abstraction is absent.
 
 - [ ] **Step 3: Implement the real-time hardware encoder**
 
-Create `VTCompressionSession` for `5002x2102`, H.264, with:
+Create a hardware-required `VTCompressionSession` for exact `5002x2102`, HEVC,
+with both require-hardware and enable-hardware encoder-specification keys. It
+must fail startup if session preparation fails or
+`UsingHardwareAcceleratedVideoEncoder` is not true; no software or resize
+fallback is allowed.
+
+Configure:
 
 ```objective-c++
+VTCompressionSessionCreate(/* ... */, 5002, 2102, kCMVideoCodecType_HEVC,
+                           encoder_specification, /* ... */);
 VTSessionSetProperty(session, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
 VTSessionSetProperty(session, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
 VTSessionSetProperty(session, kVTCompressionPropertyKey_ProfileLevel,
-                     kVTProfileLevel_H264_High_AutoLevel);
-// Expected frame rate 30, average bitrate 60,000,000, keyframe interval 60.
+                     kVTProfileLevel_HEVC_Main_AutoLevel);
+// Expected rate 30000/1001, average bitrate 60,000,000, keyframe interval 60.
 ```
 
 Use a fixed input-record pool. `offer()` returns false immediately if no record
 is available or `VTCompressionSessionEncodeFrame` rejects the frame. The output
-callback converts AVCC length-prefixed NAL units to Annex-B start codes and
-writes them through one buffered writer owned by the encoder. Compressed-byte
-I/O may run on the encoder callback thread; it must never make the render thread
-wait. `--encode-sink=null` discards encoded bytes after counting them for pure
-encoder benchmarks.
+callback converts HVCC length-prefixed NAL units to Annex-B start codes. Every
+keyframe/IRAP emits VPS, SPS, and PPS before its coded slices. Conversion must
+support non-contiguous `CMBlockBuffer` data with fixed scratch storage and reject
+truncated or zero-length NAL units. It writes through one bounded writer owned
+by the encoder. Compressed-byte I/O may run on the encoder callback path; it
+must never make the render thread wait. `--encode-sink=null` discards encoded
+bytes after counting them for pure encoder benchmarks. Frame PTS is exactly
+`sequence * 1001 / 30000` seconds.
+
+Fan out completed renderer leases to preview and encoder without copying the
+pixels. The encoder gate starts at capacity two and publishes submissions,
+completions, bytes, drops/errors, completion FPS, occupancy/high-water, misses,
+and bounded-drain status. Shutdown stops admission, drains renderer completion,
+flushes the serial completion router, closes preview admission, completes all
+VideoToolbox frames, drains the callback gate, closes the writer, and only then
+invalidates the session. Callback state must remain alive after a drain timeout.
 
 - [ ] **Step 4: Encode and validate a five-second sample**
 
 ```bash
 build/macos/swim_realtime --config configs/macos_20260629.conf \
   --preview=false --encode=true \
-  --encode-path=outputs/videos/pool_metal_5s.h264 --duration-seconds=5
-ffprobe -v error -f h264 -select_streams v:0 \
+  --encode-path=outputs/videos/pool_metal_5s.h265 --duration-seconds=5
+ffprobe -v error -f hevc -select_streams v:0 \
   -show_entries stream=codec_name,width,height,r_frame_rate \
-  -of default=noprint_wrappers=1 outputs/videos/pool_metal_5s.h264
+  -of default=noprint_wrappers=1 outputs/videos/pool_metal_5s.h265
 ```
 
-Expected: `codec_name=h264`, `width=5002`, `height=2102`, decodable stream,
+Expected: `codec_name=hevc`, `width=5002`, `height=2102`, decodable stream,
 monotonic PTS, no decoded-pixel host copies, and no render-thread wait.
 
 - [ ] **Step 5: Run preview and encode together**
@@ -1698,7 +1725,7 @@ mailbox growth or render blocking.
 
 ```bash
 git add CMakeLists.txt configs cpp/backends/metal
-git commit -m "feat: add bounded VideoToolbox H264 output"
+git commit -m "feat: add bounded VideoToolbox HEVC output"
 ```
 
 ---

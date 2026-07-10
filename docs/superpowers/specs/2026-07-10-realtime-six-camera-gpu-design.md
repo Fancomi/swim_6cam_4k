@@ -25,7 +25,7 @@ This repository remains independent. The existing
   other cameras.
 - Produce a `5002x2102` GPU-resident composite at `30000/1001` fps. The
   existing `5001x2101` image occupies the top-left content region; one column
-  and one row are padding for an even-sized H.264 surface.
+  and one row are padding for an even-sized GPU/encoder surface.
 - Preserve the existing FBX-derived geometry, camera order, UV mapping, mirror
   sampling, and distance-transform feathering semantics.
 - Keep the production per-frame path entirely in C++ and platform-native GPU
@@ -231,6 +231,12 @@ Final output surfaces come from a fixed IOSurface-backed `CVPixelBufferPool`.
 The same surface can be a Metal render target, a preview texture, and a
 VideoToolbox encoder input. Command-buffer completion handlers retain all six
 input leases and the output lease until GPU work completes.
+
+On the target Apple M5, the exact `5002x2102` output uses hardware HEVC because
+the hardware-required H.264 encoder rejects this width. The backend requires
+hardware acceleration, preserves the exact canvas, and has no software or
+resize fallback. The detailed output contract is defined in
+`2026-07-11-hardware-hevc-output-design.md`.
 
 The local file experiment accepts the six H.264 MP4 files through AVFoundation.
 `AVAssetReaderTrackOutput` yields compressed sample buffers to the explicit
