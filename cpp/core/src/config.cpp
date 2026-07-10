@@ -33,11 +33,14 @@ std::string_view trim_ascii(std::string_view value) {
 
 std::uint32_t parse_unsigned(std::string_view value,
                              std::string_view option) {
+  if (value.empty()) {
+    throw std::runtime_error(std::string(option) +
+                             " must be an unsigned integer");
+  }
   std::uint32_t parsed{};
-  const auto result =
-      std::from_chars(value.data(), value.data() + value.size(), parsed);
-  if (value.empty() || result.ec != std::errc{} ||
-      result.ptr != value.data() + value.size()) {
+  const auto* const end = value.data() + value.size();
+  const auto result = std::from_chars(value.data(), end, parsed);
+  if (result.ec != std::errc{} || result.ptr != end) {
     throw std::runtime_error(std::string(option) +
                              " must be an unsigned integer");
   }

@@ -1,6 +1,7 @@
 #include "test_support.hpp"
 
 #include <swim/core/config.hpp>
+#include <swim/core/runtime_validation.hpp>
 
 #include <array>
 #include <chrono>
@@ -17,6 +18,23 @@ using swim::core::BenchmarkStage;
 using swim::core::EncodeSink;
 using swim::core::RunMode;
 
+swim::core::RuntimeAsset compatible_runtime_asset() {
+  swim::core::RuntimeAsset asset{
+      .logical_width = 5001,
+      .logical_height = 2101,
+      .encoded_width = 5002,
+      .encoded_height = 2102,
+      .source_sha256 = {},
+      .cameras = {},
+  };
+  constexpr std::array<std::string_view, 6> camera_ids{
+      "cam3", "cam2", "cam1", "cam4", "cam5", "cam6"};
+  for (const auto camera_id : camera_ids) {
+    asset.cameras.push_back({.camera_id = std::string(camera_id)});
+  }
+  return asset;
+}
+
 std::filesystem::path fixture(std::string_view name) {
   return std::filesystem::path{SWIM_TEST_FIXTURE_DIR} / name;
 }
@@ -28,6 +46,43 @@ std::string fixture_error(std::string_view name, std::size_t line,
 }
 
 }  // namespace
+
+TEST_CASE(accepts_exact_runtime_asset_compatibility) {
+  swim::core::validate_runtime_compatibility(AppConfig{},
+                                              compatible_runtime_asset());
+}
+
+TEST_CASE(rejects_wrong_runtime_asset_logical_width) {
+  auto asset = compatible_runtime_asset();
+  asset.logical_width = 5000;
+  CHECK_THROWS_WITH(swim::core::validate_runtime_compatibility(AppConfig{},
+                                                               asset),
+                    "runtime asset dimensions must be 5001x2101 -> 5002x2102");
+}
+
+TEST_CASE(rejects_wrong_runtime_asset_logical_height) {
+  auto asset = compatible_runtime_asset();
+  asset.logical_height = 2100;
+  CHECK_THROWS_WITH(swim::core::validate_runtime_compatibility(AppConfig{},
+                                                               asset),
+                    "runtime asset dimensions must be 5001x2101 -> 5002x2102");
+}
+
+TEST_CASE(rejects_wrong_runtime_asset_encoded_width) {
+  auto asset = compatible_runtime_asset();
+  asset.encoded_width = 5001;
+  CHECK_THROWS_WITH(swim::core::validate_runtime_compatibility(AppConfig{},
+                                                               asset),
+                    "runtime asset dimensions must be 5001x2101 -> 5002x2102");
+}
+
+TEST_CASE(rejects_wrong_runtime_asset_encoded_height) {
+  auto asset = compatible_runtime_asset();
+  asset.encoded_height = 2101;
+  CHECK_THROWS_WITH(swim::core::validate_runtime_compatibility(AppConfig{},
+                                                               asset),
+                    "runtime asset dimensions must be 5001x2101 -> 5002x2102");
+}
 
 TEST_CASE(loads_exact_camera_order_and_all_config_values) {
   const auto config = swim::core::load_config(fixture("valid.conf"));
@@ -178,4 +233,40 @@ TEST_CASE(rejects_repeated_unknown_and_non_exact_cli_values) {
   CHECK_THROWS_WITH(
       swim::core::apply_cli_overrides(AppConfig{}, missing_metrics_path),
       "--metrics requires PATH");
+}
+
+TEST_CASE(rejects_bare_duration_before_unsigned_parsing) {
+  const std::array arguments{"--duration-seconds"sv};
+  CHECK_THROWS_WITH(swim::core::apply_cli_overrides(AppConfig{}, arguments),
+                    "--duration-seconds must be an unsigned integer");
+}
+
+TEST_CASE(rejects_bare_stream_count_before_unsigned_parsing) {
+  const std::array arguments{"--stream-count"sv};
+  CHECK_THROWS_WITH(swim::core::apply_cli_overrides(AppConfig{}, arguments),
+                    "--stream-count must be an unsigned integer");
+}
+
+TEST_CASE(rejects_empty_duration_assignment) {
+  const std::array arguments{"--duration-seconds="sv};
+  CHECK_THROWS_WITH(swim::core::apply_cli_overrides(AppConfig{}, arguments),
+                    "--duration-seconds must be an unsigned integer");
+}
+
+TEST_CASE(rejects_empty_stream_count_assignment) {
+  const std::array arguments{"--stream-count="sv};
+  CHECK_THROWS_WITH(swim::core::apply_cli_overrides(AppConfig{}, arguments),
+                    "--stream-count must be an unsigned integer");
+}
+
+TEST_CASE(rejects_duration_uint32_overflow) {
+  const std::array arguments{"--duration-seconds=4294967296"sv};
+  CHECK_THROWS_WITH(swim::core::apply_cli_overrides(AppConfig{}, arguments),
+                    "--duration-seconds must be an unsigned integer");
+}
+
+TEST_CASE(rejects_stream_count_uint32_overflow) {
+  const std::array arguments{"--stream-count=4294967296"sv};
+  CHECK_THROWS_WITH(swim::core::apply_cli_overrides(AppConfig{}, arguments),
+                    "--stream-count must be an unsigned integer");
 }

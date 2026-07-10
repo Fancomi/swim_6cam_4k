@@ -1,8 +1,8 @@
 #include <swim/core/asset.hpp>
 #include <swim/core/backend.hpp>
 #include <swim/core/config.hpp>
+#include <swim/core/runtime_validation.hpp>
 
-#include <array>
 #include <cstddef>
 #include <filesystem>
 #include <iostream>
@@ -15,9 +15,6 @@
 #include <vector>
 
 namespace {
-
-constexpr std::array<std::string_view, 6> kCameraIds{
-    "cam3", "cam2", "cam1", "cam4", "cam5", "cam6"};
 
 struct CommandLine {
   std::filesystem::path config_path;
@@ -61,27 +58,13 @@ void require_regular_file(const std::filesystem::path& path,
   }
 }
 
-void validate_camera_order(const swim::core::AppConfig& config,
-                           const swim::core::RuntimeAsset& asset) {
-  if (asset.cameras.size() != kCameraIds.size()) {
-    throw std::runtime_error("asset must contain exactly six cameras");
-  }
-  for (std::size_t index = 0; index < kCameraIds.size(); ++index) {
-    if (config.sources[index].camera_id != kCameraIds[index] ||
-        asset.cameras[index].camera_id != kCameraIds[index]) {
-      throw std::runtime_error(
-          "camera order must be cam3,cam2,cam1,cam4,cam5,cam6");
-    }
-  }
-}
-
 swim::core::RuntimeAsset validate_inputs(const swim::core::AppConfig& config) {
   require_regular_file(config.asset_path, "asset");
   for (const auto& source : config.sources) {
     require_regular_file(source.path, "source " + source.camera_id);
   }
   auto asset = swim::core::load_asset(config.asset_path);
-  validate_camera_order(config, asset);
+  swim::core::validate_runtime_compatibility(config, asset);
   return asset;
 }
 

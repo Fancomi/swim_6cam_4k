@@ -31,7 +31,8 @@ add_library(swim_core
   cpp/core/src/config.cpp
   cpp/core/src/frame.cpp
   cpp/core/src/hot_path_allocations.cpp
-  cpp/core/src/metrics.cpp)
+  cpp/core/src/metrics.cpp
+  cpp/core/src/runtime_validation.cpp)
 target_include_directories(swim_core PUBLIC cpp/core/include)
 swim_enable_warnings(swim_core)
 swim_enable_sanitizers(swim_core)
@@ -68,17 +69,24 @@ set_tests_properties(swim_validate_cli PROPERTIES
   PASS_REGULAR_EXPRESSION
     "camera_order=cam3,cam2,cam1,cam4,cam5,cam6")
 
-add_test(NAME swim_cli_requires_config COMMAND swim_realtime --validate-only)
-set_tests_properties(swim_cli_requires_config PROPERTIES WILL_FAIL TRUE)
-
-add_test(NAME swim_cli_rejects_missing_config_path COMMAND swim_realtime --config)
-set_tests_properties(swim_cli_rejects_missing_config_path PROPERTIES
-  WILL_FAIL TRUE)
-
 add_test(
-  NAME swim_cli_rejects_repeated_config
-  COMMAND swim_realtime --config cpp/tests/fixtures/cli.conf
-          --config cpp/tests/fixtures/cli.conf --validate-only)
-set_tests_properties(swim_cli_rejects_repeated_config PROPERTIES
+  NAME swim_validate_cli_dimensions
+  COMMAND swim_realtime --config cpp/tests/fixtures/cli.conf --validate-only)
+set_tests_properties(swim_validate_cli_dimensions PROPERTIES
   WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-  WILL_FAIL TRUE)
+  PASS_REGULAR_EXPRESSION "dimensions=5001x2101 -> 5002x2102")
+
+function(add_swim_cli_error_test test_name cli_case)
+  add_test(
+    NAME ${test_name}
+    COMMAND ${CMAKE_COMMAND}
+            "-DSWIM_REALTIME=$<TARGET_FILE:swim_realtime>"
+            "-DREPOSITORY_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+            "-DCLI_CASE=${cli_case}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/AssertCliError.cmake")
+endfunction()
+
+add_swim_cli_error_test(swim_cli_requires_config requires_config)
+add_swim_cli_error_test(swim_cli_rejects_missing_config_path missing_path)
+add_swim_cli_error_test(swim_cli_rejects_repeated_config repeated_config)
+add_swim_cli_error_test(swim_cli_rejects_unknown_override unknown_override)
