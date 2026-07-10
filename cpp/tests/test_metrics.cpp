@@ -124,8 +124,12 @@ TEST_CASE(runtime_counter_snapshot_is_immutable_and_resets_every_counter) {
   CHECK(address(counters.reconnects) - address(counters.malformed) >= 128u);
   CHECK(address(counters.render_submissions) - address(counters.reconnects) >=
         128u);
-  CHECK(address(counters.preview_drops) -
+  CHECK(address(counters.render_drops) -
             address(counters.render_submissions) >=
+        128u);
+  CHECK(address(counters.render_active_ns) - address(counters.render_drops) >=
+        128u);
+  CHECK(address(counters.preview_drops) - address(counters.render_active_ns) >=
         128u);
   CHECK(address(counters.encode_drops) - address(counters.preview_drops) >=
         128u);
@@ -155,14 +159,16 @@ TEST_CASE(runtime_counter_snapshot_is_immutable_and_resets_every_counter) {
   counters.malformed.fetch_add(6);
   counters.reconnects.fetch_add(7);
   counters.render_submissions.fetch_add(8);
-  counters.preview_drops.fetch_add(9);
-  counters.encode_drops.fetch_add(10);
-  counters.decoded_pixel_host_copies.fetch_add(11);
-  counters.pool_exhaustion.fetch_add(12);
-  counters.native_texture_wrappers.fetch_add(13);
-  counters.native_command_buffers.fetch_add(14);
-  counters.native_decode_tickets.fetch_add(15);
-  counters.native_callback_wrappers.fetch_add(16);
+  counters.render_drops.fetch_add(9);
+  counters.render_active_ns.fetch_add(10);
+  counters.preview_drops.fetch_add(11);
+  counters.encode_drops.fetch_add(12);
+  counters.decoded_pixel_host_copies.fetch_add(13);
+  counters.pool_exhaustion.fetch_add(14);
+  counters.native_texture_wrappers.fetch_add(15);
+  counters.native_command_buffers.fetch_add(16);
+  counters.native_decode_tickets.fetch_add(17);
+  counters.native_callback_wrappers.fetch_add(18);
 
   const auto snapshot = counters.snapshot_and_reset();
   CHECK_EQ(snapshot.received, 1u);
@@ -173,14 +179,16 @@ TEST_CASE(runtime_counter_snapshot_is_immutable_and_resets_every_counter) {
   CHECK_EQ(snapshot.malformed, 6u);
   CHECK_EQ(snapshot.reconnects, 7u);
   CHECK_EQ(snapshot.render_submissions, 8u);
-  CHECK_EQ(snapshot.preview_drops, 9u);
-  CHECK_EQ(snapshot.encode_drops, 10u);
-  CHECK_EQ(snapshot.decoded_pixel_host_copies, 11u);
-  CHECK_EQ(snapshot.pool_exhaustion, 12u);
-  CHECK_EQ(snapshot.native_texture_wrappers, 13u);
-  CHECK_EQ(snapshot.native_command_buffers, 14u);
-  CHECK_EQ(snapshot.native_decode_tickets, 15u);
-  CHECK_EQ(snapshot.native_callback_wrappers, 16u);
+  CHECK_EQ(snapshot.render_drops, 9u);
+  CHECK_EQ(snapshot.render_active_ns, 10u);
+  CHECK_EQ(snapshot.preview_drops, 11u);
+  CHECK_EQ(snapshot.encode_drops, 12u);
+  CHECK_EQ(snapshot.decoded_pixel_host_copies, 13u);
+  CHECK_EQ(snapshot.pool_exhaustion, 14u);
+  CHECK_EQ(snapshot.native_texture_wrappers, 15u);
+  CHECK_EQ(snapshot.native_command_buffers, 16u);
+  CHECK_EQ(snapshot.native_decode_tickets, 17u);
+  CHECK_EQ(snapshot.native_callback_wrappers, 18u);
 
   const auto empty = counters.snapshot_and_reset();
   CHECK_EQ(empty.received, 0u);
@@ -191,6 +199,8 @@ TEST_CASE(runtime_counter_snapshot_is_immutable_and_resets_every_counter) {
   CHECK_EQ(empty.malformed, 0u);
   CHECK_EQ(empty.reconnects, 0u);
   CHECK_EQ(empty.render_submissions, 0u);
+  CHECK_EQ(empty.render_drops, 0u);
+  CHECK_EQ(empty.render_active_ns, 0u);
   CHECK_EQ(empty.preview_drops, 0u);
   CHECK_EQ(empty.encode_drops, 0u);
   CHECK_EQ(empty.decoded_pixel_host_copies, 0u);

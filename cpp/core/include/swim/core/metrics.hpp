@@ -56,6 +56,8 @@ struct MetricsSnapshot final {
   const std::uint64_t malformed;
   const std::uint64_t reconnects;
   const std::uint64_t render_submissions;
+  const std::uint64_t render_drops;
+  const std::uint64_t render_active_ns;
   const std::uint64_t preview_drops;
   const std::uint64_t encode_drops;
   const std::uint64_t decoded_pixel_host_copies;
@@ -75,6 +77,8 @@ struct RuntimeCounters final {
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t malformed{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t reconnects{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_submissions{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_drops{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_active_ns{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t preview_drops{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t encode_drops{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t

@@ -54,6 +54,7 @@ class FrameLease {
 
   explicit operator bool() const noexcept;
   const FrameMetadata& metadata() const noexcept;
+  std::uint32_t backend_tag() const noexcept;
   void* native(std::uint32_t expected_backend_tag) const;
 
  private:

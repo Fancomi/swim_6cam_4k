@@ -88,6 +88,8 @@ MetricsSnapshot RuntimeCounters::snapshot_and_reset() noexcept {
       malformed.exchange(0, std::memory_order_relaxed),
       reconnects.exchange(0, std::memory_order_relaxed),
       render_submissions.exchange(0, std::memory_order_relaxed),
+      render_drops.exchange(0, std::memory_order_relaxed),
+      render_active_ns.exchange(0, std::memory_order_relaxed),
       preview_drops.exchange(0, std::memory_order_relaxed),
       encode_drops.exchange(0, std::memory_order_relaxed),
       decoded_pixel_host_copies.exchange(0, std::memory_order_relaxed),

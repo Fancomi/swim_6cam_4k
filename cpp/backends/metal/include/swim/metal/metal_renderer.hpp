@@ -7,6 +7,7 @@
 
 #include <array>
 #include <memory>
+#include <string>
 
 namespace swim::metal {
 
@@ -31,6 +32,7 @@ class MetalStitchRenderer final {
   void wait_for_completion(MetalRenderResult& result);
   void drain();
   bool has_fatal_error() const noexcept;
+  std::string fatal_error_message() const;
 
   // Diagnostic-only startup contract checks.
   bool uploaded_vertices_match(

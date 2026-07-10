@@ -4,6 +4,7 @@
 #include <swim/core/config.hpp>
 #include <swim/core/frame.hpp>
 #include <swim/core/latest_frame_mailbox.hpp>
+#include <swim/core/metrics.hpp>
 
 #include <array>
 #include <chrono>
@@ -22,6 +23,8 @@ class ISource {
   virtual ~ISource() = default;
   virtual void start(LatestFrameMailbox& output) = 0;
   virtual void stop() noexcept = 0;
+  virtual bool failed() const noexcept { return false; }
+  virtual std::string last_error() const { return {}; }
 };
 
 struct RenderSnapshot {
@@ -36,6 +39,8 @@ class IRenderer {
   virtual FrameLease replacement_frame(
       std::uint32_t camera_index) const = 0;
   virtual void drain() = 0;
+  virtual bool has_fatal_error() const noexcept { return false; }
+  virtual std::string last_error() const { return {}; }
 };
 
 class IBackend {
@@ -45,6 +50,7 @@ class IBackend {
                                                std::uint32_t camera_index) = 0;
   virtual std::unique_ptr<IRenderer> make_renderer(
       const RuntimeAsset& asset, const AppConfig& config) = 0;
+  virtual void bind_metrics(RuntimeCounters&) noexcept {}
   virtual void run_main_loop(std::stop_token token) = 0;
   virtual void stop_main_loop() noexcept = 0;
 };

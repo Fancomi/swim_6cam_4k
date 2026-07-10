@@ -60,6 +60,10 @@ const FrameMetadata& FrameLease::metadata() const noexcept {
   return metadata_;
 }
 
+std::uint32_t FrameLease::backend_tag() const noexcept {
+  return ops_.backend_tag;
+}
+
 void* FrameLease::native(std::uint32_t expected_backend_tag) const {
   if (ops_.backend_tag != expected_backend_tag) {
     throw std::runtime_error("frame backend tag mismatch");

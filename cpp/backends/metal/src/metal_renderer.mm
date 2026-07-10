@@ -1,4 +1,5 @@
 #include <swim/metal/metal_renderer.hpp>
+#include <swim/metal/videotoolbox_decoder.hpp>
 
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
@@ -13,6 +14,7 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -466,7 +468,8 @@ class MetalStitchRenderer::Impl final {
       auto* owner = this;
       [command addCompletedHandler:^(id<MTLCommandBuffer> completed) {
         if (completed.status != MTLCommandBufferStatusCompleted) {
-          owner->fatal_error_.store(true, std::memory_order_release);
+          owner->record_fatal(
+              metal_error(@"Metal command buffer failed", completed.error));
         }
         completed_record->input_leases = {};
         completed_record->frame_views = {};
@@ -475,7 +478,17 @@ class MetalStitchRenderer::Impl final {
       }];
       [command commit];
       return true;
+    } catch (const std::exception& error) {
+      record_fatal(error.what());
+      record->input_leases = {};
+      record->frame_views = {};
+      record->output = {};
+      record->busy.store(false, std::memory_order_release);
+      result.output = {};
+      result.diagnostic_command_buffer = nil;
+      return false;
     } catch (...) {
+      record_fatal("unknown Metal command submission failure");
       record->input_leases = {};
       record->frame_views = {};
       record->output = {};
@@ -504,6 +517,11 @@ class MetalStitchRenderer::Impl final {
 
   bool has_fatal_error() const noexcept {
     return fatal_error_.load(std::memory_order_acquire);
+  }
+
+  std::string fatal_error_message() const {
+    std::lock_guard lock(fatal_error_mutex_);
+    return fatal_error_message_;
   }
 
   bool uploaded_vertices_match(
@@ -550,6 +568,17 @@ class MetalStitchRenderer::Impl final {
   }
 
  private:
+  void record_fatal(std::string message) noexcept {
+    try {
+      std::lock_guard lock(fatal_error_mutex_);
+      if (fatal_error_message_.empty()) {
+        fatal_error_message_ = std::move(message);
+      }
+    } catch (...) {
+    }
+    fatal_error_.store(true, std::memory_order_release);
+  }
+
   void upload_camera_resources(const swim::core::RuntimeAsset& asset) {
     for (std::size_t index = 0; index < cameras_.size(); ++index) {
       const auto& source = asset.cameras[index];
@@ -770,6 +799,8 @@ class MetalStitchRenderer::Impl final {
   std::unique_ptr<InFlightRecord[]> in_flight_;
   MetalOutputPool output_pool_;
   std::atomic_bool fatal_error_{false};
+  mutable std::mutex fatal_error_mutex_;
+  std::string fatal_error_message_;
 };
 
 MetalStitchRenderer::MetalStitchRenderer(
@@ -795,12 +826,29 @@ bool MetalStitchRenderer::submit(
       if (snapshot.frames[index].metadata().camera_index != index) {
         return false;
       }
-      auto* native = static_cast<MetalFrameView*>(
-          snapshot.frames[index].native(kMetalFrameBackendTag));
-      if (native == nullptr) {
-        return false;
+      const auto& lease = snapshot.frames[index];
+      switch (lease.backend_tag()) {
+        case kMetalFrameBackendTag: {
+          auto* native = static_cast<MetalFrameView*>(
+              lease.native(kMetalFrameBackendTag));
+          if (native == nullptr) {
+            return false;
+          }
+          frames[index] = *native;
+          break;
+        }
+        case kMetalDecodedSurfaceTag: {
+          auto* decoded = static_cast<MetalDecodedSurface*>(
+              lease.native(kMetalDecodedSurfaceTag));
+          if (decoded == nullptr) {
+            return false;
+          }
+          frames[index] = decoded->view;
+          break;
+        }
+        default:
+          return false;
       }
-      frames[index] = *native;
       frames[index].metadata = snapshot.frames[index].metadata();
     }
     return impl_->submit(frames, &snapshot.frames, result);
@@ -817,6 +865,10 @@ void MetalStitchRenderer::drain() { impl_->drain(); }
 
 bool MetalStitchRenderer::has_fatal_error() const noexcept {
   return impl_->has_fatal_error();
+}
+
+std::string MetalStitchRenderer::fatal_error_message() const {
+  return impl_->fatal_error_message();
 }
 
 bool MetalStitchRenderer::uploaded_vertices_match(

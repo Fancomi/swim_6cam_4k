@@ -32,13 +32,13 @@ add_library(swim_core
   cpp/core/src/frame.cpp
   cpp/core/src/hot_path_allocations.cpp
   cpp/core/src/metrics.cpp
+  cpp/core/src/render_coordinator.cpp
   cpp/core/src/runtime_validation.cpp)
 target_include_directories(swim_core PUBLIC cpp/core/include)
 swim_enable_warnings(swim_core)
 swim_enable_sanitizers(swim_core)
 
 add_executable(swim_realtime cpp/app/main.cpp)
-target_link_libraries(swim_realtime PRIVATE swim_core)
 swim_enable_warnings(swim_realtime)
 swim_enable_sanitizers(swim_realtime)
 add_dependencies(swim_realtime runtime_asset)
@@ -136,6 +136,18 @@ if(APPLE)
   swim_enable_warnings(swim_metal_decode)
   swim_enable_sanitizers(swim_metal_decode)
 
+  add_library(swim_metal_backend
+    cpp/backends/metal/src/metal_backend.mm)
+  target_include_directories(swim_metal_backend PUBLIC
+    cpp/backends/metal/include)
+  target_compile_options(swim_metal_backend PRIVATE -fobjc-arc)
+  target_link_libraries(swim_metal_backend PUBLIC swim_metal_decode)
+  swim_enable_warnings(swim_metal_backend)
+  swim_enable_sanitizers(swim_metal_backend)
+
+  target_compile_definitions(swim_realtime PRIVATE SWIM_HAS_METAL_BACKEND=1)
+  target_link_libraries(swim_realtime PRIVATE swim_metal_backend)
+
   add_executable(metal_golden_test cpp/tests/metal_golden_test.mm)
   add_dependencies(metal_golden_test runtime_asset)
   target_compile_options(metal_golden_test PRIVATE -fobjc-arc)
@@ -148,4 +160,8 @@ if(APPLE)
   target_link_libraries(metal_decode_probe PRIVATE swim_metal_decode)
   swim_enable_warnings(metal_decode_probe)
   swim_enable_sanitizers(metal_decode_probe)
+endif()
+
+if(NOT APPLE)
+  target_link_libraries(swim_realtime PRIVATE swim_core)
 endif()
