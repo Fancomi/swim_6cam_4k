@@ -285,9 +285,8 @@ class MetalPreview::Impl final
     timer_ = nil;
     if (!present_gate_.close_and_wait_until(
             std::chrono::steady_clock::now() + kDrainTimeout)) {
-      if (present_gate_.pending() != 0 &&
-          present_accounting_.account_once()) {
-        preview_drops_.fetch_add(1, std::memory_order_relaxed);
+      if (present_gate_.pending() != 0) {
+        static_cast<void>(present_accounting_.settle_dropped());
       }
       flush_metrics();
       destroy_ui();
@@ -397,20 +396,23 @@ class MetalPreview::Impl final
     [encoder setFragmentSamplerState:sampler_ atIndex:0];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [encoder endEncoding];
+    if (!present_accounting_.begin()) {
+      preview_drops_.fetch_add(1, std::memory_order_relaxed);
+      present_gate_.complete();
+      present_in_flight_.store(false, std::memory_order_release);
+      return;
+    }
     [command presentDrawable:drawable];
 
     auto owner = shared_from_this();
     MetalOutputLease retained_output = std::move(output);
-    present_accounting_.begin();
     native_callback_wrappers_.fetch_add(1, std::memory_order_relaxed);
     [command addCompletedHandler:^(id<MTLCommandBuffer> completed) {
       static_cast<void>(retained_output.texture());
-      if (owner->present_accounting_.account_once()) {
-        if (completed.status == MTLCommandBufferStatusCompleted) {
-          owner->preview_presents_.fetch_add(1, std::memory_order_relaxed);
-        } else {
-          owner->preview_drops_.fetch_add(1, std::memory_order_relaxed);
-        }
+      if (completed.status == MTLCommandBufferStatusCompleted) {
+        static_cast<void>(owner->present_accounting_.settle_presented());
+      } else {
+        static_cast<void>(owner->present_accounting_.settle_dropped());
       }
       owner->present_gate_.complete();
       owner->present_in_flight_.store(false, std::memory_order_release);
@@ -426,11 +428,13 @@ class MetalPreview::Impl final
     if (metrics == nullptr) {
       return;
     }
+    const auto presentations = present_accounting_.snapshot();
     metrics->preview_drops.fetch_add(
-        preview_drops_.load(std::memory_order_relaxed),
+        preview_drops_.load(std::memory_order_relaxed) +
+            presentations.drops,
         std::memory_order_relaxed);
     metrics->preview_presents.fetch_add(
-        preview_presents_.load(std::memory_order_relaxed),
+        presentations.presents,
         std::memory_order_relaxed);
     metrics->native_command_buffers.fetch_add(
         native_command_buffers_.load(std::memory_order_relaxed),
@@ -464,7 +468,6 @@ class MetalPreview::Impl final
   PreviewMailbox<MetalOutputLease> mailbox_;
   swim::core::RenderCompletionGate present_gate_;
   std::atomic_uint64_t preview_drops_{0};
-  std::atomic_uint64_t preview_presents_{0};
   std::atomic_uint64_t native_command_buffers_{0};
   std::atomic_uint64_t native_callback_wrappers_{0};
   PreviewPresentationAccounting present_accounting_;

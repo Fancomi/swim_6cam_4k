@@ -4,10 +4,12 @@
 #include <swim/metal/metal_preview.hpp>
 
 #include <atomic>
+#include <barrier>
 #include <chrono>
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <thread>
 #include <utility>
 
 namespace {
@@ -134,13 +136,47 @@ TEST_CASE(preview_close_without_a_pending_value_reports_no_discard) {
 
 TEST_CASE(preview_timeout_and_late_callback_settle_one_presentation_once) {
   swim::metal::PreviewPresentationAccounting accounting;
-  accounting.begin();
-  CHECK(accounting.account_once());   // timeout owns the drop
-  CHECK(!accounting.account_once());  // late callback cannot double-count
+  CHECK(accounting.begin());
+  CHECK(accounting.settle_dropped());
+  CHECK(!accounting.settle_presented());
+  auto snapshot = accounting.snapshot();
+  CHECK_EQ(snapshot.presents, 0u);
+  CHECK_EQ(snapshot.drops, 1u);
+  CHECK(!snapshot.pending);
 
-  accounting.begin();
-  CHECK(accounting.account_once());   // callback owns the present
-  CHECK(!accounting.account_once());  // timeout cannot double-count
+  CHECK(accounting.begin());
+  CHECK(accounting.settle_presented());
+  CHECK(!accounting.settle_dropped());
+  snapshot = accounting.snapshot();
+  CHECK_EQ(snapshot.presents, 1u);
+  CHECK_EQ(snapshot.drops, 1u);
+  CHECK(!snapshot.pending);
+}
+
+TEST_CASE(preview_timeout_and_callback_publish_one_atomic_disposition) {
+  swim::metal::PreviewPresentationAccounting accounting;
+  for (std::uint32_t iteration = 0; iteration < 1000; ++iteration) {
+    CHECK(accounting.begin());
+    std::barrier start{3};
+    bool presented = false;
+    bool dropped = false;
+    std::jthread callback([&] {
+      start.arrive_and_wait();
+      presented = accounting.settle_presented();
+    });
+    std::jthread timeout([&] {
+      start.arrive_and_wait();
+      dropped = accounting.settle_dropped();
+    });
+    start.arrive_and_wait();
+    callback.join();
+    timeout.join();
+    CHECK(presented != dropped);
+    const auto snapshot = accounting.snapshot();
+    CHECK_EQ(snapshot.presents + snapshot.drops,
+             static_cast<std::uint64_t>(iteration) + 1u);
+    CHECK(!snapshot.pending);
+  }
 }
 
 TEST_CASE(preview_mailbox_offer_allocates_no_application_heap_memory) {

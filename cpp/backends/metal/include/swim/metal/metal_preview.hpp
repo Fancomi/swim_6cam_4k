@@ -100,14 +100,70 @@ class PreviewMailbox final {
 // late native presentation callback. Only one preview command may be in flight.
 class PreviewPresentationAccounting final {
  public:
-  void begin() noexcept { accounted_.store(false, std::memory_order_release); }
+  struct Snapshot final {
+    std::uint32_t presents;
+    std::uint32_t drops;
+    bool pending;
+  };
 
-  bool account_once() noexcept {
-    return !accounted_.exchange(true, std::memory_order_acq_rel);
+  bool begin() noexcept {
+    auto value = value_.load(std::memory_order_acquire);
+    for (;;) {
+      if ((value & kPending) != 0) {
+        return false;
+      }
+      if (value_.compare_exchange_weak(value, value | kPending,
+                                       std::memory_order_acq_rel,
+                                       std::memory_order_acquire)) {
+        return true;
+      }
+    }
+  }
+
+  bool settle_presented() noexcept { return settle(kPresentIncrement); }
+  bool settle_dropped() noexcept { return settle(kDropIncrement); }
+
+  Snapshot snapshot() const noexcept {
+    const auto value = value_.load(std::memory_order_acquire);
+    return Snapshot{
+        static_cast<std::uint32_t>(value & kCountMask),
+        static_cast<std::uint32_t>((value >> kDropShift) & kCountMask),
+        (value & kPending) != 0,
+    };
   }
 
  private:
-  std::atomic_bool accounted_{true};
+  static constexpr std::uint64_t kCountBits = 31;
+  static constexpr std::uint64_t kCountMask =
+      (std::uint64_t{1} << kCountBits) - 1;
+  static constexpr std::uint64_t kDropShift = kCountBits;
+  static constexpr std::uint64_t kPresentIncrement = 1;
+  static constexpr std::uint64_t kDropIncrement =
+      std::uint64_t{1} << kDropShift;
+  static constexpr std::uint64_t kPending = std::uint64_t{1} << 62;
+
+  bool settle(std::uint64_t increment) noexcept {
+    auto value = value_.load(std::memory_order_acquire);
+    for (;;) {
+      if ((value & kPending) == 0) {
+        return false;
+      }
+      auto next = value & ~kPending;
+      const auto count = increment == kPresentIncrement
+                             ? next & kCountMask
+                             : (next >> kDropShift) & kCountMask;
+      if (count != kCountMask) {
+        next += increment;
+      }
+      if (value_.compare_exchange_weak(value, next,
+                                       std::memory_order_acq_rel,
+                                       std::memory_order_acquire)) {
+        return true;
+      }
+    }
+  }
+
+  std::atomic_uint64_t value_{0};
 };
 
 // Main-thread Cocoa/CAMetalLayer presenter. offer() is a non-blocking serial
