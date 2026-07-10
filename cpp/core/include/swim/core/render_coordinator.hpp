@@ -25,8 +25,11 @@ class RenderCoordinator final {
 
   // Performs exactly one consume attempt per lane and one renderer submit.
   // Returns the renderer's acceptance result.
-  bool tick(Clock::time_point sampled_at);
+  RenderSubmitResult tick(Clock::time_point sampled_at);
   void run(std::stop_token token);
+  static std::chrono::nanoseconds cadence_offset(
+      std::uint64_t tick_index, std::uint32_t fps_num,
+      std::uint32_t fps_den) noexcept;
 
  private:
   Mailboxes& mailboxes_;
@@ -36,6 +39,9 @@ class RenderCoordinator final {
   std::array<FrameLease, kCameraCount> fronts_;
   std::array<Clock::time_point, kCameraCount> last_source_frames_{};
   std::array<bool, kCameraCount> replacements_{};
+  std::array<std::uint64_t, kCameraCount> last_real_generations_{};
+  std::array<std::uint64_t, kCameraCount> last_real_sequences_{};
+  std::array<bool, kCameraCount> have_real_frames_{};
   Clock::time_point first_tick_{};
 };
 

@@ -40,6 +40,20 @@ std::chrono::milliseconds percentile_of(
 
 }  // namespace
 
+std::uint64_t MetricsSnapshot::render_completion_interval_ns() const noexcept {
+  return render_last_completion_ns >= render_first_submit_ns
+             ? render_last_completion_ns - render_first_submit_ns
+             : 0;
+}
+
+double MetricsSnapshot::render_completion_fps() const noexcept {
+  const auto interval = render_completion_interval_ns();
+  return interval == 0
+             ? 0.0
+             : static_cast<double>(render_completions) * 1'000'000'000.0 /
+                   static_cast<double>(interval);
+}
+
 FixedLatencyHistogramSnapshot::FixedLatencyHistogramSnapshot(
     const std::array<std::uint64_t, 1001>& buckets,
     std::uint64_t count) noexcept
@@ -79,6 +93,11 @@ FixedLatencyHistogramSnapshot FixedLatencyHistogram::snapshot_and_reset()
 std::uint64_t FixedLatencyHistogram::count() const noexcept { return count_; }
 
 MetricsSnapshot RuntimeCounters::snapshot_and_reset() noexcept {
+  std::array<std::uint64_t, 6> frame_age_p99{};
+  for (std::size_t camera = 0; camera < frame_age.size(); ++camera) {
+    frame_age_p99[camera] = static_cast<std::uint64_t>(
+        frame_age[camera].snapshot_and_reset().percentile(0.99).count());
+  }
   return MetricsSnapshot{
       received.exchange(0, std::memory_order_relaxed),
       decoded.exchange(0, std::memory_order_relaxed),
@@ -88,8 +107,18 @@ MetricsSnapshot RuntimeCounters::snapshot_and_reset() noexcept {
       malformed.exchange(0, std::memory_order_relaxed),
       reconnects.exchange(0, std::memory_order_relaxed),
       render_submissions.exchange(0, std::memory_order_relaxed),
+      render_completions.exchange(0, std::memory_order_relaxed),
       render_drops.exchange(0, std::memory_order_relaxed),
       render_active_ns.exchange(0, std::memory_order_relaxed),
+      render_first_submit_ns.exchange(0, std::memory_order_relaxed),
+      render_last_completion_ns.exchange(0, std::memory_order_relaxed),
+      render_inflight_capacity.exchange(0, std::memory_order_relaxed),
+      render_inflight_high_water.exchange(0, std::memory_order_relaxed),
+      render_inflight_pool_misses.exchange(0, std::memory_order_relaxed),
+      render_output_capacity.exchange(0, std::memory_order_relaxed),
+      render_output_high_water.exchange(0, std::memory_order_relaxed),
+      render_output_pool_misses.exchange(0, std::memory_order_relaxed),
+      frame_age_p99,
       preview_drops.exchange(0, std::memory_order_relaxed),
       encode_drops.exchange(0, std::memory_order_relaxed),
       decoded_pixel_host_copies.exchange(0, std::memory_order_relaxed),

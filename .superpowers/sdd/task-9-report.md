@@ -8,10 +8,12 @@ shared Metal context for rendering and all VideoToolbox lanes, starts six source
 adapters, renders one six-frame snapshot per absolute cadence tick, and performs
 ordered signal-safe shutdown with a final JSON metrics line.
 
-The final 10-second headless run rendered 300 frames over exactly
-10,000,000,000 active nanoseconds (30.000 fps). All six sources remained
-healthy, the configured pools remained bounded without exhaustion, and decoded
-pixel host copies remained zero.
+After the review fix wave, the final 10-second headless run submitted and
+successfully completed 300 frames. Completion FPS was measured over the exact
+steady-clock interval from the first accepted submit through the last
+successful GPU completion: 30.050 fps. All six sources remained healthy, the
+configured pools remained bounded without exhaustion, and decoded pixel host
+copies remained zero.
 
 ## TDD evidence
 
@@ -31,6 +33,10 @@ The coordinator tests now cover:
 - one submit attempt and a counted drop on renderer backpressure;
 - a finite active duration beginning at the first accepted submit, so decoder
   warmup drops do not consume the requested render interval.
+- typed accepted/not-ready/backpressure/fatal/invalid renderer results;
+- resume sequence gaps after a displayed replacement frame;
+- zero duration continuing until its stop token is requested;
+- exact integer 30000/1001 cadence offsets without floating-point drift.
 
 ## Implementation notes
 
@@ -38,6 +44,12 @@ The coordinator tests now cover:
   once per mailbox on each tick. Missing lanes reuse their front lease; source
   sequence gaps update overwrite metrics; renderer rejection increments
   `render_drops` without waiting for a surface.
+- Last real source generation/sequence are independent of the displayed front
+  and replacement state, so a resumed lane's skipped real sequences remain
+  observable. Each selected real frame records a per-camera age sample.
+- `IRenderer::submit` returns `RenderSubmitResult`. The coordinator continues
+  only for `not_ready` and `backpressure`; native fatal and invalid snapshots
+  terminate the render lane with an exception.
 - Realtime scheduling derives every deadline from one `steady_clock` epoch and
   the runtime `fps_den / fps_num` rational. The epoch resets at the first
   accepted render so a finite run measures the requested active interval.
@@ -49,6 +61,11 @@ The coordinator tests now cover:
 - Every accepted command copies all six input leases into its fixed in-flight
   record. The completion handler clears those leases only after the Metal
   command buffer completes.
+- The low Metal renderer optionally receives runtime counters. It reports both
+  configured pool capacities, high-water marks and separate miss counts.
+  Successful completion handlers update an atomic completion count and an
+  atomic-max final steady timestamp so callback order cannot regress the FPS
+  interval.
 - The Metal backend owns one shared `MetalContext`, adapts Task 8's
   `Mp4VideoToolboxSource`, supplies stable black replacement leases, and is
   registered by an explicit referenced function rather than a discardable
@@ -57,6 +74,12 @@ The coordinator tests now cover:
   requests the render stop and wakes the backend main loop. Sources then stop,
   the renderer drains, final fatal state is checked, and final metrics are
   written before any native error is rethrown.
+- Runtime cleanup is owned by an ordered RAII finalizer. Mailboxes are
+  constructed before source publishers; every post-start exit requests and
+  joins render work, stops and joins every source, drains and checks the
+  renderer, snapshots render-thread-only age histograms, writes final metrics,
+  and then rethrows the original failure. Native sources always receive zero
+  lane-local duration, leaving the global render interval/signal as stop owner.
 
 ## Verification
 
@@ -67,8 +90,8 @@ cmake --build build/macos --target swim_core_tests swim_realtime -j8
 build/macos/swim_core_tests
 ```
 
-Result: build succeeded and every core test passed, including all four render
-coordinator tests and the expanded metrics snapshot/reset contract.
+Result: build succeeded and every core test passed, including the expanded
+render coordinator and metrics snapshot/reset contracts.
 
 ```text
 ctest --test-dir build/macos --output-on-failure
@@ -105,18 +128,19 @@ build/macos/swim_realtime --config configs/macos_20260629.conf \
   --preview=false --encode=false --duration-seconds=10
 ```
 
-Final metrics:
+Review-fix final metrics:
 
 ```json
-{"final":true,"received":1794,"decoded":1794,"published":1794,"overwritten":220,"reused":229,"render_submissions":300,"render_drops":5,"render_active_ns":10000000000,"render_fps":30.000,"pool_exhaustion":0,"decoded_pixel_host_copies":0,"native_texture_wrappers":3588,"native_command_buffers":300,"native_decode_tickets":96,"sources_healthy":6,"output_width":5002,"output_height":2102}
+{"final":true,"received":1851,"decoded":1851,"published":1851,"overwritten":16,"reused":2,"render_submissions":300,"render_completions":300,"render_drops":9,"render_active_ns":10000000000,"render_first_submit_ns":2714816614147166,"render_last_completion_ns":2714826597606833,"render_completion_interval_ns":9983459667,"render_fps":30.050,"render_inflight_capacity":3,"render_inflight_high_water":1,"render_inflight_pool_misses":0,"render_output_capacity":4,"render_output_high_water":1,"render_output_pool_misses":0,"frame_age_ms_p99":[16,29,30,29,30,27],"pool_exhaustion":0,"decoded_pixel_host_copies":0,"native_texture_wrappers":3702,"native_command_buffers":300,"native_decode_tickets":96,"sources_healthy":6,"output_width":5002,"output_height":2102}
 ```
 
-The five drops occurred during decoder startup before the first complete
-six-frame snapshot. They are counted but excluded from the configured
-10-second active render interval. The 96 native decode tickets equal the fixed
-six-lane capacity of 16 tickets per lane; configured decoded surfaces,
-in-flight renders, and output surfaces remained bounded at 8 per lane, 3, and
-4 respectively.
+The nine not-ready drops occurred during decoder startup before the first complete
+six-frame snapshot. They are counted but excluded from the configured active
+interval. All 300 accepted submissions completed successfully. The 96 native
+decode tickets equal the fixed six-lane capacity of 16 tickets per lane;
+configured in-flight/output capacities were 3/4, their high-water marks were
+1/1, both miss counts were zero, and all six frame-age p99 values were at most
+30 ms.
 
 ### Signal shutdown
 

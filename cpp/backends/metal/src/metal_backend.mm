@@ -48,8 +48,7 @@ class MetalRendererAdapter final : public swim::core::IRenderer {
                        const swim::core::AppConfig& config,
                        swim::core::RuntimeCounters& metrics)
       : context_(std::move(context)),
-        renderer_(context_, asset, config),
-        metrics_(metrics) {
+        renderer_(context_, asset, config, &metrics) {
     auto* descriptor = [MTLTextureDescriptor
         texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
                                     width:2
@@ -75,13 +74,51 @@ class MetalRendererAdapter final : public swim::core::IRenderer {
     }
   }
 
-  bool submit(const swim::core::RenderSnapshot& snapshot) override {
+  swim::core::RenderSubmitResult submit(
+      const swim::core::RenderSnapshot& snapshot) override {
+    for (std::size_t camera = 0; camera < snapshot.frames.size(); ++camera) {
+      const auto& lease = snapshot.frames[camera];
+      if (!lease) {
+        return swim::core::RenderSubmitResult::not_ready;
+      }
+      if (lease.metadata().camera_index != camera) {
+        return swim::core::RenderSubmitResult::invalid;
+      }
+      if (lease.metadata().width == 0 || lease.metadata().height == 0) {
+        return swim::core::RenderSubmitResult::invalid;
+      }
+      if (lease.backend_tag() == kMetalDecodedSurfaceTag) {
+        auto* surface = static_cast<MetalDecodedSurface*>(
+            lease.native(kMetalDecodedSurfaceTag));
+        if (surface == nullptr || surface->camera_index != camera ||
+            surface->luma == nil || surface->chroma == nil ||
+            lease.metadata().pixel_format == swim::core::PixelFormat::bgra8) {
+          return swim::core::RenderSubmitResult::invalid;
+        }
+      } else if (lease.backend_tag() == kMetalFrameBackendTag) {
+        auto* view = static_cast<MetalFrameView*>(
+            lease.native(kMetalFrameBackendTag));
+        const bool valid_bgra =
+            lease.metadata().pixel_format == swim::core::PixelFormat::bgra8 &&
+            view != nullptr && view->rgba != nil;
+        const bool valid_nv12 =
+            lease.metadata().pixel_format != swim::core::PixelFormat::bgra8 &&
+            view != nullptr && view->luma != nil && view->chroma != nil;
+        if (!valid_bgra && !valid_nv12) {
+          return swim::core::RenderSubmitResult::invalid;
+        }
+      } else {
+        return swim::core::RenderSubmitResult::invalid;
+      }
+    }
     MetalRenderResult result;
     const auto accepted = renderer_.submit(snapshot, result);
     if (accepted) {
-      metrics_.native_command_buffers.fetch_add(1, std::memory_order_relaxed);
+      return swim::core::RenderSubmitResult::accepted;
     }
-    return accepted;
+    return renderer_.has_fatal_error()
+               ? swim::core::RenderSubmitResult::fatal
+               : swim::core::RenderSubmitResult::backpressure;
   }
 
   swim::core::FrameLease replacement_frame(
@@ -106,7 +143,6 @@ class MetalRendererAdapter final : public swim::core::IRenderer {
  private:
   std::shared_ptr<MetalContext> context_;
   MetalStitchRenderer renderer_;
-  swim::core::RuntimeCounters& metrics_;
   id<MTLTexture> replacement_texture_ = nil;
   std::array<MetalFrameView, 6> replacements_;
 };
@@ -127,7 +163,7 @@ class MetalSourceAdapter final : public swim::core::ISource {
   void start(swim::core::LatestFrameMailbox& output) override {
     source_impl_ = std::make_unique<Mp4VideoToolboxSource>(
         context_, source_, camera_index_, output, metrics_, config_.mode,
-        std::chrono::duration_cast<std::chrono::milliseconds>(config_.duration),
+        std::chrono::milliseconds{0},
         config_.decode_ticket_pool, config_.decode_surface_pool);
     source_impl_->start();
   }

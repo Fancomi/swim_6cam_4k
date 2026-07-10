@@ -7,6 +7,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <stdexcept>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -44,9 +46,16 @@ swim::core::FrameLease mock_frame(
 
 class FakeRenderer final : public swim::core::IRenderer {
  public:
-  bool submit(const swim::core::RenderSnapshot& snapshot) override {
+  swim::core::RenderSubmitResult submit(
+      const swim::core::RenderSnapshot& snapshot) override {
     snapshots.push_back(snapshot);
-    return accept_submissions && snapshots.size() > reject_first;
+    submit_count.fetch_add(1, std::memory_order_relaxed);
+    if (!accept_submissions || snapshots.size() <= reject_first) {
+      return result == swim::core::RenderSubmitResult::accepted
+                 ? swim::core::RenderSubmitResult::backpressure
+                 : result;
+    }
+    return result;
   }
 
   swim::core::FrameLease replacement_frame(
@@ -58,6 +67,9 @@ class FakeRenderer final : public swim::core::IRenderer {
 
   bool accept_submissions{true};
   std::size_t reject_first{};
+  swim::core::RenderSubmitResult result{
+      swim::core::RenderSubmitResult::accepted};
+  std::atomic_uint64_t submit_count{};
   std::vector<swim::core::RenderSnapshot> snapshots;
 };
 
@@ -129,6 +141,45 @@ TEST_CASE(coordinator_submits_once_and_counts_backpressure_drop) {
   CHECK_EQ(fixture.metrics.render_drops.load(std::memory_order_relaxed), 1u);
 }
 
+TEST_CASE(coordinator_distinguishes_recoverable_and_fatal_submit_results) {
+  const auto now = std::chrono::steady_clock::now();
+  for (const auto recoverable : {swim::core::RenderSubmitResult::not_ready,
+                                 swim::core::RenderSubmitResult::backpressure}) {
+    FakeRenderer renderer;
+    renderer.result = recoverable;
+    CoordinatorFixture fixture{renderer};
+    fixture.publish_all(1, now);
+    CHECK_EQ(fixture.coordinator.tick(now), recoverable);
+    CHECK_EQ(fixture.metrics.render_drops.load(), 1u);
+  }
+  for (const auto unrecoverable : {swim::core::RenderSubmitResult::fatal,
+                                   swim::core::RenderSubmitResult::invalid}) {
+    FakeRenderer renderer;
+    renderer.result = unrecoverable;
+    CoordinatorFixture fixture{renderer};
+    fixture.publish_all(1, now);
+    bool threw = false;
+    try {
+      static_cast<void>(fixture.coordinator.tick(now));
+    } catch (const std::runtime_error&) {
+      threw = true;
+    }
+    CHECK(threw);
+  }
+}
+
+TEST_CASE(coordinator_counts_real_sequence_gap_after_replacement) {
+  const auto t0 = std::chrono::steady_clock::now();
+  FakeRenderer renderer;
+  CoordinatorFixture fixture{renderer};
+  fixture.publish_all(7, t0);
+  fixture.coordinator.tick(t0);
+  fixture.coordinator.tick(t0 + 1001ms);
+  fixture.publish(0, 12, t0 + 1002ms);
+  fixture.coordinator.tick(t0 + 1002ms);
+  CHECK_EQ(fixture.metrics.overwritten.load(), 4u);
+}
+
 TEST_CASE(coordinator_finite_duration_starts_at_first_accepted_submit) {
   FakeRenderer renderer;
   renderer.reject_first = 3;
@@ -144,4 +195,29 @@ TEST_CASE(coordinator_finite_duration_starts_at_first_accepted_submit) {
         100u);
   CHECK(fixture.metrics.render_active_ns.load(std::memory_order_relaxed) >=
         990'000'000u);
+}
+
+TEST_CASE(coordinator_zero_duration_runs_until_stop_is_requested) {
+  FakeRenderer renderer;
+  CoordinatorFixture fixture{renderer};
+  fixture.config.mode = swim::core::RunMode::benchmark;
+  fixture.config.duration = 0s;
+  std::jthread worker([&](std::stop_token token) {
+    fixture.coordinator.run(token);
+  });
+  while (renderer.submit_count.load(std::memory_order_relaxed) < 10u) {
+    std::this_thread::yield();
+  }
+  worker.request_stop();
+  worker.join();
+  CHECK(renderer.snapshots.size() >= 10u);
+}
+
+TEST_CASE(coordinator_uses_exact_integer_rational_cadence) {
+  CHECK_EQ(swim::core::RenderCoordinator::cadence_offset(1, 30'000, 1'001),
+           33'366'666ns);
+  CHECK_EQ(swim::core::RenderCoordinator::cadence_offset(2, 30'000, 1'001),
+           66'733'333ns);
+  CHECK_EQ(swim::core::RenderCoordinator::cadence_offset(3, 30'000, 1'001),
+           100'100'000ns);
 }

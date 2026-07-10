@@ -367,7 +367,8 @@ class MetalStitchRenderer::Impl final {
 
   Impl(std::shared_ptr<MetalContext> context,
        const swim::core::RuntimeAsset& asset,
-       const swim::core::AppConfig& config)
+       const swim::core::AppConfig& config,
+       swim::core::RuntimeCounters* metrics)
       : context_(std::move(context)),
         logical_width_(asset.logical_width),
         logical_height_(asset.logical_height),
@@ -376,7 +377,8 @@ class MetalStitchRenderer::Impl final {
         inflight_count_(validate_inflight_capacity(config.render_inflight)),
         in_flight_(std::make_unique<InFlightRecord[]>(inflight_count_)),
         output_pool_(context_, config.output_pool, encoded_width_,
-                     encoded_height_) {
+                     encoded_height_),
+        metrics_(metrics) {
     if (context_ == nullptr || context_->device == nil ||
         context_->command_queue == nil || context_->texture_cache == nullptr) {
       throw std::invalid_argument("Metal renderer requires a valid context");
@@ -387,6 +389,12 @@ class MetalStitchRenderer::Impl final {
     }
     if (asset.cameras.size() != cameras_.size()) {
       throw std::invalid_argument("Metal renderer requires six cameras");
+    }
+    if (metrics_ != nullptr) {
+      metrics_->render_inflight_capacity.store(inflight_count_,
+                                               std::memory_order_relaxed);
+      metrics_->render_output_capacity.store(config.output_pool,
+                                             std::memory_order_relaxed);
     }
     for (std::size_t index = 0; index < cameras_.size(); ++index) {
       if (asset.cameras[index].camera_id != kCameraOrder[index]) {
@@ -438,13 +446,26 @@ class MetalStitchRenderer::Impl final {
       }
     }
     if (record == nullptr) {
+      record_pool_miss(true);
       return false;
     }
+    const auto in_use =
+        inflight_in_use_.fetch_add(1, std::memory_order_relaxed) + 1;
+    update_high_water(inflight_high_water_, in_use,
+                      metrics_ == nullptr
+                          ? nullptr
+                          : &metrics_->render_inflight_high_water);
 
     auto output = output_pool_.try_acquire();
     if (!output) {
+      inflight_in_use_.fetch_sub(1, std::memory_order_relaxed);
       record->busy.store(false, std::memory_order_release);
+      record_pool_miss(false);
       return false;
+    }
+    if (metrics_ != nullptr) {
+      metrics_->render_output_high_water.store(output_pool_.high_water(),
+                                               std::memory_order_relaxed);
     }
 
     try {
@@ -461,6 +482,10 @@ class MetalStitchRenderer::Impl final {
       if (command == nil) {
         throw std::runtime_error("cannot create Metal command buffer");
       }
+      if (metrics_ != nullptr) {
+        metrics_->native_command_buffers.fetch_add(1,
+                                                    std::memory_order_relaxed);
+      }
       encode_stitch(command, frames, *record, result.output.texture());
       result.diagnostic_command_buffer = command;
 
@@ -470,12 +495,16 @@ class MetalStitchRenderer::Impl final {
         if (completed.status != MTLCommandBufferStatusCompleted) {
           owner->record_fatal(
               metal_error(@"Metal command buffer failed", completed.error));
+        } else {
+          owner->record_completion();
         }
         completed_record->input_leases = {};
         completed_record->frame_views = {};
         completed_record->output = {};
+        owner->inflight_in_use_.fetch_sub(1, std::memory_order_relaxed);
         completed_record->busy.store(false, std::memory_order_release);
       }];
+      record_first_submit();
       [command commit];
       return true;
     } catch (const std::exception& error) {
@@ -483,6 +512,7 @@ class MetalStitchRenderer::Impl final {
       record->input_leases = {};
       record->frame_views = {};
       record->output = {};
+      inflight_in_use_.fetch_sub(1, std::memory_order_relaxed);
       record->busy.store(false, std::memory_order_release);
       result.output = {};
       result.diagnostic_command_buffer = nil;
@@ -492,6 +522,7 @@ class MetalStitchRenderer::Impl final {
       record->input_leases = {};
       record->frame_views = {};
       record->output = {};
+      inflight_in_use_.fetch_sub(1, std::memory_order_relaxed);
       record->busy.store(false, std::memory_order_release);
       result.output = {};
       result.diagnostic_command_buffer = nil;
@@ -568,6 +599,62 @@ class MetalStitchRenderer::Impl final {
   }
 
  private:
+  static std::uint64_t steady_nanoseconds() noexcept {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<
+        std::chrono::nanoseconds>(std::chrono::steady_clock::now()
+                                     .time_since_epoch())
+                                          .count());
+  }
+
+  static void update_high_water(
+      std::atomic_uint32_t& local, std::uint32_t usage,
+      std::atomic_uint64_t* external) noexcept {
+    auto high = local.load(std::memory_order_relaxed);
+    while (usage > high &&
+           !local.compare_exchange_weak(high, usage,
+                                        std::memory_order_relaxed,
+                                        std::memory_order_relaxed)) {
+    }
+    if (external != nullptr) {
+      external->store(local.load(std::memory_order_relaxed),
+                      std::memory_order_relaxed);
+    }
+  }
+
+  void record_pool_miss(bool inflight) noexcept {
+    if (metrics_ == nullptr) {
+      return;
+    }
+    metrics_->pool_exhaustion.fetch_add(1, std::memory_order_relaxed);
+    auto& counter = inflight ? metrics_->render_inflight_pool_misses
+                             : metrics_->render_output_pool_misses;
+    counter.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  void record_first_submit() noexcept {
+    if (metrics_ == nullptr) {
+      return;
+    }
+    auto expected = std::uint64_t{0};
+    metrics_->render_first_submit_ns.compare_exchange_strong(
+        expected, steady_nanoseconds(), std::memory_order_relaxed,
+        std::memory_order_relaxed);
+  }
+
+  void record_completion() noexcept {
+    if (metrics_ != nullptr) {
+      metrics_->render_completions.fetch_add(1, std::memory_order_relaxed);
+      const auto completed_at = steady_nanoseconds();
+      auto last = metrics_->render_last_completion_ns.load(
+          std::memory_order_relaxed);
+      while (completed_at > last &&
+             !metrics_->render_last_completion_ns.compare_exchange_weak(
+                 last, completed_at, std::memory_order_relaxed,
+                 std::memory_order_relaxed)) {
+      }
+    }
+  }
+
   void record_fatal(std::string message) noexcept {
     try {
       std::lock_guard lock(fatal_error_mutex_);
@@ -798,6 +885,9 @@ class MetalStitchRenderer::Impl final {
   std::uint32_t inflight_count_;
   std::unique_ptr<InFlightRecord[]> in_flight_;
   MetalOutputPool output_pool_;
+  swim::core::RuntimeCounters* metrics_;
+  std::atomic_uint32_t inflight_in_use_{0};
+  std::atomic_uint32_t inflight_high_water_{0};
   std::atomic_bool fatal_error_{false};
   mutable std::mutex fatal_error_mutex_;
   std::string fatal_error_message_;
@@ -806,8 +896,10 @@ class MetalStitchRenderer::Impl final {
 MetalStitchRenderer::MetalStitchRenderer(
     std::shared_ptr<MetalContext> context,
     const swim::core::RuntimeAsset& asset,
-    const swim::core::AppConfig& config)
-    : impl_(std::make_unique<Impl>(std::move(context), asset, config)) {}
+    const swim::core::AppConfig& config,
+    swim::core::RuntimeCounters* metrics)
+    : impl_(std::make_unique<Impl>(std::move(context), asset, config,
+                                   metrics)) {}
 
 MetalStitchRenderer::~MetalStitchRenderer() = default;
 

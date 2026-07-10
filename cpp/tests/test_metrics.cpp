@@ -211,6 +211,43 @@ TEST_CASE(runtime_counter_snapshot_is_immutable_and_resets_every_counter) {
   CHECK_EQ(empty.native_callback_wrappers, 0u);
 }
 
+TEST_CASE(render_completion_capacity_and_frame_age_metrics_snapshot_exactly) {
+  swim::core::RuntimeCounters counters;
+  counters.render_submissions.store(31);
+  counters.render_completions.store(30);
+  counters.render_first_submit_ns.store(2'000'000'000);
+  counters.render_last_completion_ns.store(3'000'000'000);
+  counters.render_inflight_capacity.store(3);
+  counters.render_inflight_high_water.store(2);
+  counters.render_inflight_pool_misses.store(4);
+  counters.render_output_capacity.store(4);
+  counters.render_output_high_water.store(3);
+  counters.render_output_pool_misses.store(5);
+  for (std::size_t camera = 0; camera < counters.frame_age.size(); ++camera) {
+    counters.frame_age[camera].observe(
+        std::chrono::milliseconds{static_cast<std::int64_t>(camera + 7)});
+  }
+
+  const auto snapshot = counters.snapshot_and_reset();
+  CHECK_EQ(snapshot.render_completion_interval_ns(), 1'000'000'000u);
+  CHECK_EQ(snapshot.render_completion_fps(), 30.0);
+  CHECK_EQ(snapshot.render_inflight_capacity, 3u);
+  CHECK_EQ(snapshot.render_inflight_high_water, 2u);
+  CHECK_EQ(snapshot.render_inflight_pool_misses, 4u);
+  CHECK_EQ(snapshot.render_output_capacity, 4u);
+  CHECK_EQ(snapshot.render_output_high_water, 3u);
+  CHECK_EQ(snapshot.render_output_pool_misses, 5u);
+  for (std::size_t camera = 0; camera < snapshot.frame_age_ms_p99.size();
+       ++camera) {
+    CHECK_EQ(snapshot.frame_age_ms_p99[camera], camera + 7);
+  }
+
+  const auto empty = counters.snapshot_and_reset();
+  CHECK_EQ(empty.render_completions, 0u);
+  CHECK_EQ(empty.render_completion_interval_ns(), 0u);
+  CHECK_EQ(empty.render_completion_fps(), 0.0);
+}
+
 TEST_CASE(fixed_pool_rejects_capacities_outside_one_to_sixty_four) {
   CHECK_THROWS_WITH((swim::core::FixedSlotPool<std::uint64_t>{0}),
                     "fixed pool capacity must be between 1 and 64");

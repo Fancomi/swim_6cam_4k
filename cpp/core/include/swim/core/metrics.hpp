@@ -56,8 +56,18 @@ struct MetricsSnapshot final {
   const std::uint64_t malformed;
   const std::uint64_t reconnects;
   const std::uint64_t render_submissions;
+  const std::uint64_t render_completions;
   const std::uint64_t render_drops;
   const std::uint64_t render_active_ns;
+  const std::uint64_t render_first_submit_ns;
+  const std::uint64_t render_last_completion_ns;
+  const std::uint64_t render_inflight_capacity;
+  const std::uint64_t render_inflight_high_water;
+  const std::uint64_t render_inflight_pool_misses;
+  const std::uint64_t render_output_capacity;
+  const std::uint64_t render_output_high_water;
+  const std::uint64_t render_output_pool_misses;
+  const std::array<std::uint64_t, 6> frame_age_ms_p99;
   const std::uint64_t preview_drops;
   const std::uint64_t encode_drops;
   const std::uint64_t decoded_pixel_host_copies;
@@ -66,6 +76,9 @@ struct MetricsSnapshot final {
   const std::uint64_t native_command_buffers;
   const std::uint64_t native_decode_tickets;
   const std::uint64_t native_callback_wrappers;
+
+  std::uint64_t render_completion_interval_ns() const noexcept;
+  double render_completion_fps() const noexcept;
 };
 
 struct RuntimeCounters final {
@@ -77,8 +90,17 @@ struct RuntimeCounters final {
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t malformed{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t reconnects{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_submissions{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_completions{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_drops{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_active_ns{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_first_submit_ns{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_last_completion_ns{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_inflight_capacity{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_inflight_high_water{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_inflight_pool_misses{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_output_capacity{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_output_high_water{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_output_pool_misses{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t preview_drops{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t encode_drops{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t
@@ -93,6 +115,9 @@ struct RuntimeCounters final {
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t native_decode_tickets{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t
       native_callback_wrappers{};
+
+  // Written only by the render thread and snapshotted after that thread joins.
+  std::array<FixedLatencyHistogram, 6> frame_age;
 
   MetricsSnapshot snapshot_and_reset() noexcept;
 };

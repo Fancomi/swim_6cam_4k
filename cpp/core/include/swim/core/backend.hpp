@@ -32,10 +32,18 @@ struct RenderSnapshot {
   std::chrono::steady_clock::time_point sampled_at;
 };
 
+enum class RenderSubmitResult : std::uint8_t {
+  accepted,
+  not_ready,
+  backpressure,
+  fatal,
+  invalid,
+};
+
 class IRenderer {
  public:
   virtual ~IRenderer() = default;
-  virtual bool submit(const RenderSnapshot& snapshot) = 0;
+  virtual RenderSubmitResult submit(const RenderSnapshot& snapshot) = 0;
   virtual FrameLease replacement_frame(
       std::uint32_t camera_index) const = 0;
   virtual void drain() = 0;

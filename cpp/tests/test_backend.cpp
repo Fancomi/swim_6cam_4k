@@ -27,7 +27,10 @@ class NullSource final : public swim::core::ISource {
 
 class NullRenderer final : public swim::core::IRenderer {
  public:
-  bool submit(const swim::core::RenderSnapshot&) override { return true; }
+  swim::core::RenderSubmitResult submit(
+      const swim::core::RenderSnapshot&) override {
+    return swim::core::RenderSubmitResult::accepted;
+  }
 
   swim::core::FrameLease replacement_frame(
       std::uint32_t) const override {
@@ -89,7 +92,8 @@ TEST_CASE(registry_creates_a_backend_that_implements_every_contract) {
   swim::core::RuntimeAsset asset{};
   auto renderer = backend->make_renderer(asset, config);
   swim::core::RenderSnapshot snapshot{};
-  CHECK(renderer->submit(snapshot));
+  CHECK_EQ(renderer->submit(snapshot),
+           swim::core::RenderSubmitResult::accepted);
   CHECK(!renderer->replacement_frame(0));
   renderer->drain();
 

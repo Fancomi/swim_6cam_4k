@@ -17,7 +17,8 @@ class MetalStitchRenderer final {
  public:
   MetalStitchRenderer(std::shared_ptr<MetalContext> context,
                       const swim::core::RuntimeAsset& asset,
-                      const swim::core::AppConfig& config);
+                      const swim::core::AppConfig& config,
+                      swim::core::RuntimeCounters* metrics = nullptr);
   ~MetalStitchRenderer();
   MetalStitchRenderer(const MetalStitchRenderer&) = delete;
   MetalStitchRenderer& operator=(const MetalStitchRenderer&) = delete;
