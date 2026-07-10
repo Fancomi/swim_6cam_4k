@@ -90,3 +90,39 @@ add_swim_cli_error_test(swim_cli_requires_config requires_config)
 add_swim_cli_error_test(swim_cli_rejects_missing_config_path missing_path)
 add_swim_cli_error_test(swim_cli_rejects_repeated_config repeated_config)
 add_swim_cli_error_test(swim_cli_rejects_unknown_override unknown_override)
+
+if(APPLE)
+  enable_language(OBJCXX)
+  find_library(SWIM_METAL_FRAMEWORK Metal REQUIRED)
+  find_library(SWIM_COREVIDEO_FRAMEWORK CoreVideo REQUIRED)
+  find_library(SWIM_COREMEDIA_FRAMEWORK CoreMedia REQUIRED)
+  find_library(SWIM_IMAGEIO_FRAMEWORK ImageIO REQUIRED)
+  find_library(SWIM_FOUNDATION_FRAMEWORK Foundation REQUIRED)
+  find_library(SWIM_IOSURFACE_FRAMEWORK IOSurface REQUIRED)
+  find_library(SWIM_COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
+
+  add_library(swim_metal_renderer
+    cpp/backends/metal/src/metal_renderer.mm)
+  target_include_directories(swim_metal_renderer PUBLIC
+    cpp/backends/metal/include)
+  target_compile_definitions(swim_metal_renderer PRIVATE
+    SWIM_METAL_SHADER_SOURCE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/cpp/backends/metal/shaders/stitch.metal")
+  target_compile_options(swim_metal_renderer PRIVATE -fobjc-arc)
+  target_link_libraries(swim_metal_renderer PUBLIC
+    swim_core
+    ${SWIM_METAL_FRAMEWORK}
+    ${SWIM_COREVIDEO_FRAMEWORK}
+    ${SWIM_COREMEDIA_FRAMEWORK}
+    ${SWIM_IMAGEIO_FRAMEWORK}
+    ${SWIM_FOUNDATION_FRAMEWORK}
+    ${SWIM_IOSURFACE_FRAMEWORK}
+    ${SWIM_COREGRAPHICS_FRAMEWORK})
+  swim_enable_warnings(swim_metal_renderer)
+  swim_enable_sanitizers(swim_metal_renderer)
+
+  add_executable(metal_golden_test cpp/tests/metal_golden_test.mm)
+  target_compile_options(metal_golden_test PRIVATE -fobjc-arc)
+  target_link_libraries(metal_golden_test PRIVATE swim_metal_renderer)
+  swim_enable_warnings(metal_golden_test)
+  swim_enable_sanitizers(metal_golden_test)
+endif()
