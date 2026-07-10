@@ -26,7 +26,10 @@ add_custom_target(runtime_asset DEPENDS ${RUNTIME_ASSET})
 
 add_library(swim_core
   cpp/core/src/asset.cpp
-  cpp/core/src/frame.cpp)
+  cpp/core/src/camera_health.cpp
+  cpp/core/src/frame.cpp
+  cpp/core/src/hot_path_allocations.cpp
+  cpp/core/src/metrics.cpp)
 target_include_directories(swim_core PUBLIC cpp/core/include)
 swim_enable_warnings(swim_core)
 swim_enable_sanitizers(swim_core)
@@ -35,7 +38,9 @@ enable_testing()
 add_executable(swim_core_tests
   cpp/tests/test_main.cpp
   cpp/tests/test_asset.cpp
-  cpp/tests/test_frame_mailbox.cpp)
+  cpp/tests/test_camera_health.cpp
+  cpp/tests/test_frame_mailbox.cpp
+  cpp/tests/test_metrics.cpp)
 target_link_libraries(swim_core_tests PRIVATE swim_core)
 target_compile_definitions(swim_core_tests PRIVATE
   SWIM_TEST_ASSET_PATH="${RUNTIME_ASSET}")
