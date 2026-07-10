@@ -10,6 +10,12 @@ struct StitchVertex {
 struct VertexUniforms {
   float2 output_size;
   float2 position_offset;
+  float2 mesh_min;
+  float2 mesh_max;
+  float perimeter_tolerance;
+  float inclusive_expansion;
+  uint expand_perimeter;
+  uint reserved;
 };
 
 struct FragmentUniforms {
@@ -30,8 +36,24 @@ vertex VertexOut stitch_vertex(
     device const StitchVertex* vertices [[buffer(0)]],
     constant VertexUniforms& uniforms [[buffer(1)]]) {
   const StitchVertex input_vertex = vertices[vertex_id];
-  const float2 pixel =
-      input_vertex.output_position + uniforms.position_offset;
+  float2 raster_position = input_vertex.output_position;
+  if (uniforms.expand_perimeter != 0) {
+    if (abs(input_vertex.output_position.x - uniforms.mesh_min.x) <=
+        uniforms.perimeter_tolerance) {
+      raster_position.x -= uniforms.inclusive_expansion;
+    } else if (abs(input_vertex.output_position.x - uniforms.mesh_max.x) <=
+               uniforms.perimeter_tolerance) {
+      raster_position.x += uniforms.inclusive_expansion;
+    }
+    if (abs(input_vertex.output_position.y - uniforms.mesh_min.y) <=
+        uniforms.perimeter_tolerance) {
+      raster_position.y -= uniforms.inclusive_expansion;
+    } else if (abs(input_vertex.output_position.y - uniforms.mesh_max.y) <=
+               uniforms.perimeter_tolerance) {
+      raster_position.y += uniforms.inclusive_expansion;
+    }
+  }
+  const float2 pixel = raster_position + uniforms.position_offset;
   VertexOut out;
   out.position = float4(pixel.x / uniforms.output_size.x * 2.0f - 1.0f,
                         1.0f - pixel.y / uniforms.output_size.y * 2.0f,

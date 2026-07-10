@@ -8,6 +8,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstring>
 #include <exception>
 #include <fstream>
 #include <iterator>
@@ -16,7 +17,6 @@
 #include <string>
 #include <thread>
 #include <utility>
-#include <vector>
 
 namespace swim::metal {
 
@@ -208,12 +208,22 @@ namespace {
 
 constexpr std::array<const char*, 6> kCameraOrder{
     "cam3", "cam2", "cam1", "cam4", "cam5", "cam6"};
+constexpr float kPerimeterTolerance = 1.0F / 64.0F;
+constexpr float kInclusiveExpansion = 1.0F / 16.0F;
 
 struct VertexUniforms final {
   float output_width;
   float output_height;
   float position_offset_x;
   float position_offset_y;
+  float mesh_min_x;
+  float mesh_min_y;
+  float mesh_max_x;
+  float mesh_max_y;
+  float perimeter_tolerance;
+  float inclusive_expansion;
+  std::uint32_t expand_perimeter;
+  std::uint32_t reserved;
 };
 
 struct FragmentUniforms final {
@@ -227,7 +237,7 @@ struct FragmentUniforms final {
   std::uint32_t full_range;
 };
 
-static_assert(sizeof(VertexUniforms) == 16);
+static_assert(sizeof(VertexUniforms) == 48);
 static_assert(sizeof(FragmentUniforms) == 32);
 
 std::string metal_error(NSString* prefix, NSError* error) {
@@ -334,16 +344,20 @@ class MetalStitchRenderer::Impl final {
     id<MTLBuffer> indices = nil;
     id<MTLTexture> weights = nil;
     NSUInteger index_count = 0;
+    NSUInteger vertex_bytes = 0;
     float weight_x = 0.0F;
     float weight_y = 0.0F;
     float weight_width = 0.0F;
     float weight_height = 0.0F;
+    float mesh_min_x = 0.0F;
+    float mesh_min_y = 0.0F;
+    float mesh_max_x = 0.0F;
+    float mesh_max_y = 0.0F;
   };
 
   struct InFlightRecord final {
     std::atomic_bool busy{false};
     id<MTLTexture> accumulation = nil;
-    id<MTLCommandBuffer> command_buffer = nil;
     std::array<MetalFrameView, 6> frame_views;
     std::array<swim::core::FrameLease, 6> input_leases;
     MetalOutputLease output;
@@ -445,7 +459,6 @@ class MetalStitchRenderer::Impl final {
       if (command == nil) {
         throw std::runtime_error("cannot create Metal command buffer");
       }
-      record->command_buffer = command;
       encode_stitch(command, frames, *record, result.output.texture());
       result.diagnostic_command_buffer = command;
 
@@ -458,7 +471,6 @@ class MetalStitchRenderer::Impl final {
         completed_record->input_leases = {};
         completed_record->frame_views = {};
         completed_record->output = {};
-        completed_record->command_buffer = nil;
         completed_record->busy.store(false, std::memory_order_release);
       }];
       [command commit];
@@ -467,7 +479,6 @@ class MetalStitchRenderer::Impl final {
       record->input_leases = {};
       record->frame_views = {};
       record->output = {};
-      record->command_buffer = nil;
       record->busy.store(false, std::memory_order_release);
       result.output = {};
       result.diagnostic_command_buffer = nil;
@@ -495,7 +506,33 @@ class MetalStitchRenderer::Impl final {
     return fatal_error_.load(std::memory_order_acquire);
   }
 
+  bool uploaded_vertices_match(
+      const swim::core::RuntimeAsset& asset) const noexcept {
+    if (asset.cameras.size() != cameras_.size()) {
+      return false;
+    }
+    for (std::size_t index = 0; index < cameras_.size(); ++index) {
+      const auto& source = asset.cameras[index];
+      const auto& camera = cameras_[index];
+      const auto expected_bytes =
+          source.vertices.size() * sizeof(source.vertices[0]);
+      if (camera.vertices == nil || camera.vertex_bytes != expected_bytes ||
+          camera.vertices.length != expected_bytes ||
+          std::memcmp(camera.vertices.contents, source.vertices.data(),
+                      expected_bytes) != 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  float raster_position_expansion() const noexcept {
+    return kInclusiveExpansion;
+  }
+
   void drain() {
+    // Completion release-stores busy only after all retained resources are
+    // cleared, so drain needs no cross-thread ARC command-buffer field.
     for (;;) {
       bool pending = false;
       for (std::uint32_t index = 0; index < inflight_count_; ++index) {
@@ -504,10 +541,6 @@ class MetalStitchRenderer::Impl final {
           continue;
         }
         pending = true;
-        id<MTLCommandBuffer> command = record.command_buffer;
-        if (command != nil) {
-          [command waitUntilCompleted];
-        }
       }
       if (!pending) {
         return;
@@ -528,43 +561,19 @@ class MetalStitchRenderer::Impl final {
                   source.weight_height) {
         throw std::invalid_argument("Metal camera asset is empty or malformed");
       }
-      auto raster_vertices = source.vertices;
-      float mesh_min_x = raster_vertices.front().output_x;
+      float mesh_min_x = source.vertices.front().output_x;
       float mesh_max_x = mesh_min_x;
-      float mesh_min_y = raster_vertices.front().output_y;
+      float mesh_min_y = source.vertices.front().output_y;
       float mesh_max_y = mesh_min_y;
-      for (const auto& vertex : raster_vertices) {
+      for (const auto& vertex : source.vertices) {
         mesh_min_x = std::min(mesh_min_x, vertex.output_x);
         mesh_max_x = std::max(mesh_max_x, vertex.output_x);
         mesh_min_y = std::min(mesh_min_y, vertex.output_y);
         mesh_max_y = std::max(mesh_max_y, vertex.output_y);
       }
-      constexpr float kPerimeterTolerance = 1.0F / 64.0F;
-      constexpr float kInclusiveExpansion = 1.0F / 16.0F;
-      const auto coverage_min_x = static_cast<float>(source.weight_x);
-      const auto coverage_min_y = static_cast<float>(source.weight_y);
-      const auto coverage_max_x = coverage_min_x +
-          static_cast<float>(source.weight_width - 1U);
-      const auto coverage_max_y = coverage_min_y +
-          static_cast<float>(source.weight_height - 1U);
-      for (auto& vertex : raster_vertices) {
-        if (std::abs(vertex.output_x - mesh_min_x) <= kPerimeterTolerance) {
-          vertex.output_x = coverage_min_x - kInclusiveExpansion;
-        } else if (std::abs(vertex.output_x - mesh_max_x) <=
-                   kPerimeterTolerance) {
-          vertex.output_x = coverage_max_x + kInclusiveExpansion;
-        }
-        if (std::abs(vertex.output_y - mesh_min_y) <= kPerimeterTolerance) {
-          vertex.output_y = coverage_min_y - kInclusiveExpansion;
-        } else if (std::abs(vertex.output_y - mesh_max_y) <=
-                   kPerimeterTolerance) {
-          vertex.output_y = coverage_max_y + kInclusiveExpansion;
-        }
-      }
       camera.vertices = [context_->device
-          newBufferWithBytes:raster_vertices.data()
-                     length:raster_vertices.size() *
-                            sizeof(raster_vertices[0])
+          newBufferWithBytes:source.vertices.data()
+                     length:source.vertices.size() * sizeof(source.vertices[0])
                     options:MTLResourceStorageModeShared];
       camera.indices = [context_->device
           newBufferWithBytes:source.indices.data()
@@ -591,10 +600,16 @@ class MetalStitchRenderer::Impl final {
             bytesPerRow:static_cast<NSUInteger>(source.weight_width) *
                         sizeof(source.weights[0])];
       camera.index_count = source.indices.size();
+      camera.vertex_bytes =
+          source.vertices.size() * sizeof(source.vertices[0]);
       camera.weight_x = static_cast<float>(source.weight_x);
       camera.weight_y = static_cast<float>(source.weight_y);
       camera.weight_width = static_cast<float>(source.weight_width);
       camera.weight_height = static_cast<float>(source.weight_height);
+      camera.mesh_min_x = mesh_min_x;
+      camera.mesh_min_y = mesh_min_y;
+      camera.mesh_max_x = mesh_max_x;
+      camera.mesh_max_y = mesh_max_y;
     }
   }
 
@@ -647,9 +662,6 @@ class MetalStitchRenderer::Impl final {
       throw std::runtime_error("cannot create Metal stitch encoder");
     }
 
-    const VertexUniforms vertex_uniforms{
-        static_cast<float>(encoded_width_),
-        static_cast<float>(encoded_height_), 0.5F, 0.5F};
     for (std::size_t index = 0; index < cameras_.size(); ++index) {
       const auto& camera = cameras_[index];
       const auto& frame = frames[index];
@@ -670,6 +682,19 @@ class MetalStitchRenderer::Impl final {
                   swim::core::PixelFormat::nv12_full_range
               ? 1U
               : 0U};
+      const VertexUniforms vertex_uniforms{
+          static_cast<float>(encoded_width_),
+          static_cast<float>(encoded_height_),
+          0.5F,
+          0.5F,
+          camera.mesh_min_x,
+          camera.mesh_min_y,
+          camera.mesh_max_x,
+          camera.mesh_max_y,
+          kPerimeterTolerance,
+          kInclusiveExpansion,
+          1U,
+          0U};
 
       [encoder setVertexBuffer:camera.vertices offset:0 atIndex:0];
       [encoder setVertexBytes:&vertex_uniforms
@@ -711,7 +736,8 @@ class MetalStitchRenderer::Impl final {
     }
     const VertexUniforms resolve_vertex_uniforms{
         static_cast<float>(encoded_width_),
-        static_cast<float>(encoded_height_), 0.0F, 0.0F};
+        static_cast<float>(encoded_height_), 0.0F, 0.0F,
+        0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0U, 0U};
     const std::array<std::uint32_t, 4> dimensions{
         logical_width_, logical_height_, encoded_width_, encoded_height_};
     [encoder setRenderPipelineState:resolve_pipeline_];
@@ -791,6 +817,15 @@ void MetalStitchRenderer::drain() { impl_->drain(); }
 
 bool MetalStitchRenderer::has_fatal_error() const noexcept {
   return impl_->has_fatal_error();
+}
+
+bool MetalStitchRenderer::uploaded_vertices_match(
+    const swim::core::RuntimeAsset& asset) const noexcept {
+  return impl_->uploaded_vertices_match(asset);
+}
+
+float MetalStitchRenderer::raster_position_expansion() const noexcept {
+  return impl_->raster_position_expansion();
 }
 
 }  // namespace swim::metal

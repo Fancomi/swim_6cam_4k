@@ -8,7 +8,9 @@
 - Initial implementation: `e155962f40200f9ff2848d54ee9114b4edd8440b`
   (`feat: render stitched assets with Metal`)
 - Reviewer gate fix: `24a54fe` (`test: enforce local Metal golden boundaries`)
-- Metal/CMake reviewer fix: this report's follow-up commit
+- First Metal/CMake reviewer fix: `92bf3be`
+  (`fix: harden Metal golden validation`)
+- Byte-exact geometry/race reviewer fix: this report's follow-up commit
 
 ## Delivered
 
@@ -79,11 +81,15 @@
 - Resolve divides accumulated RGB by alpha, clamps to `[0,1]`, emits BGRA8,
   and forces the padded `x=5001` column and `y=2101` row black.
 - Mesh coordinates are pixel indices and the vertex shader's `+0.5` maps them
-  to pixel centers. To match OpenCV's inclusive polygon perimeter under Metal's
-  top-left raster rule, startup copies only vertex positions and expands each
-  camera mesh perimeter to its weight-mask bounds by `1/16` pixel (with a
-  `1/64`-pixel perimeter tolerance). UVs, indices, and weights are unchanged.
-  This covers real `x=5000`, `y=2100`, and both weighted banks at `y=1050`.
+  to pixel centers. Static MTL vertex buffers are uploaded byte-for-byte from
+  the asset, preserving positions and UVs. To match OpenCV's inclusive polygon
+  perimeter under Metal's top-left raster rule, startup records each mesh's
+  actual min/max bounds and the vertex shader changes only clip/raster position
+  by at most `1/16` pixel for perimeter vertices within a `1/64`-pixel
+  tolerance. It never snaps geometry to weight bounds; resolve disables the
+  expansion uniform. This covers real `x=5000`, `y=2100`, and both weighted
+  banks at `y=1050` while leaving uploaded geometry, UVs, indices, and weights
+  unchanged.
   Resolve reads the same accumulation coordinate with no neighbor substitution;
   only encoded padding `x=5001` and `y=2101` is forced black.
 
@@ -124,6 +130,15 @@
 12. Comparator regression tests demonstrate that localized `+32` corruption
     can retain globally passing metrics (`51.252064/0.999940874` at the center,
     `55.018373/0.999969107` at the last column) while failing the local gates.
+13. Byte-exact geometry RED: the focused target failed to link with undefined
+    exact-upload and expansion diagnostics. The GREEN executable verifies every
+    MTL vertex buffer byte against the asset (including UVs), checks shader-only
+    expansion is at most `1/16` pixel, and uses cam5 to detect the rejected
+    greater-than-one-pixel weight-bound snap.
+14. Completion/drain race review removed the shared non-atomic ARC command
+    field from in-flight records. Diagnostic results retain their exact command;
+    production `drain()` observes only atomic `busy`, whose completion handler
+    release-stores false after retained resources are cleared.
 
 ## Files
 
@@ -149,17 +164,18 @@
 - Exact brief command:
   - `cmake --build build/macos --target metal_golden_test` — exit 0.
   - `build/macos/metal_golden_test assets/generated/pool_4k.swasset
-    /tmp/pool-metal-clean-build.png` plus the six required PNGs — exit 0,
+    /tmp/pool-metal-byte-exact-final.png` plus the six required PNGs — exit 0,
     including output-pool lifetime, direct/snapshot metadata negatives, neutral
-    and non-neutral full-range NV12 shader tests, exact command completion, and
-    output `5002x2102`; GPU timestamps
-    `2668529240418042..2668529241502042 ns` for the clean-build run.
+    and non-neutral full-range NV12 shader tests, byte-exact uploaded geometry,
+    bounded shader-only expansion, exact command completion, and output
+    `5002x2102`; GPU timestamps
+    `2669136374733000..2669136375875166 ns` for the final run.
   - `.venv/bin/python -m python.validation.compare_images
-    outputs/images/pool.png /tmp/pool-metal-clean-build.png` — exit 0,
-    `PSNR=50.154753`, `SSIM=0.999907158`; center MAE/RMSE
-    `0.518963/0.727022`, last row `1.176165/2.075557`, last column
+    outputs/images/pool.png /tmp/pool-metal-byte-exact-final.png` — exit 0,
+    `PSNR=50.183620`, `SSIM=0.999908165`; center MAE/RMSE
+    `0.516830/0.722700`, last row `1.176165/2.075557`, last column
     `0.592734/1.550974`; both neighbor-duplication fingerprints false;
-    difference image `/tmp/pool-metal-clean-build_diff.png`.
+    difference image `/tmp/pool-metal-byte-exact-final_diff.png`.
 - `git diff --check` passed before commit.
 
 ## Self-Review and Concerns
@@ -178,5 +194,8 @@
   command retained for diagnostic wait. Production submission remains
   asynchronous and allocation-bounded, and exposes fatal GPU status without
   diagnostic readback.
+- In-flight records contain no command-buffer ARC field. This avoids concurrent
+  retain/release access between completion and `drain()`; bounded record lifetime
+  is synchronized only through the atomic busy flag.
 - The feature branch/worktree is preserved for subsequent tasks; no merge,
   push, or cleanup was performed.

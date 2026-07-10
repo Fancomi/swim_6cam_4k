@@ -57,6 +57,39 @@ void verify_output_pool_contract(
   }
 }
 
+void verify_static_vertex_contract(
+    const swim::metal::MetalStitchRenderer& renderer,
+    const swim::core::RuntimeAsset& asset) {
+  const auto cam5 = std::find_if(
+      asset.cameras.begin(), asset.cameras.end(), [](const auto& camera) {
+        return camera.camera_id == "cam5";
+      });
+  if (cam5 == asset.cameras.end()) {
+    throw std::runtime_error("cam5 regression fixture is unavailable");
+  }
+  const auto left = std::min_element(
+      cam5->vertices.begin(), cam5->vertices.end(),
+      [](const auto& lhs, const auto& rhs) {
+        return lhs.output_x < rhs.output_x;
+      })->output_x;
+  constexpr float kMaximumExpansion = 1.0F / 16.0F;
+  const auto rejected_snapped_left =
+      static_cast<float>(cam5->weight_x) - kMaximumExpansion;
+  if (std::abs(left - rejected_snapped_left) <= 1.0F) {
+    throw std::runtime_error(
+        "cam5 regression fixture does not detect weight-bound snapping");
+  }
+  if (!renderer.uploaded_vertices_match(asset)) {
+    throw std::runtime_error(
+        "Metal static vertex upload changed asset geometry or UVs");
+  }
+  if (!(renderer.raster_position_expansion() > 0.0F) ||
+      renderer.raster_position_expansion() > kMaximumExpansion) {
+    throw std::runtime_error(
+        "Metal raster-only perimeter correction exceeds 1/16 pixel");
+  }
+}
+
 void retain_test_frame(void*) noexcept {}
 void release_test_frame(void*) noexcept {}
 
@@ -357,6 +390,7 @@ int main(int argc, const char* argv[]) {
       }
 
       swim::metal::MetalStitchRenderer renderer(context, asset, config);
+      verify_static_vertex_contract(renderer, asset);
       verify_camera_metadata_contract(renderer, frames);
       verify_full_range_nv12_shader(renderer, context);
       swim::metal::MetalRenderResult result;

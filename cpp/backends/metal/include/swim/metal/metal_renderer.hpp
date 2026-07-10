@@ -32,6 +32,11 @@ class MetalStitchRenderer final {
   void drain();
   bool has_fatal_error() const noexcept;
 
+  // Diagnostic-only startup contract checks.
+  bool uploaded_vertices_match(
+      const swim::core::RuntimeAsset& asset) const noexcept;
+  float raster_position_expansion() const noexcept;
+
  private:
   class Impl;
   std::unique_ptr<Impl> impl_;
