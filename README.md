@@ -8,9 +8,9 @@
 
 ## 处理流程
 
-1. `src/bake_uv.py` 可选地把中线 UV 延伸写入一个新的 FBX，原始模型不需要被覆盖。
-2. `src/extract_fbx.py` 读取 `inputs/models/pool.fbx`，提取三角形、二维位置和 UV，默认写入 `outputs/data/pool_mesh.json`。
-3. `src/render_pool.py` 使用网格 JSON 和 `inputs/textures/` 生成静态拼接图、网格叠加图，或使用六路视频生成拼接视频。
+1. `python.assets.bake_uv` 可选地把中线 UV 延伸写入一个新的 FBX，原始模型不需要被覆盖。
+2. `python.assets.extract_fbx` 读取 `inputs/models/pool.fbx`，提取三角形、二维位置和 UV，默认写入 `outputs/data/pool_mesh.json`。
+3. `python.validation.reference_renderer` 使用网格 JSON 和 `inputs/textures/` 生成静态拼接图、网格叠加图，或使用六路视频生成拼接视频。
 4. `scripts/run_4k.sh` 固定外部 4K 数据集的会话名、六路相机顺序和常用输出参数，作为短片及全长渲染入口。
 
 ## 目录结构
@@ -43,11 +43,19 @@ swim_fbx_demo/
 │   │   └── pool_4k_full.mp4
 │   └── logs/
 │       └── pool_4k_full.log
-├── src/
-│   ├── bake_uv.py
-│   ├── extract_fbx.py
-│   ├── fbx_common.py
-│   └── render_pool.py
+├── python/
+│   ├── __init__.py
+│   ├── assets/
+│   │   ├── __init__.py
+│   │   ├── bake_uv.py
+│   │   ├── extract_fbx.py
+│   │   └── fbx_common.py
+│   ├── validation/
+│   │   ├── __init__.py
+│   │   └── reference_renderer.py
+│   └── tests/
+│       ├── __init__.py
+│       └── test_layout.py
 ├── scripts/
 │   └── run_4k.sh
 └── docs/
@@ -81,9 +89,9 @@ Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统�
 三个 Python 入口的实际参数可用以下命令查看：
 
 ```bash
-.venv/bin/python src/bake_uv.py --help
-.venv/bin/python src/extract_fbx.py --help
-.venv/bin/python src/render_pool.py --help
+.venv/bin/python -m python.assets.bake_uv --help
+.venv/bin/python -m python.assets.extract_fbx --help
+.venv/bin/python -m python.validation.reference_renderer --help
 ```
 
 ## 快速开始
@@ -91,7 +99,7 @@ Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统�
 项目已经包含网格 JSON 和合成纹理。无需重新读取 FBX 即可生成静态拼接图：
 
 ```bash
-.venv/bin/python src/render_pool.py \
+.venv/bin/python -m python.validation.reference_renderer \
   --data outputs/data/pool_mesh.json \
   --tex-dir inputs/textures \
   --still outputs/images/pool.png
@@ -114,13 +122,13 @@ Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统�
 从默认模型重新生成默认网格 JSON：
 
 ```bash
-.venv/bin/python src/extract_fbx.py
+.venv/bin/python -m python.assets.extract_fbx
 ```
 
 等价的显式调用如下；它会重写 `outputs/data/pool_mesh.json`：
 
 ```bash
-.venv/bin/python src/extract_fbx.py \
+.venv/bin/python -m python.assets.extract_fbx \
   inputs/models/pool.fbx \
   outputs/data/pool_mesh.json \
   --tex-dir inputs/textures
@@ -129,13 +137,13 @@ Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统�
 如需把中线 UV 延伸先烘焙到一个新模型，再提取该模型，可运行：
 
 ```bash
-.venv/bin/python src/bake_uv.py \
+.venv/bin/python -m python.assets.bake_uv \
   inputs/models/pool.fbx \
   outputs/data/pool_uv_baked.fbx \
   --ext-px 5 \
   --tex-dir inputs/textures
 
-.venv/bin/python src/extract_fbx.py \
+.venv/bin/python -m python.assets.extract_fbx \
   outputs/data/pool_uv_baked.fbx \
   outputs/data/pool_mesh.json \
   --tex-dir inputs/textures
@@ -148,7 +156,7 @@ Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统�
 生成完整分辨率的静态拼接图和网格叠加图：
 
 ```bash
-.venv/bin/python src/render_pool.py \
+.venv/bin/python -m python.validation.reference_renderer \
   --data outputs/data/pool_mesh.json \
   --tex-dir inputs/textures \
   --still outputs/images/pool.png \
@@ -158,7 +166,7 @@ Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统�
 降低每米像素数可更快生成网格预览：
 
 ```bash
-.venv/bin/python src/render_pool.py \
+.venv/bin/python -m python.validation.reference_renderer \
   --data outputs/data/pool_mesh.json \
   --tex-dir inputs/textures \
   --ppm 28 \
@@ -203,7 +211,7 @@ SWIMMING_DATASET_DIR="/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K" \
 | 5 | `Plane004` | `inputs/textures/camera_5_composite.png` | `20260629_172532_cam5.mp4` |
 | 6 | `Plane007` | `inputs/textures/camera_6_composite.png` | `20260629_172532_cam6.mp4` |
 
-也就是固定相机顺序：`cam3 cam2 cam1 cam4 cam5 cam6`。`scripts/run_4k.sh` 已按此顺序组装参数；直接调用 `src/render_pool.py --videos` 时也必须保持相同顺序。
+也就是固定相机顺序：`cam3 cam2 cam1 cam4 cam5 cam6`。`scripts/run_4k.sh` 已按此顺序组装参数；直接调用 `python -m python.validation.reference_renderer --videos` 时也必须保持相同顺序。
 
 主要输出如下：
 
