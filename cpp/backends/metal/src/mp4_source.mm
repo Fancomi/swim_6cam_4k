@@ -21,8 +21,6 @@
 namespace swim::metal {
 namespace {
 
-constexpr std::uint32_t kDecodeTicketCapacity = 16;
-constexpr std::uint32_t kDecodeSurfaceCapacity = 8;
 constexpr std::size_t kMaximumLaneErrorBytes = 512;
 
 std::string ns_error(NSString* prefix, NSError* error) {
@@ -77,14 +75,17 @@ class Mp4VideoToolboxSource::Impl final {
        swim::core::SourceConfig source, std::uint32_t camera_index,
        swim::core::LatestFrameMailbox& mailbox,
        swim::core::RuntimeCounters& counters, swim::core::RunMode mode,
-       std::chrono::milliseconds run_duration)
+       std::chrono::milliseconds run_duration,
+       std::uint32_t ticket_capacity, std::uint32_t surface_capacity)
       : context_(std::move(context)),
         source_(std::move(source)),
         camera_index_(camera_index),
         mailbox_(mailbox),
         counters_(counters),
         mode_(mode),
-        run_duration_(run_duration) {
+        run_duration_(run_duration),
+        ticket_capacity_(ticket_capacity),
+        surface_capacity_(surface_capacity) {
     if (context_ == nullptr || context_->device == nil ||
         context_->texture_cache == nullptr) {
       throw std::invalid_argument("MP4 source requires a valid Metal context");
@@ -97,6 +98,11 @@ class Mp4VideoToolboxSource::Impl final {
     }
     if (run_duration_.count() < 0) {
       throw std::invalid_argument("MP4 source duration must not be negative");
+    }
+    if (ticket_capacity_ == 0 || ticket_capacity_ > 64 ||
+        surface_capacity_ == 0 || surface_capacity_ > 64) {
+      throw std::invalid_argument(
+          "MP4 decoder pool capacities must be between 1 and 64");
     }
   }
 
@@ -112,6 +118,17 @@ class Mp4VideoToolboxSource::Impl final {
     }
     stop_requested_.store(false, std::memory_order_release);
     failed_.store(false, std::memory_order_release);
+    completed_.store(false, std::memory_order_release);
+    hardware_.store(false, std::memory_order_release);
+    generation_.store(0, std::memory_order_release);
+    {
+      std::lock_guard error_lock(error_mutex_);
+      last_error_.clear();
+    }
+    {
+      std::lock_guard stats_lock(stats_mutex_);
+      decoder_stats_ = {};
+    }
     worker_ = std::thread([this] { run(); });
   }
 
@@ -147,12 +164,29 @@ class Mp4VideoToolboxSource::Impl final {
     return generation_.load(std::memory_order_acquire);
   }
 
+  VideoToolboxDecoderStats decoder_stats() const {
+    std::lock_guard lock(stats_mutex_);
+    return decoder_stats_;
+  }
+
   std::string last_error() const {
     std::lock_guard lock(error_mutex_);
     return last_error_;
   }
 
  private:
+  void store_decoder_stats(VideoToolboxDecoderStats stats) {
+    std::lock_guard lock(stats_mutex_);
+    decoder_stats_ = stats;
+  }
+
+  [[noreturn]] static void throw_decoder_error(
+      const VideoToolboxDecoder& decoder) {
+    throw std::runtime_error(
+        "recoverable VideoToolbox decode error (OSStatus " +
+        std::to_string(decoder.recoverable_error_status()) + ")");
+  }
+
   void set_error(std::string message, bool fatal) noexcept {
     try {
       if (message.size() > kMaximumLaneErrorBytes) {
@@ -303,6 +337,12 @@ class Mp4VideoToolboxSource::Impl final {
           CFRelease(sample);
           continue;
         }
+        if (sample_count != 1) {
+          counters_.malformed.fetch_add(1, std::memory_order_relaxed);
+          CFRelease(sample);
+          throw std::runtime_error(
+              "compressed MP4 sample must contain exactly one access unit");
+        }
         if (CMSampleBufferGetImageBuffer(sample) != nullptr ||
             sample_bytes == 0 || !CMSampleBufferDataIsReady(sample)) {
           const auto has_image_buffer =
@@ -341,11 +381,25 @@ class Mp4VideoToolboxSource::Impl final {
         }
         const auto sequence =
             next_sequence_.fetch_add(1, std::memory_order_relaxed) + 1;
-        static_cast<void>(decoder.decode(
-            sample, decoder.generation(), sequence, pts));
+        if (decoder.has_recoverable_error()) {
+          CFRelease(sample);
+          throw_decoder_error(decoder);
+        }
+        const auto submit_result = decoder.decode(
+            sample, decoder.generation(), sequence, pts);
         CFRelease(sample);
+        if (submit_result == DecodeSubmitResult::recoverable_error ||
+            decoder.has_recoverable_error()) {
+          throw_decoder_error(decoder);
+        }
+        if (submit_result == DecodeSubmitResult::stale_or_invalid) {
+          counters_.malformed.fetch_add(1, std::memory_order_relaxed);
+        }
       }
       decoder.drain();
+      if (decoder.has_recoverable_error()) {
+        throw_decoder_error(decoder);
+      }
       generation_.store(decoder.generation(), std::memory_order_release);
       if (stop_requested_.load(std::memory_order_acquire) ||
           (run_duration_.count() > 0 &&
@@ -373,31 +427,36 @@ class Mp4VideoToolboxSource::Impl final {
                     ? std::chrono::steady_clock::time_point::max()
                     : start_time + run_duration_;
     try {
-      VideoToolboxDecoder decoder(context_, camera_index_,
-                                  kDecodeTicketCapacity,
-                                  kDecodeSurfaceCapacity, mailbox_, counters_);
-      swim::core::CameraHealthTracker health;
-      while (!stop_requested_.load(std::memory_order_acquire) &&
-             std::chrono::steady_clock::now() < deadline_) {
-        try {
-          run_reader_once(decoder, health);
-          break;
-        } catch (const std::exception& error) {
-          decoder.invalidate();
-          generation_.store(decoder.generation(), std::memory_order_release);
-          set_error(error.what(), false);
-          if (std::string{error.what()}.find("EOF before") !=
-                  std::string::npos ||
-              run_duration_.count() == 0 ||
-              std::chrono::steady_clock::now() >= deadline_) {
-            throw;
-          }
-          counters_.reconnects.fetch_add(1, std::memory_order_relaxed);
-          if (!sleep_interruptibly(health.next_reconnect_delay())) {
+      VideoToolboxDecoder decoder(context_, camera_index_, ticket_capacity_,
+                                  surface_capacity_, mailbox_, counters_);
+      try {
+        swim::core::CameraHealthTracker health;
+        while (!stop_requested_.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline_) {
+          try {
+            run_reader_once(decoder, health);
             break;
+          } catch (const std::exception& error) {
+            decoder.invalidate();
+            generation_.store(decoder.generation(), std::memory_order_release);
+            set_error(error.what(), false);
+            if (std::string{error.what()}.find("EOF before") !=
+                    std::string::npos ||
+                run_duration_.count() == 0 ||
+                std::chrono::steady_clock::now() >= deadline_) {
+              throw;
+            }
+            counters_.reconnects.fetch_add(1, std::memory_order_relaxed);
+            if (!sleep_interruptibly(health.next_reconnect_delay())) {
+              break;
+            }
           }
         }
+      } catch (...) {
+        store_decoder_stats(decoder.stats());
+        throw;
       }
+      store_decoder_stats(decoder.stats());
     } catch (const std::exception& error) {
       set_error(error.what(), true);
     } catch (...) {
@@ -413,6 +472,8 @@ class Mp4VideoToolboxSource::Impl final {
   swim::core::RuntimeCounters& counters_;
   swim::core::RunMode mode_;
   std::chrono::milliseconds run_duration_;
+  std::uint32_t ticket_capacity_{};
+  std::uint32_t surface_capacity_{};
   std::chrono::steady_clock::time_point deadline_{};
   mutable std::mutex thread_mutex_;
   std::thread worker_;
@@ -425,16 +486,19 @@ class Mp4VideoToolboxSource::Impl final {
   std::atomic_uint64_t next_sequence_{0};
   mutable std::mutex error_mutex_;
   std::string last_error_;
+  mutable std::mutex stats_mutex_;
+  VideoToolboxDecoderStats decoder_stats_;
 };
 
 Mp4VideoToolboxSource::Mp4VideoToolboxSource(
     std::shared_ptr<MetalContext> context, swim::core::SourceConfig source,
     std::uint32_t camera_index, swim::core::LatestFrameMailbox& mailbox,
     swim::core::RuntimeCounters& counters, swim::core::RunMode mode,
-    std::chrono::milliseconds run_duration)
+    std::chrono::milliseconds run_duration, std::uint32_t ticket_capacity,
+    std::uint32_t surface_capacity)
     : impl_(std::make_unique<Impl>(
           std::move(context), std::move(source), camera_index, mailbox,
-          counters, mode, run_duration)) {}
+          counters, mode, run_duration, ticket_capacity, surface_capacity)) {}
 
 Mp4VideoToolboxSource::~Mp4VideoToolboxSource() = default;
 
@@ -448,6 +512,9 @@ bool Mp4VideoToolboxSource::using_hardware_acceleration() const noexcept {
 }
 std::uint64_t Mp4VideoToolboxSource::decoder_generation() const noexcept {
   return impl_->decoder_generation();
+}
+VideoToolboxDecoderStats Mp4VideoToolboxSource::decoder_stats() const {
+  return impl_->decoder_stats();
 }
 std::string Mp4VideoToolboxSource::last_error() const {
   return impl_->last_error();

@@ -4,6 +4,7 @@
 #include <swim/core/latest_frame_mailbox.hpp>
 #include <swim/core/metrics.hpp>
 #include <swim/metal/metal_frame.hpp>
+#include <swim/metal/videotoolbox_decoder.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -23,7 +24,9 @@ class Mp4VideoToolboxSource final {
       swim::core::LatestFrameMailbox& mailbox,
       swim::core::RuntimeCounters& counters,
       swim::core::RunMode mode = swim::core::RunMode::benchmark,
-      std::chrono::milliseconds run_duration = std::chrono::milliseconds{0});
+      std::chrono::milliseconds run_duration = std::chrono::milliseconds{0},
+      std::uint32_t ticket_capacity = 16,
+      std::uint32_t surface_capacity = 8);
   ~Mp4VideoToolboxSource();
 
   Mp4VideoToolboxSource(const Mp4VideoToolboxSource&) = delete;
@@ -37,6 +40,7 @@ class Mp4VideoToolboxSource final {
   bool failed() const noexcept;
   bool using_hardware_acceleration() const noexcept;
   std::uint64_t decoder_generation() const noexcept;
+  VideoToolboxDecoderStats decoder_stats() const;
   std::string last_error() const;
 
  private:

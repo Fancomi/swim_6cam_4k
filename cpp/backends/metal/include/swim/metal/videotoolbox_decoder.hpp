@@ -42,8 +42,15 @@ struct VideoToolboxDecoderStats final {
   std::uint64_t submitted{};
   std::uint64_t callbacks{};
   std::uint64_t dropped{};
-  std::uint64_t callback_errors{};
-  std::uint64_t late_callbacks{};
+  std::uint64_t errors{};
+  std::uint64_t late{};
+};
+
+enum class DecodeSubmitResult : std::uint8_t {
+  submitted,
+  dropped_pool,
+  recoverable_error,
+  stale_or_invalid,
 };
 
 class VideoToolboxDecoder final {
@@ -66,14 +73,18 @@ class VideoToolboxDecoder final {
 
   // The sample and format description remain owned by the caller. VideoToolbox
   // retains everything needed after this function returns.
-  bool decode(CMSampleBufferRef sample, std::uint64_t decoder_generation,
-              std::uint64_t display_sequence, CMTime pts) noexcept;
+  DecodeSubmitResult decode(CMSampleBufferRef sample,
+                            std::uint64_t decoder_generation,
+                            std::uint64_t display_sequence,
+                            CMTime pts) noexcept;
 
   void wait_for_asynchronous_frames();
   void drain();
   void invalidate() noexcept;
 
   bool using_hardware_acceleration() const noexcept;
+  bool has_recoverable_error() const noexcept;
+  OSStatus recoverable_error_status() const noexcept;
   std::uint64_t generation() const noexcept;
   VideoToolboxDecoderStats stats() const noexcept;
 

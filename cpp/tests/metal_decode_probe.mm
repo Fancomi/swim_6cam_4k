@@ -1,9 +1,12 @@
 #include "swim/metal/mp4_source.hpp"
 #include "swim/metal/videotoolbox_decoder.hpp"
 
+#include <swim/core/hot_path_allocations.hpp>
+
 #import <CoreVideo/CoreVideo.h>
 #import <Metal/Metal.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -119,7 +122,8 @@ void require(bool condition, const std::string& message) {
 }
 
 void validate_frame(const swim::core::FrameLease& frame,
-                    std::size_t camera, std::uint64_t& previous_sequence) {
+                    std::size_t camera, std::uint64_t& previous_sequence,
+                    CMTime& previous_pts) {
   const auto& metadata = frame.metadata();
   require(metadata.camera_index == camera, "camera metadata crossed lanes");
   require(metadata.width == 3840, "decoded width is not 3840");
@@ -134,6 +138,14 @@ void validate_frame(const swim::core::FrameLease& frame,
   require(metadata.decoder_generation != 0,
           "frame has no decoder generation");
   require(metadata.pts_timescale > 0, "frame has no valid PTS timescale");
+  const auto pts = CMTimeMake(metadata.pts_value,
+                              static_cast<std::int32_t>(metadata.pts_timescale));
+  require(CMTIME_IS_VALID(pts) && CMTIME_IS_NUMERIC(pts),
+          "frame PTS is invalid");
+  if (CMTIME_IS_VALID(previous_pts)) {
+    require(CMTimeCompare(pts, previous_pts) > 0,
+            "consumed frame PTS is not strictly increasing");
+  }
   auto* surface = static_cast<swim::metal::MetalDecodedSurface*>(
       frame.native(swim::metal::kMetalDecodedSurfaceTag));
   require(surface != nullptr, "decoded lease has no native surface");
@@ -141,12 +153,34 @@ void validate_frame(const swim::core::FrameLease& frame,
           "native decoded surface crossed camera lanes");
   require(surface->luma != nil && surface->chroma != nil,
           "decoded surface has no Metal plane views");
+  require(surface->pixel_buffer != nullptr,
+          "decoded surface has no retained pixel buffer");
+  require(CVPixelBufferGetIOSurface(surface->pixel_buffer) != nullptr,
+          "decoded pixel buffer is not IOSurface-backed");
+  auto matrix = CVBufferCopyAttachment(surface->pixel_buffer,
+                                       kCVImageBufferYCbCrMatrixKey, nullptr);
+  const bool is_bt709 = matrix != nullptr &&
+                        CFEqual(matrix,
+                                kCVImageBufferYCbCrMatrix_ITU_R_709_2);
+  if (matrix != nullptr) {
+    CFRelease(matrix);
+  }
+  require(is_bt709, "decoded pixel buffer has no BT.709 matrix attachment");
   previous_sequence = metadata.sequence;
+  previous_pts = pts;
 }
 
 int run(const Options& options) {
   constexpr std::size_t kMaximumLanes = 6;
   const auto lane_count = options.six ? kMaximumLanes : std::size_t{1};
+  const auto minimum_callbacks = options.six
+      ? std::max<std::uint64_t>(
+            1, static_cast<std::uint64_t>(
+                   static_cast<double>(options.duration.count()) * 30000.0 /
+                   1001.0 * 0.9))
+      : options.frames;
+  const auto warmup_frames = std::min<std::uint64_t>(
+      30, std::max<std::uint64_t>(1, minimum_callbacks / 4));
   auto context = make_context();
   std::array<swim::core::LatestFrameMailbox, kMaximumLanes> mailboxes;
   std::array<swim::core::RuntimeCounters, kMaximumLanes> counters;
@@ -172,7 +206,14 @@ int run(const Options& options) {
   }
 
   std::array<std::uint64_t, kMaximumLanes> previous_sequence{};
+  std::array<CMTime, kMaximumLanes> previous_pts;
+  previous_pts.fill(kCMTimeInvalid);
+  std::array<std::uint64_t, kMaximumLanes> first_sequence{};
+  std::array<CMTime, kMaximumLanes> first_pts;
+  first_pts.fill(kCMTimeInvalid);
   std::array<std::uint64_t, kMaximumLanes> consumed{};
+  std::uint64_t allocation_baseline{};
+  bool allocation_baseline_set = false;
   const auto started_at = std::chrono::steady_clock::now();
   const auto deadline = started_at +
       (options.six ? options.duration + std::chrono::seconds{5}
@@ -181,8 +222,25 @@ int run(const Options& options) {
     for (std::size_t camera = 0; camera < lane_count; ++camera) {
       swim::core::FrameLease frame;
       if (mailboxes[camera].consume_latest(frame)) {
-        validate_frame(frame, camera, previous_sequence[camera]);
+        validate_frame(frame, camera, previous_sequence[camera],
+                       previous_pts[camera]);
+        if (!CMTIME_IS_VALID(first_pts[camera])) {
+          first_sequence[camera] = frame.metadata().sequence;
+          first_pts[camera] = previous_pts[camera];
+        }
         ++consumed[camera];
+      }
+    }
+    if (!allocation_baseline_set) {
+      bool warmed = true;
+      for (std::size_t camera = 0; camera < lane_count; ++camera) {
+        warmed = warmed &&
+                 counters[camera].published.load(std::memory_order_relaxed) >=
+                     warmup_frames;
+      }
+      if (warmed) {
+        allocation_baseline = swim::core::hot_path_allocation_count();
+        allocation_baseline_set = true;
       }
     }
     if (!options.six &&
@@ -214,7 +272,12 @@ int run(const Options& options) {
   for (std::size_t camera = 0; camera < lane_count; ++camera) {
     swim::core::FrameLease frame;
     if (mailboxes[camera].consume_latest(frame)) {
-      validate_frame(frame, camera, previous_sequence[camera]);
+      validate_frame(frame, camera, previous_sequence[camera],
+                     previous_pts[camera]);
+      if (!CMTIME_IS_VALID(first_pts[camera])) {
+        first_sequence[camera] = frame.metadata().sequence;
+        first_pts[camera] = previous_pts[camera];
+      }
       ++consumed[camera];
     }
     require(!sources[camera]->failed(),
@@ -223,19 +286,58 @@ int run(const Options& options) {
             "lane did not use hardware VideoToolbox decode");
     const auto published =
         counters[camera].published.load(std::memory_order_relaxed);
-    require(published >= (options.six ? 1 : options.frames),
+    require(published >= minimum_callbacks,
             "lane published too few decoded frames");
+    const auto stats = sources[camera]->decoder_stats();
+    require(stats.callbacks >= minimum_callbacks,
+            "lane delivered too few VideoToolbox callbacks");
+    require(stats.callbacks == stats.submitted,
+            "not every submitted decode delivered a callback");
+    require(stats.errors == 0, "lane reported a decoder error");
+    require(counters[camera].native_decode_tickets.load(
+                std::memory_order_relaxed) == 16,
+            "lane did not create exactly 16 fixed decode tickets");
+    require(counters[camera].native_callback_wrappers.load(
+                std::memory_order_relaxed) == 1,
+            "lane unexpectedly rebuilt its callback/session wrapper");
+    require(counters[camera].native_texture_wrappers.load(
+                std::memory_order_relaxed) == published * 2,
+            "lane did not create exactly two texture wrappers per publish");
+    require(counters[camera].pool_exhaustion.load(
+                std::memory_order_relaxed) == 0,
+            "lane exhausted a fixed decode pool");
     require(consumed[camera] != 0, "lane produced no consumable frame");
     require(counters[camera].decoded_pixel_host_copies.load(
                 std::memory_order_relaxed) == 0,
             "decode path performed a pixel host copy");
+    require(CMTIME_IS_VALID(first_pts[camera]) &&
+                CMTimeCompare(previous_pts[camera], first_pts[camera]) > 0,
+            "lane has insufficient PTS span for FPS measurement");
+    const auto seconds =
+        CMTimeGetSeconds(CMTimeSubtract(previous_pts[camera],
+                                       first_pts[camera]));
+    const auto measured_fps =
+        static_cast<double>(previous_sequence[camera] -
+                            first_sequence[camera]) /
+        seconds;
+    require(measured_fps >= 29.8 && measured_fps <= 30.1,
+            "measured decoded FPS is outside 29.8..30.1");
     std::cout << "cam" << camera + 1
-              << " 3840x2160 30000/1001 hardware=true callbacks="
-              << counters[camera].decoded.load(std::memory_order_relaxed)
+              << " 3840x2160 measured_fps=" << measured_fps
+              << " hardware=true callbacks=" << stats.callbacks
+              << " minimum_callbacks=" << minimum_callbacks
               << " published=" << published
+              << " dropped=" << stats.dropped
               << " consumed=" << consumed[camera]
               << " host_copies=0\n";
   }
+  require(allocation_baseline_set,
+          "decode did not reach the hot-path allocation warmup");
+  const auto final_allocations = swim::core::hot_path_allocation_count();
+  require(final_allocations == allocation_baseline,
+          "steady decode hot path allocated after warmup (baseline=" +
+              std::to_string(allocation_baseline) + ", final=" +
+              std::to_string(final_allocations) + ")");
   return EXIT_SUCCESS;
 }
 
