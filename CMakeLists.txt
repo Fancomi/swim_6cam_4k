@@ -51,6 +51,7 @@ add_executable(swim_core_tests
   cpp/tests/test_camera_health.cpp
   cpp/tests/test_config.cpp
   cpp/tests/test_frame_mailbox.cpp
+  cpp/tests/test_render_coordinator.cpp
   cpp/tests/test_metrics.cpp)
 target_link_libraries(swim_core_tests PRIVATE swim_core)
 target_compile_definitions(swim_core_tests PRIVATE
