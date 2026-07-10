@@ -193,6 +193,15 @@ if(APPLE)
   swim_enable_warnings(metal_preview_test)
   swim_enable_sanitizers(metal_preview_test)
   add_test(NAME metal_preview_test COMMAND metal_preview_test)
+
+  add_executable(metal_encoder_test
+    cpp/tests/test_main.cpp
+    cpp/tests/metal_encoder_test.mm)
+  target_compile_options(metal_encoder_test PRIVATE -fobjc-arc)
+  target_link_libraries(metal_encoder_test PRIVATE swim_metal_renderer)
+  swim_enable_warnings(metal_encoder_test)
+  swim_enable_sanitizers(metal_encoder_test)
+  add_test(NAME metal_encoder_test COMMAND metal_encoder_test)
 endif()
 
 if(NOT APPLE)
