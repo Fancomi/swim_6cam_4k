@@ -120,6 +120,7 @@ MetricsSnapshot RuntimeCounters::snapshot_and_reset() noexcept {
       render_output_pool_misses.exchange(0, std::memory_order_relaxed),
       frame_age_p99,
       preview_drops.exchange(0, std::memory_order_relaxed),
+      preview_presents.exchange(0, std::memory_order_relaxed),
       encode_drops.exchange(0, std::memory_order_relaxed),
       decoded_pixel_host_copies.exchange(0, std::memory_order_relaxed),
       pool_exhaustion.exchange(0, std::memory_order_relaxed),

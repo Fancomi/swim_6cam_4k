@@ -5,6 +5,7 @@
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <dispatch/dispatch.h>
 
 #include <algorithm>
 #include <array>
@@ -20,6 +21,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace swim::metal {
 
@@ -34,7 +36,7 @@ MetalOutputLease::MetalOutputLease(MetalOutputSlot* slot) noexcept
     : slot_(slot) {}
 
 MetalOutputLease::MetalOutputLease(const MetalOutputLease& other) noexcept
-    : slot_(other.slot_) {
+    : slot_(other.slot_), lifetime_anchor_(other.lifetime_anchor_) {
   if (slot_ != nullptr) {
     slot_->references.fetch_add(1, std::memory_order_relaxed);
   }
@@ -51,11 +53,13 @@ MetalOutputLease& MetalOutputLease::operator=(
   }
   reset();
   slot_ = next;
+  lifetime_anchor_ = other.lifetime_anchor_;
   return *this;
 }
 
 MetalOutputLease::MetalOutputLease(MetalOutputLease&& other) noexcept
-    : slot_(std::exchange(other.slot_, nullptr)) {}
+    : slot_(std::exchange(other.slot_, nullptr)),
+      lifetime_anchor_(std::move(other.lifetime_anchor_)) {}
 
 MetalOutputLease& MetalOutputLease::operator=(
     MetalOutputLease&& other) noexcept {
@@ -64,6 +68,7 @@ MetalOutputLease& MetalOutputLease::operator=(
   }
   reset();
   slot_ = std::exchange(other.slot_, nullptr);
+  lifetime_anchor_ = std::move(other.lifetime_anchor_);
   return *this;
 }
 
@@ -77,11 +82,18 @@ id<MTLTexture> MetalOutputLease::texture() const noexcept {
   return slot_ == nullptr ? nil : slot_->texture;
 }
 
+void MetalOutputLease::anchor_lifetime(std::shared_ptr<void> owner) noexcept {
+  if (lifetime_anchor_ == nullptr) {
+    lifetime_anchor_ = std::move(owner);
+  }
+}
+
 void MetalOutputLease::reset() noexcept {
   if (slot_ != nullptr) {
     auto* slot = std::exchange(slot_, nullptr);
     slot->owner->release(slot);
   }
+  lifetime_anchor_.reset();
 }
 
 MetalOutputPool::MetalOutputPool(std::shared_ptr<MetalContext> context,
@@ -340,6 +352,99 @@ std::uint64_t seconds_to_nanoseconds(double seconds) noexcept {
 
 }  // namespace
 
+class MetalCompletedOutputRouter::Impl final
+    : public std::enable_shared_from_this<MetalCompletedOutputRouter::Impl> {
+ public:
+  static constexpr auto kFlushTimeout = std::chrono::seconds{5};
+
+  Impl()
+      : queue_(dispatch_queue_create("swim.metal.completed-output",
+                                     DISPATCH_QUEUE_SERIAL)) {
+    if (queue_ == nullptr) {
+      throw std::runtime_error("cannot create Metal completed-output queue");
+    }
+  }
+
+  void add_sink(MetalCompletedOutputSink sink) {
+    if (!sink) {
+      throw std::invalid_argument("completed-output sink must be callable");
+    }
+    if (!accepting_.load(std::memory_order_acquire)) {
+      throw std::logic_error("completed-output router is closed");
+    }
+    sinks_.push_back(std::move(sink));
+  }
+
+  bool route(MetalOutputLease output) noexcept {
+    if (!delivery_gate_.try_accept()) {
+      return false;
+    }
+    auto owner = shared_from_this();
+    MetalOutputLease delivery = std::move(output);
+    dispatch_async(queue_, ^{
+      @autoreleasepool {
+        owner->deliver(delivery);
+        owner->delivery_gate_.complete();
+      }
+    });
+    return true;
+  }
+
+  void close_and_flush() {
+    if (!delivery_gate_.close_and_wait_until(
+            std::chrono::steady_clock::now() + kFlushTimeout)) {
+      throw std::runtime_error(
+          "timed out flushing Metal completed-output router");
+    }
+    accepting_.store(false, std::memory_order_release);
+  }
+
+ private:
+  void deliver(MetalOutputLease output) noexcept {
+    for (std::size_t index = 0; index < sinks_.size(); ++index) {
+      try {
+        if (index + 1 == sinks_.size()) {
+          sinks_[index](std::move(output));
+        } else {
+          sinks_[index](output);
+        }
+      } catch (...) {
+        // A downstream consumer cannot unwind onto the dispatch queue or
+        // prevent other independently registered consumers from receiving.
+      }
+    }
+  }
+
+  dispatch_queue_t queue_;
+  std::vector<MetalCompletedOutputSink> sinks_;
+  std::atomic_bool accepting_{true};
+  swim::core::RenderCompletionGate delivery_gate_;
+};
+
+MetalCompletedOutputRouter::MetalCompletedOutputRouter()
+    : impl_(std::make_shared<Impl>()) {}
+
+MetalCompletedOutputRouter::~MetalCompletedOutputRouter() {
+  if (impl_ != nullptr) {
+    try {
+      impl_->close_and_flush();
+    } catch (...) {
+    }
+  }
+}
+
+void MetalCompletedOutputRouter::add_sink(MetalCompletedOutputSink sink) {
+  impl_->add_sink(std::move(sink));
+}
+
+bool MetalCompletedOutputRouter::route(MetalOutputLease output) noexcept {
+  return impl_->route(std::move(output));
+}
+
+void MetalCompletedOutputRouter::close_and_flush() {
+  impl_->close_and_flush();
+}
+
 class MetalStitchRenderer::Impl final
     : public std::enable_shared_from_this<MetalStitchRenderer::Impl> {
  public:
@@ -372,7 +477,8 @@ class MetalStitchRenderer::Impl final
   Impl(std::shared_ptr<MetalContext> context,
        const swim::core::RuntimeAsset& asset,
        const swim::core::AppConfig& config,
-       swim::core::RuntimeCounters* metrics)
+       swim::core::RuntimeCounters* metrics,
+       MetalCompletedOutputSink completed_output_sink)
       : context_(std::move(context)),
         logical_width_(asset.logical_width),
         logical_height_(asset.logical_height),
@@ -382,7 +488,8 @@ class MetalStitchRenderer::Impl final
         in_flight_(std::make_unique<InFlightRecord[]>(inflight_count_)),
         output_pool_(context_, config.output_pool, encoded_width_,
                      encoded_height_),
-        metrics_(metrics) {
+        metrics_(metrics),
+        completed_output_sink_(std::move(completed_output_sink)) {
     if (context_ == nullptr || context_->device == nil ||
         context_->command_queue == nil || context_->texture_cache == nullptr) {
       throw std::invalid_argument("Metal renderer requires a valid context");
@@ -485,6 +592,7 @@ class MetalStitchRenderer::Impl final
         record->input_leases = {};
       }
       result.output = std::move(*output);
+      result.output.anchor_lifetime(shared_from_this());
       record->output = result.output;
 
       id<MTLCommandBuffer> command = [context_->command_queue commandBuffer];
@@ -501,17 +609,26 @@ class MetalStitchRenderer::Impl final
       auto* completed_record = record;
       auto owner = shared_from_this();
       [command addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+        MetalOutputLease completed_output;
         if (completed.status != MTLCommandBufferStatusCompleted) {
           owner->record_fatal(
               metal_error(@"Metal command buffer failed", completed.error));
         } else {
           owner->record_completion();
+          completed_output = std::move(completed_record->output);
         }
         completed_record->input_leases = {};
         completed_record->frame_views = {};
         completed_record->output = {};
         owner->inflight_in_use_.fetch_sub(1, std::memory_order_relaxed);
         completed_record->busy.store(false, std::memory_order_release);
+        if (completed_output && owner->completed_output_sink_) {
+          try {
+            owner->completed_output_sink_(std::move(completed_output));
+          } catch (...) {
+            owner->record_fatal("completed-output sink failed");
+          }
+        }
         owner->completion_gate_.complete();
       }];
       record_first_submit();
@@ -911,6 +1028,7 @@ class MetalStitchRenderer::Impl final
   std::unique_ptr<InFlightRecord[]> in_flight_;
   MetalOutputPool output_pool_;
   swim::core::RuntimeCounters* metrics_;
+  MetalCompletedOutputSink completed_output_sink_;
   std::atomic_uint32_t inflight_in_use_{0};
   std::atomic_uint32_t inflight_high_water_{0};
   swim::core::RenderCompletionGate completion_gate_;
@@ -928,9 +1046,11 @@ MetalStitchRenderer::MetalStitchRenderer(
     std::shared_ptr<MetalContext> context,
     const swim::core::RuntimeAsset& asset,
     const swim::core::AppConfig& config,
-    swim::core::RuntimeCounters* metrics)
+    swim::core::RuntimeCounters* metrics,
+    MetalCompletedOutputSink completed_output_sink)
     : impl_(std::make_shared<Impl>(std::move(context), asset, config,
-                                   metrics)) {}
+                                   metrics,
+                                   std::move(completed_output_sink))) {}
 
 MetalStitchRenderer::~MetalStitchRenderer() {
   if (impl_ != nullptr) {

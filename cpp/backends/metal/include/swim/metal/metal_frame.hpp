@@ -53,12 +53,16 @@ class MetalOutputLease final {
   explicit operator bool() const noexcept { return slot_ != nullptr; }
   CVPixelBufferRef pixel_buffer() const noexcept;
   id<MTLTexture> texture() const noexcept;
+  // Internal asynchronous consumers attach the renderer Impl here so the
+  // output pool remains alive through routing, preview, or encoding.
+  void anchor_lifetime(std::shared_ptr<void> owner) noexcept;
 
  private:
   friend class MetalOutputPool;
   explicit MetalOutputLease(MetalOutputSlot* slot) noexcept;
   void reset() noexcept;
   MetalOutputSlot* slot_{};
+  std::shared_ptr<void> lifetime_anchor_;
 };
 
 // Lifetime contract: the pool and its shared MetalContext must outlive every

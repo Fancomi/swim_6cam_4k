@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <utility>
 
@@ -132,4 +133,20 @@ TEST_CASE(preview_mailbox_offer_allocates_no_application_heap_memory) {
     CHECK(mailbox.offer(42));
   }
   CHECK_EQ(swim::core::hot_path_allocation_count(), before);
+}
+
+TEST_CASE(completed_output_lease_copies_keep_the_pool_owner_anchored) {
+  auto owner = std::make_shared<std::uint64_t>(42);
+  std::weak_ptr<std::uint64_t> weak_owner = owner;
+  swim::metal::MetalOutputLease routed;
+  routed.anchor_lifetime(owner);
+  auto downstream = routed;
+  auto presented = std::move(downstream);
+
+  owner.reset();
+  routed = {};
+  CHECK(!weak_owner.expired());
+  CHECK(!downstream);
+  presented = {};
+  CHECK(weak_owner.expired());
 }

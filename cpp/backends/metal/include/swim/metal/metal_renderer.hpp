@@ -6,6 +6,7 @@
 #include <swim/metal/metal_frame.hpp>
 
 #include <array>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -13,12 +14,36 @@ namespace swim::metal {
 
 inline constexpr std::uint32_t kMetalFrameBackendTag = 0x4D544C31U;
 
+using MetalCompletedOutputSink = std::function<void(MetalOutputLease)>;
+
+// Completion callbacks can arrive on arbitrary Metal threads. This router
+// turns them into one serial producer before any bounded downstream handoff.
+class MetalCompletedOutputRouter final {
+ public:
+  MetalCompletedOutputRouter();
+  ~MetalCompletedOutputRouter();
+  MetalCompletedOutputRouter(const MetalCompletedOutputRouter&) = delete;
+  MetalCompletedOutputRouter& operator=(const MetalCompletedOutputRouter&) =
+      delete;
+
+  // Sinks are registered during startup, before route() is called.
+  void add_sink(MetalCompletedOutputSink sink);
+  bool route(MetalOutputLease output) noexcept;
+  // Terminal operation. Rejects new routes and waits for accepted deliveries.
+  void close_and_flush();
+
+ private:
+  class Impl;
+  std::shared_ptr<Impl> impl_;
+};
+
 class MetalStitchRenderer final {
  public:
   MetalStitchRenderer(std::shared_ptr<MetalContext> context,
                       const swim::core::RuntimeAsset& asset,
                       const swim::core::AppConfig& config,
-                      swim::core::RuntimeCounters* metrics = nullptr);
+                      swim::core::RuntimeCounters* metrics = nullptr,
+                      MetalCompletedOutputSink completed_output_sink = {});
   ~MetalStitchRenderer();
   MetalStitchRenderer(const MetalStitchRenderer&) = delete;
   MetalStitchRenderer& operator=(const MetalStitchRenderer&) = delete;

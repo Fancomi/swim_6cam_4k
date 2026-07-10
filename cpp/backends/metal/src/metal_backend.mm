@@ -1,6 +1,7 @@
 #include <swim/metal/metal_backend.hpp>
 
 #include <swim/core/backend.hpp>
+#include <swim/metal/metal_preview.hpp>
 #include <swim/metal/metal_renderer.hpp>
 #include <swim/metal/mp4_source.hpp>
 
@@ -11,6 +12,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -41,14 +43,31 @@ std::shared_ptr<MetalContext> make_context() {
 void retain_static_frame(void*) noexcept {}
 void release_static_frame(void*) noexcept {}
 
+MetalCompletedOutputSink router_sink(
+    const std::shared_ptr<MetalCompletedOutputRouter>& router) {
+  if (router == nullptr) {
+    return {};
+  }
+  const std::weak_ptr<MetalCompletedOutputRouter> weak = router;
+  return [weak](MetalOutputLease output) {
+    if (auto owner = weak.lock()) {
+      static_cast<void>(owner->route(std::move(output)));
+    }
+  };
+}
+
 class MetalRendererAdapter final : public swim::core::IRenderer {
  public:
   MetalRendererAdapter(std::shared_ptr<MetalContext> context,
                        const swim::core::RuntimeAsset& asset,
                        const swim::core::AppConfig& config,
-                       swim::core::RuntimeCounters& metrics)
+                       swim::core::RuntimeCounters& metrics,
+                       std::shared_ptr<MetalCompletedOutputRouter> router,
+                       std::shared_ptr<MetalPreview> preview)
       : context_(std::move(context)),
-        renderer_(context_, asset, config, &metrics) {
+        router_(std::move(router)),
+        preview_(std::move(preview)),
+        renderer_(context_, asset, config, &metrics, router_sink(router_)) {
     auto* descriptor = [MTLTextureDescriptor
         texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
                                     width:2
@@ -132,7 +151,35 @@ class MetalRendererAdapter final : public swim::core::IRenderer {
         replacements_[camera_index].metadata};
   }
 
-  void drain() override { renderer_.drain(); }
+  void drain() override {
+    std::exception_ptr error;
+    try {
+      renderer_.drain();
+    } catch (...) {
+      error = std::current_exception();
+    }
+    try {
+      if (router_ != nullptr) {
+        router_->close_and_flush();
+      }
+    } catch (...) {
+      if (!error) {
+        error = std::current_exception();
+      }
+    }
+    try {
+      if (preview_ != nullptr) {
+        preview_->close_and_drain();
+      }
+    } catch (...) {
+      if (!error) {
+        error = std::current_exception();
+      }
+    }
+    if (error) {
+      std::rethrow_exception(error);
+    }
+  }
   bool has_fatal_error() const noexcept override {
     return renderer_.has_fatal_error();
   }
@@ -142,6 +189,8 @@ class MetalRendererAdapter final : public swim::core::IRenderer {
 
  private:
   std::shared_ptr<MetalContext> context_;
+  std::shared_ptr<MetalCompletedOutputRouter> router_;
+  std::shared_ptr<MetalPreview> preview_;
   MetalStitchRenderer renderer_;
   id<MTLTexture> replacement_texture_ = nil;
   std::array<MetalFrameView, 6> replacements_;
@@ -228,11 +277,30 @@ class MetalBackend final : public swim::core::IBackend {
       const swim::core::AppConfig& config) override {
     config_ = config;
     config_ready_ = true;
-    return std::make_unique<MetalRendererAdapter>(context_, asset, config,
-                                                   *metrics_);
+    if (config.preview) {
+      router_ = std::make_shared<MetalCompletedOutputRouter>();
+      preview_ = std::make_shared<MetalPreview>(
+          context_, asset.encoded_width, asset.encoded_height, *metrics_,
+          [this] { stop_main_loop(); });
+      const std::weak_ptr<MetalPreview> weak_preview = preview_;
+      router_->add_sink([weak_preview](MetalOutputLease output) {
+        if (auto preview = weak_preview.lock()) {
+          static_cast<void>(preview->offer(std::move(output)));
+        }
+      });
+    } else {
+      router_.reset();
+      preview_.reset();
+    }
+    return std::make_unique<MetalRendererAdapter>(
+        context_, asset, config, *metrics_, router_, preview_);
   }
 
   void run_main_loop(std::stop_token token) override {
+    if (preview_ != nullptr) {
+      preview_->run_main_loop(token);
+      return;
+    }
     std::unique_lock lock(loop_mutex_);
     loop_condition_.wait(lock, token, [this] { return loop_stopped_; });
   }
@@ -243,10 +311,15 @@ class MetalBackend final : public swim::core::IBackend {
       loop_stopped_ = true;
     }
     loop_condition_.notify_all();
+    if (preview_ != nullptr) {
+      preview_->request_stop();
+    }
   }
 
  private:
   std::shared_ptr<MetalContext> context_;
+  std::shared_ptr<MetalCompletedOutputRouter> router_;
+  std::shared_ptr<MetalPreview> preview_;
   swim::core::AppConfig config_;
   swim::core::RuntimeCounters fallback_metrics_;
   swim::core::RuntimeCounters* metrics_{&fallback_metrics_};

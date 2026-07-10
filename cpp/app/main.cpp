@@ -163,6 +163,8 @@ void write_final_metrics(const swim::core::AppConfig& config,
     line << metrics.frame_age_ms_p99[camera];
   }
   line << ']'
+       << ",\"preview_drops\":" << metrics.preview_drops
+       << ",\"preview_presents\":" << metrics.preview_presents
        << ",\"pool_exhaustion\":" << metrics.pool_exhaustion
        << ",\"decoded_pixel_host_copies\":"
        << metrics.decoded_pixel_host_copies
@@ -172,6 +174,8 @@ void write_final_metrics(const swim::core::AppConfig& config,
        << metrics.native_command_buffers
        << ",\"native_decode_tickets\":"
        << metrics.native_decode_tickets
+       << ",\"native_callback_wrappers\":"
+       << metrics.native_callback_wrappers
        << ",\"sources_healthy\":" << healthy_sources
        << ",\"output_width\":" << output_width
        << ",\"output_height\":" << output_height << '}'

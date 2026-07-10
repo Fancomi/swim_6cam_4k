@@ -111,6 +111,8 @@ if(APPLE)
   find_library(SWIM_COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
   find_library(SWIM_AVFOUNDATION_FRAMEWORK AVFoundation REQUIRED)
   find_library(SWIM_VIDEOTOOLBOX_FRAMEWORK VideoToolbox REQUIRED)
+  find_library(SWIM_COCOA_FRAMEWORK Cocoa REQUIRED)
+  find_library(SWIM_QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
 
   add_library(swim_metal_renderer
     cpp/backends/metal/src/metal_renderer.mm)
@@ -131,6 +133,18 @@ if(APPLE)
   swim_enable_warnings(swim_metal_renderer)
   swim_enable_sanitizers(swim_metal_renderer)
 
+  add_library(swim_metal_preview
+    cpp/backends/metal/src/metal_preview.mm)
+  target_include_directories(swim_metal_preview PUBLIC
+    cpp/backends/metal/include)
+  target_compile_options(swim_metal_preview PRIVATE -fobjc-arc)
+  target_link_libraries(swim_metal_preview PUBLIC
+    swim_metal_renderer
+    ${SWIM_COCOA_FRAMEWORK}
+    ${SWIM_QUARTZCORE_FRAMEWORK})
+  swim_enable_warnings(swim_metal_preview)
+  swim_enable_sanitizers(swim_metal_preview)
+
   add_library(swim_metal_decode
     cpp/backends/metal/src/mp4_source.mm
     cpp/backends/metal/src/videotoolbox_decoder.mm)
@@ -149,7 +163,9 @@ if(APPLE)
   target_include_directories(swim_metal_backend PUBLIC
     cpp/backends/metal/include)
   target_compile_options(swim_metal_backend PRIVATE -fobjc-arc)
-  target_link_libraries(swim_metal_backend PUBLIC swim_metal_decode)
+  target_link_libraries(swim_metal_backend PUBLIC
+    swim_metal_decode
+    swim_metal_preview)
   swim_enable_warnings(swim_metal_backend)
   swim_enable_sanitizers(swim_metal_backend)
 
@@ -173,7 +189,7 @@ if(APPLE)
     cpp/tests/test_main.cpp
     cpp/tests/metal_preview_test.mm)
   target_compile_options(metal_preview_test PRIVATE -fobjc-arc)
-  target_link_libraries(metal_preview_test PRIVATE swim_metal_renderer)
+  target_link_libraries(metal_preview_test PRIVATE swim_metal_preview)
   swim_enable_warnings(metal_preview_test)
   swim_enable_sanitizers(metal_preview_test)
   add_test(NAME metal_preview_test COMMAND metal_preview_test)

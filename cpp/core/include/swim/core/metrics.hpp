@@ -69,6 +69,7 @@ struct MetricsSnapshot final {
   const std::uint64_t render_output_pool_misses;
   const std::array<std::uint64_t, 6> frame_age_ms_p99;
   const std::uint64_t preview_drops;
+  const std::uint64_t preview_presents;
   const std::uint64_t encode_drops;
   const std::uint64_t decoded_pixel_host_copies;
   const std::uint64_t pool_exhaustion;
@@ -104,6 +105,7 @@ struct RuntimeCounters final {
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_output_high_water{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_output_pool_misses{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t preview_drops{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t preview_presents{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t encode_drops{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t
       decoded_pixel_host_copies{};
