@@ -100,6 +100,8 @@ if(APPLE)
   find_library(SWIM_FOUNDATION_FRAMEWORK Foundation REQUIRED)
   find_library(SWIM_IOSURFACE_FRAMEWORK IOSurface REQUIRED)
   find_library(SWIM_COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
+  find_library(SWIM_AVFOUNDATION_FRAMEWORK AVFoundation REQUIRED)
+  find_library(SWIM_VIDEOTOOLBOX_FRAMEWORK VideoToolbox REQUIRED)
 
   add_library(swim_metal_renderer
     cpp/backends/metal/src/metal_renderer.mm)
@@ -120,10 +122,29 @@ if(APPLE)
   swim_enable_warnings(swim_metal_renderer)
   swim_enable_sanitizers(swim_metal_renderer)
 
+  add_library(swim_metal_decode
+    cpp/backends/metal/src/mp4_source.mm
+    cpp/backends/metal/src/videotoolbox_decoder.mm)
+  target_include_directories(swim_metal_decode PUBLIC
+    cpp/backends/metal/include)
+  target_compile_options(swim_metal_decode PRIVATE -fobjc-arc)
+  target_link_libraries(swim_metal_decode PUBLIC
+    swim_metal_renderer
+    ${SWIM_AVFOUNDATION_FRAMEWORK}
+    ${SWIM_VIDEOTOOLBOX_FRAMEWORK})
+  swim_enable_warnings(swim_metal_decode)
+  swim_enable_sanitizers(swim_metal_decode)
+
   add_executable(metal_golden_test cpp/tests/metal_golden_test.mm)
   add_dependencies(metal_golden_test runtime_asset)
   target_compile_options(metal_golden_test PRIVATE -fobjc-arc)
   target_link_libraries(metal_golden_test PRIVATE swim_metal_renderer)
   swim_enable_warnings(metal_golden_test)
   swim_enable_sanitizers(metal_golden_test)
+
+  add_executable(metal_decode_probe cpp/tests/metal_decode_probe.mm)
+  target_compile_options(metal_decode_probe PRIVATE -fobjc-arc)
+  target_link_libraries(metal_decode_probe PRIVATE swim_metal_decode)
+  swim_enable_warnings(metal_decode_probe)
+  swim_enable_sanitizers(metal_decode_probe)
 endif()
