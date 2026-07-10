@@ -16,6 +16,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace swim::metal {
 
@@ -400,6 +401,15 @@ class MetalStitchRenderer::Impl final {
     result.output = {};
     result.gpu_start_ns = 0;
     result.gpu_end_ns = 0;
+    result.diagnostic_command_buffer = nil;
+    if (fatal_error_.load(std::memory_order_acquire)) {
+      return false;
+    }
+    for (std::size_t index = 0; index < frames.size(); ++index) {
+      if (frames[index].metadata.camera_index != index) {
+        return false;
+      }
+    }
 
     InFlightRecord* record = nullptr;
     for (std::uint32_t index = 0; index < inflight_count_; ++index) {
@@ -437,19 +447,18 @@ class MetalStitchRenderer::Impl final {
       }
       record->command_buffer = command;
       encode_stitch(command, frames, *record, result.output.texture());
+      result.diagnostic_command_buffer = command;
 
       auto* completed_record = record;
       auto* owner = this;
       [command addCompletedHandler:^(id<MTLCommandBuffer> completed) {
-        owner->last_gpu_start_ns_.store(
-            seconds_to_nanoseconds(completed.GPUStartTime),
-            std::memory_order_relaxed);
-        owner->last_gpu_end_ns_.store(
-            seconds_to_nanoseconds(completed.GPUEndTime),
-            std::memory_order_relaxed);
+        if (completed.status != MTLCommandBufferStatusCompleted) {
+          owner->fatal_error_.store(true, std::memory_order_release);
+        }
         completed_record->input_leases = {};
         completed_record->frame_views = {};
         completed_record->output = {};
+        completed_record->command_buffer = nil;
         completed_record->busy.store(false, std::memory_order_release);
       }];
       [command commit];
@@ -461,15 +470,29 @@ class MetalStitchRenderer::Impl final {
       record->command_buffer = nil;
       record->busy.store(false, std::memory_order_release);
       result.output = {};
+      result.diagnostic_command_buffer = nil;
       return false;
     }
   }
 
   void wait_for_completion(MetalRenderResult& result) {
-    drain();
-    result.gpu_start_ns =
-        last_gpu_start_ns_.load(std::memory_order_relaxed);
-    result.gpu_end_ns = last_gpu_end_ns_.load(std::memory_order_relaxed);
+    id<MTLCommandBuffer> command = result.diagnostic_command_buffer;
+    if (command == nil) {
+      throw std::invalid_argument(
+          "Metal render result has no diagnostic submission");
+    }
+    [command waitUntilCompleted];
+    if (command.status != MTLCommandBufferStatusCompleted) {
+      fatal_error_.store(true, std::memory_order_release);
+      throw std::runtime_error(
+          metal_error(@"Metal command buffer failed", command.error));
+    }
+    result.gpu_start_ns = seconds_to_nanoseconds(command.GPUStartTime);
+    result.gpu_end_ns = seconds_to_nanoseconds(command.GPUEndTime);
+  }
+
+  bool has_fatal_error() const noexcept {
+    return fatal_error_.load(std::memory_order_acquire);
   }
 
   void drain() {
@@ -505,9 +528,43 @@ class MetalStitchRenderer::Impl final {
                   source.weight_height) {
         throw std::invalid_argument("Metal camera asset is empty or malformed");
       }
+      auto raster_vertices = source.vertices;
+      float mesh_min_x = raster_vertices.front().output_x;
+      float mesh_max_x = mesh_min_x;
+      float mesh_min_y = raster_vertices.front().output_y;
+      float mesh_max_y = mesh_min_y;
+      for (const auto& vertex : raster_vertices) {
+        mesh_min_x = std::min(mesh_min_x, vertex.output_x);
+        mesh_max_x = std::max(mesh_max_x, vertex.output_x);
+        mesh_min_y = std::min(mesh_min_y, vertex.output_y);
+        mesh_max_y = std::max(mesh_max_y, vertex.output_y);
+      }
+      constexpr float kPerimeterTolerance = 1.0F / 64.0F;
+      constexpr float kInclusiveExpansion = 1.0F / 16.0F;
+      const auto coverage_min_x = static_cast<float>(source.weight_x);
+      const auto coverage_min_y = static_cast<float>(source.weight_y);
+      const auto coverage_max_x = coverage_min_x +
+          static_cast<float>(source.weight_width - 1U);
+      const auto coverage_max_y = coverage_min_y +
+          static_cast<float>(source.weight_height - 1U);
+      for (auto& vertex : raster_vertices) {
+        if (std::abs(vertex.output_x - mesh_min_x) <= kPerimeterTolerance) {
+          vertex.output_x = coverage_min_x - kInclusiveExpansion;
+        } else if (std::abs(vertex.output_x - mesh_max_x) <=
+                   kPerimeterTolerance) {
+          vertex.output_x = coverage_max_x + kInclusiveExpansion;
+        }
+        if (std::abs(vertex.output_y - mesh_min_y) <= kPerimeterTolerance) {
+          vertex.output_y = coverage_min_y - kInclusiveExpansion;
+        } else if (std::abs(vertex.output_y - mesh_max_y) <=
+                   kPerimeterTolerance) {
+          vertex.output_y = coverage_max_y + kInclusiveExpansion;
+        }
+      }
       camera.vertices = [context_->device
-          newBufferWithBytes:source.vertices.data()
-                     length:source.vertices.size() * sizeof(source.vertices[0])
+          newBufferWithBytes:raster_vertices.data()
+                     length:raster_vertices.size() *
+                            sizeof(raster_vertices[0])
                     options:MTLResourceStorageModeShared];
       camera.indices = [context_->device
           newBufferWithBytes:source.indices.data()
@@ -686,8 +743,7 @@ class MetalStitchRenderer::Impl final {
   std::uint32_t inflight_count_;
   std::unique_ptr<InFlightRecord[]> in_flight_;
   MetalOutputPool output_pool_;
-  std::atomic_uint64_t last_gpu_start_ns_{0};
-  std::atomic_uint64_t last_gpu_end_ns_{0};
+  std::atomic_bool fatal_error_{false};
 };
 
 MetalStitchRenderer::MetalStitchRenderer(
@@ -710,6 +766,9 @@ bool MetalStitchRenderer::submit(
   try {
     std::array<MetalFrameView, 6> frames;
     for (std::size_t index = 0; index < frames.size(); ++index) {
+      if (snapshot.frames[index].metadata().camera_index != index) {
+        return false;
+      }
       auto* native = static_cast<MetalFrameView*>(
           snapshot.frames[index].native(kMetalFrameBackendTag));
       if (native == nullptr) {
@@ -729,5 +788,9 @@ void MetalStitchRenderer::wait_for_completion(MetalRenderResult& result) {
 }
 
 void MetalStitchRenderer::drain() { impl_->drain(); }
+
+bool MetalStitchRenderer::has_fatal_error() const noexcept {
+  return impl_->has_fatal_error();
+}
 
 }  // namespace swim::metal

@@ -30,6 +30,7 @@ class MetalStitchRenderer final {
   // reads output pixels on the CPU.
   void wait_for_completion(MetalRenderResult& result);
   void drain();
+  bool has_fatal_error() const noexcept;
 
  private:
   class Impl;

@@ -6,7 +6,9 @@
 #import <ImageIO/ImageIO.h>
 #import <Metal/Metal.h>
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <filesystem>
 #include <iostream>
@@ -52,6 +54,150 @@ void verify_output_pool_contract(
   copy = {};
   if (!pool.try_acquire().has_value()) {
     throw std::runtime_error("Metal output pool did not recycle its slot");
+  }
+}
+
+void retain_test_frame(void*) noexcept {}
+void release_test_frame(void*) noexcept {}
+
+void verify_camera_metadata_contract(
+    swim::metal::MetalStitchRenderer& renderer,
+    const std::array<swim::metal::MetalFrameView, 6>& valid_frames) {
+  swim::metal::MetalRenderResult missing_submission;
+  try {
+    renderer.wait_for_completion(missing_submission);
+    throw std::runtime_error(
+        "diagnostic wait accepted a result without a submission");
+  } catch (const std::invalid_argument&) {
+  }
+
+  auto invalid_frames = valid_frames;
+  invalid_frames[0].metadata.camera_index = 1;
+  swim::metal::MetalRenderResult result;
+  if (renderer.submit(invalid_frames, result)) {
+    renderer.wait_for_completion(result);
+    throw std::runtime_error(
+        "direct Metal views accepted camera metadata in the wrong slot");
+  }
+
+  swim::core::RenderSnapshot snapshot;
+  constexpr swim::core::NativeLeaseOps kTestLeaseOps{
+      retain_test_frame, release_test_frame, swim::metal::kMetalFrameBackendTag};
+  for (std::size_t index = 0; index < valid_frames.size(); ++index) {
+    auto metadata = valid_frames[index].metadata;
+    if (index == 4) {
+      metadata.camera_index = 0;
+    }
+    snapshot.frames[index] = swim::core::FrameLease{
+        const_cast<swim::metal::MetalFrameView*>(&valid_frames[index]),
+        kTestLeaseOps, metadata};
+  }
+  if (renderer.submit(snapshot, result)) {
+    renderer.wait_for_completion(result);
+    throw std::runtime_error(
+        "Metal snapshot accepted camera metadata in the wrong slot");
+  }
+}
+
+id<MTLTexture> make_constant_plane(id<MTLDevice> device,
+                                   MTLPixelFormat format,
+                                   NSUInteger width,
+                                   NSUInteger height,
+                                   const void* bytes,
+                                   NSUInteger bytes_per_row) {
+  auto* descriptor = [MTLTextureDescriptor
+      texture2DDescriptorWithPixelFormat:format
+                                  width:width
+                                 height:height
+                              mipmapped:NO];
+  descriptor.storageMode = MTLStorageModeShared;
+  descriptor.usage = MTLTextureUsageShaderRead;
+  id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
+  if (texture == nil) {
+    throw std::runtime_error("cannot create synthetic NV12 texture plane");
+  }
+  [texture replaceRegion:MTLRegionMake2D(0, 0, width, height)
+              mipmapLevel:0
+                withBytes:bytes
+              bytesPerRow:bytes_per_row];
+  return texture;
+}
+
+std::array<std::uint8_t, 3> render_full_range_nv12_sample(
+    swim::metal::MetalStitchRenderer& renderer,
+    const std::shared_ptr<swim::metal::MetalContext>& context,
+    std::uint8_t y, std::uint8_t cb, std::uint8_t cr) {
+  const std::array<std::uint8_t, 4> luma{y, y, y, y};
+  const std::array<std::uint8_t, 2> chroma{cb, cr};
+  id<MTLTexture> luma_texture = make_constant_plane(
+      context->device, MTLPixelFormatR8Unorm, 2, 2, luma.data(), 2);
+  id<MTLTexture> chroma_texture = make_constant_plane(
+      context->device, MTLPixelFormatRG8Unorm, 1, 1, chroma.data(), 2);
+  std::array<swim::metal::MetalFrameView, 6> frames;
+  for (std::size_t index = 0; index < frames.size(); ++index) {
+    frames[index].luma = luma_texture;
+    frames[index].chroma = chroma_texture;
+    frames[index].metadata.camera_index = static_cast<std::uint32_t>(index);
+    frames[index].metadata.width = 2;
+    frames[index].metadata.height = 2;
+    frames[index].metadata.pixel_format =
+        swim::core::PixelFormat::nv12_full_range;
+    frames[index].metadata.color_matrix = swim::core::ColorMatrix::bt709;
+  }
+  swim::metal::MetalRenderResult result;
+  if (!renderer.submit(frames, result)) {
+    throw std::runtime_error("renderer rejected synthetic NV12 frame");
+  }
+  renderer.wait_for_completion(result);
+  if (result.gpu_start_ns == 0 || result.gpu_end_ns < result.gpu_start_ns ||
+      renderer.has_fatal_error()) {
+    throw std::runtime_error(
+        "synthetic NV12 submission did not report exact GPU completion");
+  }
+  auto* pixel_buffer = result.output.pixel_buffer();
+  if (CVPixelBufferLockBaseAddress(pixel_buffer, kCVPixelBufferLock_ReadOnly) !=
+      kCVReturnSuccess) {
+    throw std::runtime_error("cannot lock synthetic NV12 output");
+  }
+  const auto* row = static_cast<const std::uint8_t*>(
+      CVPixelBufferGetBaseAddress(pixel_buffer)) +
+      1050 * CVPixelBufferGetBytesPerRow(pixel_buffer);
+  const auto* bgra = row + 2500 * 4;
+  const std::array<std::uint8_t, 3> rgb{bgra[2], bgra[1], bgra[0]};
+  CVPixelBufferUnlockBaseAddress(pixel_buffer, kCVPixelBufferLock_ReadOnly);
+  return rgb;
+}
+
+std::uint8_t quantize_unorm(float value) {
+  return static_cast<std::uint8_t>(std::lround(
+      std::clamp(value, 0.0F, 1.0F) * 255.0F));
+}
+
+void verify_full_range_nv12_shader(
+    swim::metal::MetalStitchRenderer& renderer,
+    const std::shared_ptr<swim::metal::MetalContext>& context) {
+  const auto neutral = render_full_range_nv12_sample(
+      renderer, context, 128, 128, 128);
+  if (neutral != std::array<std::uint8_t, 3>{128, 128, 128}) {
+    throw std::runtime_error(
+        "full-range NV12 neutral chroma is not exactly neutral");
+  }
+
+  constexpr std::uint8_t kY = 250;
+  constexpr std::uint8_t kCb = 0;
+  constexpr std::uint8_t kCr = 128;
+  const auto actual = render_full_range_nv12_sample(
+      renderer, context, kY, kCb, kCr);
+  const auto luma = static_cast<float>(kY) / 255.0F;
+  const auto cb = (static_cast<float>(kCb) - 128.0F) / 254.0F;
+  const auto cr = (static_cast<float>(kCr) - 128.0F) / 254.0F;
+  const std::array<std::uint8_t, 3> expected{
+      quantize_unorm(luma + 1.5748F * cr),
+      quantize_unorm(luma - 0.187324F * cb - 0.468124F * cr),
+      quantize_unorm(luma + 1.8556F * cb)};
+  if (actual != expected) {
+    throw std::runtime_error(
+        "full-range NV12 non-neutral shader conversion is incorrect");
   }
 }
 
@@ -211,11 +357,19 @@ int main(int argc, const char* argv[]) {
       }
 
       swim::metal::MetalStitchRenderer renderer(context, asset, config);
+      verify_camera_metadata_contract(renderer, frames);
+      verify_full_range_nv12_shader(renderer, context);
       swim::metal::MetalRenderResult result;
       if (!renderer.submit(frames, result)) {
         throw std::runtime_error("renderer rejected the diagnostic frame");
       }
       renderer.wait_for_completion(result);
+      if (result.gpu_start_ns == 0 ||
+          result.gpu_end_ns < result.gpu_start_ns ||
+          renderer.has_fatal_error()) {
+        throw std::runtime_error(
+            "diagnostic render did not report exact GPU completion");
+      }
       write_png(result.output.pixel_buffer(), argv[2]);
       std::cout << "gpu_start_ns=" << result.gpu_start_ns
                 << " gpu_end_ns=" << result.gpu_end_ns << '\n';

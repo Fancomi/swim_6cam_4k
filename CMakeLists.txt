@@ -121,6 +121,7 @@ if(APPLE)
   swim_enable_sanitizers(swim_metal_renderer)
 
   add_executable(metal_golden_test cpp/tests/metal_golden_test.mm)
+  add_dependencies(metal_golden_test runtime_asset)
   target_compile_options(metal_golden_test PRIVATE -fobjc-arc)
   target_link_libraries(metal_golden_test PRIVATE swim_metal_renderer)
   swim_enable_warnings(metal_golden_test)

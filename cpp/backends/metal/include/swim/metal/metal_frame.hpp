@@ -93,6 +93,9 @@ struct MetalRenderResult final {
   MetalOutputLease output;
   std::uint64_t gpu_start_ns = 0;
   std::uint64_t gpu_end_ns = 0;
+  // Retained only so diagnostic callers can wait for and inspect this exact
+  // submission. Production submission remains asynchronous.
+  id<MTLCommandBuffer> diagnostic_command_buffer = nil;
 };
 
 }  // namespace swim::metal

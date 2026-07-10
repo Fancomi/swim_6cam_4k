@@ -74,8 +74,8 @@ static float3 ycbcr_to_rgb(float y, float2 cbcr,
   float cr;
   if (uniforms.full_range != 0) {
     luma = y;
-    cb = cbcr.x - 0.5f;
-    cr = cbcr.y - 0.5f;
+    cb = (cbcr.x - 128.0f / 255.0f) * (255.0f / 254.0f);
+    cr = (cbcr.y - 128.0f / 255.0f) * (255.0f / 254.0f);
   } else {
     luma = (y - 16.0f / 255.0f) * (255.0f / 219.0f);
     cb = (cbcr.x - 128.0f / 255.0f) * (255.0f / 224.0f);
@@ -124,18 +124,7 @@ fragment half4 resolve_accumulation(
   if (pixel.x >= dimensions.x || pixel.y >= dimensions.y) {
     return half4(0.0h, 0.0h, 0.0h, 1.0h);
   }
-  // OpenCV's polygon fill includes the right/bottom logical boundary pixels;
-  // Metal's top-left raster rule excludes them. Resolve those two logical
-  // boundary pixels from their adjacent accumulation texel while preserving
-  // the separately padded right column and bottom row as black.
-  uint2 accumulation_pixel = pixel;
-  if (accumulation_pixel.x + 1 == dimensions.x) {
-    accumulation_pixel.x -= 1;
-  }
-  if (accumulation_pixel.y + 1 == dimensions.y) {
-    accumulation_pixel.y -= 1;
-  }
-  const float4 value = accumulation.read(accumulation_pixel);
+  const float4 value = accumulation.read(pixel);
   const float3 rgb = value.a > 0.0f
                          ? clamp(value.rgb / value.a, 0.0f, 1.0f)
                          : float3(0.0f);
