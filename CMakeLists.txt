@@ -26,7 +26,9 @@ add_custom_target(runtime_asset DEPENDS ${RUNTIME_ASSET})
 
 add_library(swim_core
   cpp/core/src/asset.cpp
+  cpp/core/src/backend.cpp
   cpp/core/src/camera_health.cpp
+  cpp/core/src/config.cpp
   cpp/core/src/frame.cpp
   cpp/core/src/hot_path_allocations.cpp
   cpp/core/src/metrics.cpp)
@@ -34,17 +36,49 @@ target_include_directories(swim_core PUBLIC cpp/core/include)
 swim_enable_warnings(swim_core)
 swim_enable_sanitizers(swim_core)
 
+add_executable(swim_realtime cpp/app/main.cpp)
+target_link_libraries(swim_realtime PRIVATE swim_core)
+swim_enable_warnings(swim_realtime)
+swim_enable_sanitizers(swim_realtime)
+add_dependencies(swim_realtime runtime_asset)
+
 enable_testing()
 add_executable(swim_core_tests
   cpp/tests/test_main.cpp
   cpp/tests/test_asset.cpp
+  cpp/tests/test_backend.cpp
   cpp/tests/test_camera_health.cpp
+  cpp/tests/test_config.cpp
   cpp/tests/test_frame_mailbox.cpp
   cpp/tests/test_metrics.cpp)
 target_link_libraries(swim_core_tests PRIVATE swim_core)
 target_compile_definitions(swim_core_tests PRIVATE
-  SWIM_TEST_ASSET_PATH="${RUNTIME_ASSET}")
+  SWIM_TEST_ASSET_PATH="${RUNTIME_ASSET}"
+  SWIM_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/cpp/tests/fixtures")
 swim_enable_warnings(swim_core_tests)
 swim_enable_sanitizers(swim_core_tests)
 add_dependencies(swim_core_tests runtime_asset)
 add_test(NAME swim_core_tests COMMAND swim_core_tests)
+
+add_test(
+  NAME swim_validate_cli
+  COMMAND swim_realtime --config cpp/tests/fixtures/cli.conf --validate-only)
+set_tests_properties(swim_validate_cli PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  PASS_REGULAR_EXPRESSION
+    "camera_order=cam3,cam2,cam1,cam4,cam5,cam6")
+
+add_test(NAME swim_cli_requires_config COMMAND swim_realtime --validate-only)
+set_tests_properties(swim_cli_requires_config PROPERTIES WILL_FAIL TRUE)
+
+add_test(NAME swim_cli_rejects_missing_config_path COMMAND swim_realtime --config)
+set_tests_properties(swim_cli_rejects_missing_config_path PROPERTIES
+  WILL_FAIL TRUE)
+
+add_test(
+  NAME swim_cli_rejects_repeated_config
+  COMMAND swim_realtime --config cpp/tests/fixtures/cli.conf
+          --config cpp/tests/fixtures/cli.conf --validate-only)
+set_tests_properties(swim_cli_rejects_repeated_config PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  WILL_FAIL TRUE)

@@ -1,0 +1,144 @@
+#include "test_support.hpp"
+
+#include <swim/core/backend.hpp>
+
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <stop_token>
+#include <string>
+#include <thread>
+
+namespace {
+
+class NullSource final : public swim::core::ISource {
+ public:
+  void start(swim::core::LatestFrameMailbox& output) override {
+    output_ = &output;
+  }
+
+  void stop() noexcept override { output_ = nullptr; }
+
+ private:
+  swim::core::LatestFrameMailbox* output_{};
+};
+
+class NullRenderer final : public swim::core::IRenderer {
+ public:
+  bool submit(const swim::core::RenderSnapshot&) override { return true; }
+
+  swim::core::FrameLease replacement_frame(
+      std::uint32_t) const override {
+    return {};
+  }
+
+  void drain() override {}
+};
+
+class NullBackend final : public swim::core::IBackend {
+ public:
+  std::unique_ptr<swim::core::ISource> make_source(
+      const swim::core::SourceConfig&, std::uint32_t) override {
+    return std::make_unique<NullSource>();
+  }
+
+  std::unique_ptr<swim::core::IRenderer> make_renderer(
+      const swim::core::RuntimeAsset&,
+      const swim::core::AppConfig&) override {
+    return std::make_unique<NullRenderer>();
+  }
+
+  void run_main_loop(std::stop_token token) override {
+    std::unique_lock lock(mutex_);
+    condition_.wait(lock, token, [this] { return stopped_; });
+  }
+
+  void stop_main_loop() noexcept override {
+    {
+      std::lock_guard lock(mutex_);
+      stopped_ = true;
+    }
+    condition_.notify_all();
+  }
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable_any condition_;
+  bool stopped_{};
+};
+
+std::unique_ptr<swim::core::IBackend> make_null_backend() {
+  return std::make_unique<NullBackend>();
+}
+
+}  // namespace
+
+TEST_CASE(registry_creates_a_backend_that_implements_every_contract) {
+  swim::core::BackendRegistry registry;
+  registry.register_factory("null", &make_null_backend);
+  auto backend = registry.create("null");
+
+  swim::core::AppConfig config;
+  auto source = backend->make_source(config.sources[0], 0);
+  swim::core::LatestFrameMailbox mailbox;
+  source->start(mailbox);
+  source->stop();
+
+  swim::core::RuntimeAsset asset{};
+  auto renderer = backend->make_renderer(asset, config);
+  swim::core::RenderSnapshot snapshot{};
+  CHECK(renderer->submit(snapshot));
+  CHECK(!renderer->replacement_frame(0));
+  renderer->drain();
+
+  std::atomic<bool> exited{};
+  std::jthread loop([&](std::stop_token token) {
+    backend->run_main_loop(token);
+    exited.store(true, std::memory_order_release);
+  });
+  backend->stop_main_loop();
+  loop.join();
+  CHECK(exited.load(std::memory_order_acquire));
+}
+
+TEST_CASE(null_main_loop_also_exits_when_its_stop_token_is_requested) {
+  swim::core::BackendRegistry registry;
+  registry.register_factory("null", &make_null_backend);
+  auto backend = registry.create("null");
+
+  std::atomic<bool> exited{};
+  std::jthread loop([&](std::stop_token token) {
+    backend->run_main_loop(token);
+    exited.store(true, std::memory_order_release);
+  });
+  loop.request_stop();
+  loop.join();
+  CHECK(exited.load(std::memory_order_acquire));
+}
+
+TEST_CASE(registry_reports_registered_backend_names_in_sorted_order) {
+  swim::core::BackendRegistry registry;
+  registry.register_factory("zeta", &make_null_backend);
+  registry.register_factory("alpha", &make_null_backend);
+  registry.register_factory("middle", &make_null_backend);
+
+  CHECK_THROWS_WITH(
+      registry.create("missing"),
+      "unknown backend 'missing'; registered backends: alpha,middle,zeta");
+}
+
+TEST_CASE(registry_rejects_duplicate_names_and_null_factories) {
+  swim::core::BackendRegistry registry;
+  registry.register_factory("null", &make_null_backend);
+  CHECK_THROWS_WITH(registry.register_factory("null", &make_null_backend),
+                    "backend 'null' is already registered");
+  CHECK_THROWS_WITH(registry.register_factory("empty", nullptr),
+                    "backend factory for 'empty' is null");
+}
+
+TEST_CASE(global_backend_registry_is_stable) {
+  CHECK(&swim::core::BackendRegistry::instance() ==
+        &swim::core::BackendRegistry::instance());
+}
