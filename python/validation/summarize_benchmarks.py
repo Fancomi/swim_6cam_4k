@@ -762,6 +762,8 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--expected-stage", choices=STAGES)
     parser.add_argument("--expected-stream-count", type=int, choices=STREAM_COUNTS)
     parser.add_argument("--expected-pacing", choices=PACINGS)
+    parser.add_argument("--expected-git-sha")
+    parser.add_argument("--expected-build-type")
     return parser.parse_args(argv)
 
 
@@ -784,6 +786,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             if any(value is None for value in expected_parts):
                 raise MatrixValidationError("--cell-only requires all three --expected-* options")
             validate_cell_records(records, expected_parts)
+            if (args.expected_git_sha is None) != (args.expected_build_type is None):
+                raise MatrixValidationError(
+                    "--expected-git-sha and --expected-build-type must be supplied together"
+                )
+            if args.expected_git_sha is not None:
+                if HEX_40.fullmatch(args.expected_git_sha) is None:
+                    raise MatrixValidationError("--expected-git-sha must be 40 hexadecimal digits")
+                if any(record["git_sha"] != args.expected_git_sha for record in records):
+                    raise MatrixValidationError("git_sha does not match expected executable identity")
+                if any(record["build_type"] != args.expected_build_type for record in records):
+                    raise MatrixValidationError("build_type does not match expected executable identity")
             return 0
         validate_matrix(records, publishable=args.publishable)
         rows = summarize_records(records)

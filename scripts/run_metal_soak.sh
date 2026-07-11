@@ -49,12 +49,18 @@ if [[ ! "$DURATION" =~ ^[1-9][0-9]*$ || ! "$WARMUP" =~ ^[0-9]+$ ]]; then
   echo "duration must be positive and warmup nonnegative integers" >&2; exit 2
 fi
 PYTHON="$ROOT/.venv/bin/python"; [[ -x "$PYTHON" ]] || PYTHON="$(command -v python3)"
+EXPECTED_GIT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
+if [[ -n "$(git -C "$ROOT" status --porcelain --untracked-files=normal)" ]]; then
+  echo "soak evidence requires a clean source tree" >&2
+  exit 2
+fi
 if [[ -z "$EXECUTABLE" ]]; then
   cmake -S "$ROOT" -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE="$PYTHON"
   cmake --build "$BUILD_DIR" --target swim_realtime
   EXECUTABLE="$BUILD_DIR/swim_realtime"
 fi
 [[ -x "$EXECUTABLE" ]] || { echo "Release executable is not executable: $EXECUTABLE" >&2; exit 2; }
+EXECUTABLE="$(cd "$(dirname "$EXECUTABLE")" && pwd -P)/$(basename "$EXECUTABLE")"
 
 config_value() { awk -F= -v wanted="$1" '$1 == wanted {sub(/^[^=]*=/, ""); print; found=1} END {if (!found) exit 1}' "$CONFIG"; }
 resolve_path() { if [[ "$1" = /* ]]; then printf '%s\n' "$1"; else printf '%s/%s\n' "$ROOT" "$1"; fi; }
@@ -69,18 +75,39 @@ SOURCE_SHAS=(); for path in "${SOURCES[@]}"; do SOURCE_SHAS+=("$(sha256_file "$p
 RUN_ID="metal-soak-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 [[ -n "$OUTPUT_DIR" ]] || OUTPUT_DIR="$ROOT/benchmarks/soaks/$RUN_ID"
 mkdir -p "$OUTPUT_DIR"
+OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd -P)"
 MANIFEST="$OUTPUT_DIR/runtime.manifest"
 {
   printf 'run_id=%s\nasset_sha256=%s\n' "$RUN_ID" "$ASSET_SHA"
   for index in 0 1 2 3 4 5; do printf 'source.%s_sha256=%s\n' "${CAMERAS[$index]}" "${SOURCE_SHAS[$index]}"; done
 } >"$MANIFEST"
+PREFLIGHT="$OUTPUT_DIR/preflight.jsonl"; rm -f "$PREFLIGHT"
+"$EXECUTABLE" --config "$CONFIG" --stage=render-only --stream-count=1 --mode=realtime \
+  --duration-seconds=1 --preview=true "--preview-visible=$VISIBLE" \
+  --encode=true --encode-sink=null "--benchmark-manifest=$MANIFEST" "--metrics=$PREFLIGHT" \
+  >"$OUTPUT_DIR/preflight.log" 2>&1
+"$PYTHON" -m python.validation.summarize_benchmarks "$PREFLIGHT" --cell-only \
+  --expected-stage render-only --expected-stream-count 1 --expected-pacing paced \
+  --expected-git-sha "$EXPECTED_GIT_SHA" --expected-build-type Release
+EXECUTABLE_SHA="$(sha256_file "$EXECUTABLE")"
+"$PYTHON" - "$OUTPUT_DIR/manifest.json" "$RUN_ID" "$EXPECTED_GIT_SHA" "$EXECUTABLE_SHA" "$ASSET_SHA" "${SOURCE_SHAS[@]}" <<'PY'
+import json, sys
+path, run_id, git_sha, executable_sha, asset_sha, *source_shas = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as output:
+    json.dump({"run_id": run_id, "git_sha": git_sha, "build_type": "Release",
+               "executable_sha256": executable_sha, "source_dirty": False,
+               "asset_sha256": asset_sha, "source_sha256": source_shas},
+              output, indent=2, sort_keys=True)
+    output.write("\n")
+PY
 METRICS="$OUTPUT_DIR/results.jsonl"; rm -f "$METRICS"
 "$EXECUTABLE" --config "$CONFIG" --stage=full --stream-count=6 --mode=realtime \
   "--duration-seconds=$DURATION" --preview=true "--preview-visible=$VISIBLE" \
   --encode=true --encode-sink=null "--benchmark-manifest=$MANIFEST" "--metrics=$METRICS" \
   >"$OUTPUT_DIR/runtime.log" 2>&1
 "$PYTHON" -m python.validation.summarize_benchmarks "$METRICS" --cell-only \
-  --expected-stage full --expected-stream-count 6 --expected-pacing paced
+  --expected-stage full --expected-stream-count 6 --expected-pacing paced \
+  --expected-git-sha "$EXPECTED_GIT_SHA" --expected-build-type Release
 SOAK_ARGS=("$METRICS" --soak-only --warmup-seconds "$WARMUP" --min-fps "$MIN_FPS"
   --max-rss-slope-bytes-per-minute "$MAX_RSS_SLOPE"
   --max-gpu-slope-bytes-per-minute "$MAX_GPU_SLOPE")

@@ -62,6 +62,17 @@ if [[ ! "$DURATION" =~ ^[1-9][0-9]*$ ]]; then
   echo "--duration must be a positive integer" >&2
   exit 2
 fi
+PUBLISHABLE=false
+if ((DURATION >= 15)); then PUBLISHABLE=true; fi
+EXPECTED_GIT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
+SOURCE_DIRTY=false
+if [[ -n "$(git -C "$ROOT" status --porcelain --untracked-files=normal)" ]]; then
+  SOURCE_DIRTY=true
+fi
+if [[ "$PUBLISHABLE" == true && "$SOURCE_DIRTY" == true ]]; then
+  echo "publishable benchmarks require a clean source tree" >&2
+  exit 2
+fi
 if [[ ! -f "$CONFIG" ]]; then
   echo "config does not exist: $CONFIG" >&2
   exit 2
@@ -81,6 +92,7 @@ if [[ ! -x "$EXECUTABLE" ]]; then
   echo "Release executable is not executable: $EXECUTABLE" >&2
   exit 2
 fi
+EXECUTABLE="$(cd "$(dirname "$EXECUTABLE")" && pwd -P)/$(basename "$EXECUTABLE")"
 
 config_value() {
   local key="$1"
@@ -116,6 +128,7 @@ for path in "${SOURCES[@]}"; do SOURCE_SHAS+=("$(sha256_file "$path")"); done
 RUN_ID="metal-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 if [[ -z "$OUTPUT_DIR" ]]; then OUTPUT_DIR="$ROOT/benchmarks/runs/$RUN_ID"; fi
 mkdir -p "$OUTPUT_DIR/cells" "$OUTPUT_DIR/logs"
+OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd -P)"
 RUNTIME_MANIFEST="$OUTPUT_DIR/runtime.manifest"
 {
   printf 'run_id=%s\n' "$RUN_ID"
@@ -125,22 +138,31 @@ RUNTIME_MANIFEST="$OUTPUT_DIR/runtime.manifest"
   done
 } >"$RUNTIME_MANIFEST"
 
-PUBLISHABLE=false
-if ((DURATION >= 15)); then PUBLISHABLE=true; fi
-BUILD_INFO="$BUILD_DIR/generated/swim/core/build_info.hpp"
-EMBEDDED_SHA="unknown"
-EMBEDDED_BUILD_TYPE="unknown"
-if [[ -f "$BUILD_INFO" ]]; then
-  EMBEDDED_SHA="$(sed -n 's/.*git_sha{"\([0-9a-fA-F]*\)"}.*/\1/p' "$BUILD_INFO")"
-  EMBEDDED_BUILD_TYPE="$(sed -n 's/.*build_type{"\([^"]*\)"}.*/\1/p' "$BUILD_INFO")"
-fi
-"$PYTHON" - "$OUTPUT_DIR/manifest.json" "$RUN_ID" "$DURATION" "$PUBLISHABLE" "$VISIBLE" "$EMBEDDED_SHA" "$EMBEDDED_BUILD_TYPE" "$ASSET_SHA" "${SOURCE_SHAS[@]}" <<'PY'
+# A one-second real render-only cell obtains identity from this exact binary
+# before any of the 48 measured cells can run.
+PREFLIGHT_METRICS="$OUTPUT_DIR/preflight.jsonl"
+rm -f "$PREFLIGHT_METRICS"
+"$EXECUTABLE" --config "$CONFIG" --stage=render-only --stream-count=1 \
+  --mode=realtime --duration-seconds=1 --preview=true \
+  "--preview-visible=$VISIBLE" --encode=true --encode-sink=null \
+  "--benchmark-manifest=$RUNTIME_MANIFEST" "--metrics=$PREFLIGHT_METRICS" \
+  >"$OUTPUT_DIR/logs/preflight.log" 2>&1
+"$PYTHON" -m python.validation.summarize_benchmarks "$PREFLIGHT_METRICS" \
+  --cell-only --expected-stage render-only --expected-stream-count 1 \
+  --expected-pacing paced --expected-git-sha "$EXPECTED_GIT_SHA" \
+  --expected-build-type Release
+EMBEDDED_SHA="$EXPECTED_GIT_SHA"
+EMBEDDED_BUILD_TYPE=Release
+EXECUTABLE_SHA="$(sha256_file "$EXECUTABLE")"
+
+"$PYTHON" - "$OUTPUT_DIR/manifest.json" "$RUN_ID" "$DURATION" "$PUBLISHABLE" "$VISIBLE" "$EMBEDDED_SHA" "$EMBEDDED_BUILD_TYPE" "$EXECUTABLE_SHA" "$SOURCE_DIRTY" "$ASSET_SHA" "${SOURCE_SHAS[@]}" <<'PY'
 import json, sys
-path, run_id, duration, publishable, visible, git_sha, build_type, asset_sha, *source_shas = sys.argv[1:]
+path, run_id, duration, publishable, visible, git_sha, build_type, executable_sha, source_dirty, asset_sha, *source_shas = sys.argv[1:]
 payload = {
     "run_id": run_id, "duration_seconds": int(duration),
     "publishable": publishable == "true", "visible_preview": visible == "true",
     "expected_cells": 48, "git_sha": git_sha, "build_type": build_type,
+    "executable_sha256": executable_sha, "source_dirty": source_dirty == "true",
     "asset_sha256": asset_sha, "source_sha256": source_shas,
 }
 with open(path, "w", encoding="utf-8") as output:
@@ -168,7 +190,8 @@ for stage in "${STAGES[@]}"; do
         >"$log" 2>&1
       "$PYTHON" -m python.validation.summarize_benchmarks "$metrics" \
         --cell-only --expected-stage "$stage" --expected-stream-count "$count" \
-        --expected-pacing "$pacing"
+        --expected-pacing "$pacing" --expected-git-sha "$EMBEDDED_SHA" \
+        --expected-build-type "$EMBEDDED_BUILD_TYPE"
       ((cell_count += 1))
     done
   done
@@ -185,5 +208,5 @@ if [[ "$PUBLISHABLE" == true ]]; then SUMMARY_ARGS+=(--publishable); fi
 "$PYTHON" -m python.validation.summarize_benchmarks "${SUMMARY_ARGS[@]}"
 
 mkdir -p "$ROOT/benchmarks"
-ln -sfn "runs/$RUN_ID" "$ROOT/benchmarks/latest"
+ln -sfn "$OUTPUT_DIR" "$ROOT/benchmarks/latest"
 echo "benchmark matrix complete: $OUTPUT_DIR"
