@@ -12,6 +12,7 @@
 #include <limits>
 #include <mutex>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 namespace swim::metal {
@@ -73,7 +74,8 @@ bool write_length_prefixed_nals_as_annex_b(
     std::span<const std::uint8_t> access_unit,
     std::uint8_t nal_length_bytes,
     AnnexBWriter writer) noexcept {
-  if (!valid_nal_length_width(nal_length_bytes) || writer.append == nullptr) {
+  if (access_unit.empty() || !valid_nal_length_width(nal_length_bytes) ||
+      writer.append == nullptr) {
     return false;
   }
   std::size_t offset = 0;
@@ -100,7 +102,7 @@ bool write_length_prefixed_nals_as_annex_b(
     std::size_t access_unit_bytes,
     std::uint8_t nal_length_bytes,
     AnnexBWriter writer) noexcept {
-  if (access_unit == nullptr ||
+  if (access_unit == nullptr || access_unit_bytes == 0 ||
       !valid_nal_length_width(nal_length_bytes) || writer.append == nullptr ||
       access_unit_bytes > CMBlockBufferGetDataLength(access_unit)) {
     return false;
@@ -267,6 +269,13 @@ bool EncoderInputGate::wait_until_empty(
   });
 }
 
+void EncoderInputGate::wait_until_empty() noexcept {
+  std::unique_lock lock(mutex_);
+  condition_.wait(lock, [this] {
+    return in_use_.load(std::memory_order_acquire) == 0;
+  });
+}
+
 std::uint32_t EncoderInputGate::capacity() const noexcept {
   return static_cast<std::uint32_t>(pool_.capacity());
 }
@@ -291,39 +300,591 @@ void EncoderInputGate::record_release() noexcept {
   }
 }
 
-class MetalEncoder::Impl final
-    : public std::enable_shared_from_this<MetalEncoder::Impl> {
- public:
+class MetalEncoder::Impl final {
+ private:
+  class State;
+
   struct CallbackTicket final {
-    std::shared_ptr<Impl> owner;
+    std::shared_ptr<State> state;
     EncoderInputGate::Ticket* gate_ticket{};
+    std::atomic_bool drop_recorded{};
+    std::atomic_bool frame_dropped{};
   };
 
+  class State final {
+   public:
+    State(MetalEncoderWriterOps writer, void* now_context,
+          std::uint64_t (*now_ns)(void*) noexcept,
+          std::shared_ptr<void> lifetime_anchor)
+        : gate(kEncoderInputCapacity),
+          writer_(writer),
+          now_context_(now_context),
+          now_ns_(now_ns),
+          lifetime_anchor_(std::move(lifetime_anchor)) {}
+
+    ~State() { static_cast<void>(close_writer()); }
+
+    std::uint64_t now() const noexcept {
+      return now_ns_ == nullptr ? steady_now_ns() : now_ns_(now_context_);
+    }
+
+    bool claim_first_submit(std::uint64_t timestamp) noexcept {
+      std::uint64_t zero = 0;
+      return first_submit_ns.compare_exchange_strong(
+          zero, timestamp, std::memory_order_relaxed);
+    }
+
+    void rollback_first_submit(std::uint64_t timestamp,
+                               bool claimed) noexcept {
+      if (!claimed || submissions.load(std::memory_order_relaxed) != 0 ||
+          completions.load(std::memory_order_relaxed) != 0) {
+        return;
+      }
+      first_submit_ns.compare_exchange_strong(
+          timestamp, 0, std::memory_order_relaxed);
+    }
+
+    void record_drop() noexcept {
+      drops.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void record_drop_once(CallbackTicket& ticket) noexcept {
+      if (!ticket.drop_recorded.exchange(true, std::memory_order_relaxed)) {
+        record_drop();
+      }
+    }
+
+    void record_frame_drop(CallbackTicket& ticket) noexcept {
+      ticket.frame_dropped.store(true, std::memory_order_relaxed);
+      record_drop_once(ticket);
+    }
+
+    void record_callback_error(CallbackTicket* ticket,
+                               std::string message) noexcept {
+      callback_errors.fetch_add(1, std::memory_order_relaxed);
+      if (ticket == nullptr) {
+        record_drop();
+      } else {
+        record_drop_once(*ticket);
+      }
+      mark_fatal(std::move(message));
+    }
+
+    void mark_fatal(std::string message) noexcept {
+      if (fatal.load(std::memory_order_acquire)) {
+        return;
+      }
+      std::lock_guard lock(error_mutex_);
+      if (!fatal.load(std::memory_order_relaxed)) {
+        fatal_message_ = std::move(message);
+        fatal.store(true, std::memory_order_release);
+      }
+    }
+
+    std::string fatal_message() const {
+      std::lock_guard lock(error_mutex_);
+      return fatal_message_;
+    }
+
+    void settle(CallbackTicket& ticket) noexcept {
+      auto* const gate_ticket = ticket.gate_ticket;
+      ticket.gate_ticket = nullptr;
+      ticket.state.reset();
+      gate.settle(gate_ticket);
+    }
+
+    void handle_injected(CallbackTicket& ticket,
+                         const MetalEncoderInjectedOutput& output) noexcept {
+      if (output.kind == MetalEncoderInjectedOutputKind::frame_dropped) {
+        record_frame_drop(ticket);
+        settle(ticket);
+        return;
+      }
+      if (output.kind == MetalEncoderInjectedOutputKind::callback_error) {
+        record_callback_error(&ticket, "injected HEVC callback error");
+        settle(ticket);
+        return;
+      }
+      bool succeeded = false;
+      {
+        std::lock_guard lock(writer_mutex_);
+        const AnnexBWriter writer{this, &State::append_bridge};
+        succeeded = write_hevc_access_unit_as_annex_b(
+            output.access_unit, output.nal_length_bytes,
+            output.parameter_sets, writer);
+      }
+      finish_access_unit(ticket, succeeded);
+    }
+
+    void handle_native(CallbackTicket& ticket, OSStatus status,
+                       VTEncodeInfoFlags info_flags,
+                       CMSampleBufferRef sample) noexcept {
+      if ((info_flags & kVTEncodeInfo_FrameDropped) != 0) {
+        record_frame_drop(ticket);
+        settle(ticket);
+        return;
+      }
+      if (status != noErr || sample == nullptr ||
+          !CMSampleBufferDataIsReady(sample)) {
+        record_callback_error(
+            &ticket, "VideoToolbox returned an invalid HEVC sample");
+        settle(ticket);
+        return;
+      }
+      auto format = CMSampleBufferGetFormatDescription(sample);
+      auto block = CMSampleBufferGetDataBuffer(sample);
+      if (format == nullptr || block == nullptr ||
+          CMBlockBufferGetDataLength(block) == 0) {
+        record_callback_error(&ticket,
+                              "HEVC sample is missing format or payload");
+        settle(ticket);
+        return;
+      }
+
+      const auto attachments =
+          CMSampleBufferGetSampleAttachmentsArray(sample, false);
+      bool keyframe = true;
+      if (attachments != nullptr && CFArrayGetCount(attachments) != 0) {
+        auto dictionary = static_cast<CFDictionaryRef>(
+            CFArrayGetValueAtIndex(attachments, 0));
+        keyframe = !CFDictionaryContainsKey(
+            dictionary, kCMSampleAttachmentKey_NotSync);
+      }
+
+      std::array<std::span<const std::uint8_t>, 3> parameter_sets{};
+      std::size_t parameter_set_count = 0;
+      int nal_length_bytes = 0;
+      if (keyframe) {
+        std::size_t available_sets = 0;
+        for (std::size_t index = 0; index < parameter_sets.size(); ++index) {
+          const std::uint8_t* pointer = nullptr;
+          std::size_t length = 0;
+          const auto ps_status =
+              CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                  format, index, &pointer, &length, &available_sets,
+                  &nal_length_bytes);
+          if (ps_status != noErr || pointer == nullptr || length == 0 ||
+              available_sets < parameter_sets.size()) {
+            record_callback_error(
+                &ticket, "invalid HEVC VPS/SPS/PPS parameter sets");
+            settle(ticket);
+            return;
+          }
+          parameter_sets[index] = {pointer, length};
+          ++parameter_set_count;
+        }
+      } else {
+        const std::uint8_t* pointer = nullptr;
+        std::size_t length = 0;
+        std::size_t available_sets = 0;
+        const auto ps_status =
+            CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                format, 0, &pointer, &length, &available_sets,
+                &nal_length_bytes);
+        if (ps_status != noErr) {
+          record_callback_error(&ticket,
+                                "cannot read HEVC NAL length width");
+          settle(ticket);
+          return;
+        }
+      }
+      if (!valid_nal_length_width(
+              static_cast<std::uint8_t>(nal_length_bytes))) {
+        record_callback_error(&ticket, "invalid HEVC NAL length width");
+        settle(ticket);
+        return;
+      }
+
+      bool succeeded = true;
+      {
+        std::lock_guard lock(writer_mutex_);
+        const AnnexBWriter writer{this, &State::append_bridge};
+        for (std::size_t index = 0; index < parameter_set_count; ++index) {
+          if (!append_nal(parameter_sets[index], writer)) {
+            succeeded = false;
+            break;
+          }
+        }
+        if (succeeded) {
+          succeeded = write_length_prefixed_nals_as_annex_b(
+              block, CMBlockBufferGetDataLength(block),
+              static_cast<std::uint8_t>(nal_length_bytes), writer);
+        }
+      }
+      finish_access_unit(ticket, succeeded);
+    }
+
+    bool close_writer() noexcept {
+      bool expected = false;
+      if (!writer_closed_.compare_exchange_strong(
+              expected, true, std::memory_order_acq_rel)) {
+        return true;
+      }
+      std::lock_guard lock(writer_mutex_);
+      const bool succeeded = writer_.close == nullptr ||
+                             writer_.close(writer_.context);
+      if (!succeeded) {
+        record_callback_error(nullptr, "cannot close HEVC output");
+      }
+      return succeeded;
+    }
+
+    EncoderInputGate gate;
+    std::atomic_uint64_t next_sequence{};
+    std::atomic_uint64_t first_submit_ns{};
+    std::atomic_uint64_t last_completion_ns{};
+    std::atomic_uint64_t submissions{};
+    std::atomic_uint64_t completions{};
+    std::atomic_uint64_t bytes{};
+    std::atomic_uint64_t drops{};
+    std::atomic_uint64_t rejected_frames{};
+    std::atomic_uint64_t callback_errors{};
+    std::atomic_bool using_hardware{};
+    std::atomic_bool drain_timed_out{};
+    std::atomic_bool fatal{};
+
+   private:
+    static bool append_bridge(
+        void* context, std::span<const std::uint8_t> bytes) noexcept {
+      auto& self = *static_cast<State*>(context);
+      if (bytes.empty()) {
+        return true;
+      }
+      if (self.writer_.append == nullptr ||
+          !self.writer_.append(self.writer_.context, bytes)) {
+        return false;
+      }
+      self.bytes.fetch_add(bytes.size(), std::memory_order_relaxed);
+      return true;
+    }
+
+    void finish_access_unit(CallbackTicket& ticket, bool succeeded) noexcept {
+      if (!succeeded) {
+        record_callback_error(&ticket,
+                              "cannot write HEVC Annex-B access unit");
+      } else {
+        completions.fetch_add(1, std::memory_order_relaxed);
+        last_completion_ns.store(now(), std::memory_order_relaxed);
+      }
+      settle(ticket);
+    }
+
+    MetalEncoderWriterOps writer_;
+    void* now_context_{};
+    std::uint64_t (*now_ns_)(void*) noexcept{};
+    std::shared_ptr<void> lifetime_anchor_;
+    std::atomic_bool writer_closed_{};
+    std::mutex writer_mutex_;
+    mutable std::mutex error_mutex_;
+    std::string fatal_message_;
+  };
+
+  class SessionHandle final {
+   public:
+    explicit SessionHandle(MetalEncoderNativeSession native)
+        : native_(native) {}
+    ~SessionHandle() {
+      invalidate();
+      if (native_.release != nullptr) {
+        native_.release(native_.context);
+      }
+    }
+    OSStatus encode(CVPixelBufferRef pixel_buffer, CMTime pts,
+                    void* source_frame, VTEncodeInfoFlags* info_flags,
+                    MetalEncoderInjectedCallback callback,
+                    void* callback_context) noexcept {
+      return native_.encode(native_.context, pixel_buffer, pts, source_frame,
+                            info_flags, callback, callback_context);
+    }
+    OSStatus complete_frames() noexcept {
+      return native_.complete_frames(native_.context);
+    }
+    void invalidate() noexcept {
+      if (!invalidated_.exchange(true, std::memory_order_acq_rel) &&
+          native_.invalidate != nullptr) {
+        native_.invalidate(native_.context);
+      }
+    }
+    bool using_hardware() const noexcept { return native_.using_hardware; }
+
+   private:
+    MetalEncoderNativeSession native_;
+    std::atomic_bool invalidated_{};
+  };
+
+  struct DrainOperation final {
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool done{};
+  };
+
+ public:
   Impl(std::uint32_t width, std::uint32_t height,
        const swim::core::AppConfig& config,
        swim::core::RuntimeCounters& metrics)
-      : gate_(kEncoderInputCapacity),
-        callback_tickets_(std::make_unique<CallbackTicket[]>(
-            kEncoderInputCapacity)),
-        metrics_(metrics),
-        null_sink_(config.encode_sink == swim::core::EncodeSink::null_sink) {
+      : metrics_(&metrics), drain_timeout_(kDrainTimeout) {
+    validate_dimensions(width, height);
+    auto writer = make_production_writer(config);
+    state_ = std::make_shared<State>(writer, nullptr, nullptr, nullptr);
+    tickets_ = std::shared_ptr<CallbackTicket[]>(
+        new CallbackTicket[kEncoderInputCapacity],
+        std::default_delete<CallbackTicket[]>());
+    create_production_session(width, height);
+  }
+
+  Impl(std::uint32_t width, std::uint32_t height,
+       const swim::core::AppConfig&,
+       swim::core::RuntimeCounters& metrics,
+       MetalEncoderDependencies dependencies)
+      : metrics_(&metrics), drain_timeout_(dependencies.drain_timeout) {
+    validate_dimensions(width, height);
+    validate_dependencies(dependencies);
+    state_ = std::make_shared<State>(
+        dependencies.writer, dependencies.now_context, dependencies.now_ns,
+        std::move(dependencies.lifetime_anchor));
+    state_->using_hardware.store(dependencies.native.using_hardware,
+                                 std::memory_order_relaxed);
+    tickets_ = std::shared_ptr<CallbackTicket[]>(
+        new CallbackTicket[kEncoderInputCapacity],
+        std::default_delete<CallbackTicket[]>());
+    session_ = std::make_shared<SessionHandle>(dependencies.native);
+  }
+
+  ~Impl() { close_and_drain(); }
+
+  bool offer(MetalOutputLease output, CMTime pts) noexcept {
+    auto state = state_;
+    if (!output || session_ == nullptr ||
+        state->fatal.load(std::memory_order_acquire) ||
+        closed_.load(std::memory_order_acquire)) {
+      state->record_drop();
+      return false;
+    }
+    auto input = state->gate.try_acquire();
+    if (!input.has_value()) {
+      state->record_drop();
+      return false;
+    }
+    input->operator->()->output = std::move(output);
+    input->operator->()->pts = pts;
+    input->operator->()->submission_sequence =
+        state->next_sequence.fetch_add(1, std::memory_order_relaxed);
+    const auto slot = input->index();
+    auto* gate_ticket = state->gate.arm(std::move(*input));
+    auto& callback_ticket =
+        tickets_[static_cast<std::ptrdiff_t>(slot)];
+    callback_ticket.drop_recorded.store(false, std::memory_order_relaxed);
+    callback_ticket.frame_dropped.store(false, std::memory_order_relaxed);
+    callback_ticket.state = state;
+    callback_ticket.gate_ticket = gate_ticket;
+
+    auto* record = state->gate.record(gate_ticket);
+    const auto submitted_at = state->now();
+    const bool claimed_first = state->claim_first_submit(submitted_at);
+    VTEncodeInfoFlags info_flags = 0;
+    const auto status = session_->encode(
+        record->output.pixel_buffer(), record->pts, &callback_ticket,
+        &info_flags, &Impl::injected_callback, nullptr);
+    if (status != noErr) {
+      state->rejected_frames.fetch_add(1, std::memory_order_relaxed);
+      state->record_drop_once(callback_ticket);
+      state->settle(callback_ticket);
+      state->rollback_first_submit(submitted_at, claimed_first);
+      return false;
+    }
+    state->submissions.fetch_add(1, std::memory_order_relaxed);
+    if ((info_flags & kVTEncodeInfo_FrameDropped) != 0) {
+      state->record_frame_drop(callback_ticket);
+      state->settle(callback_ticket);
+      return false;
+    }
+    return !callback_ticket.frame_dropped.load(std::memory_order_relaxed);
+  }
+
+  void close_and_drain() noexcept {
+    bool expected = false;
+    if (!closed_.compare_exchange_strong(expected, true,
+                                         std::memory_order_acq_rel)) {
+      return;
+    }
+    auto state = state_;
+    auto session = session_;
+    auto tickets = tickets_;
+    state->gate.close();
+    auto operation = std::make_shared<DrainOperation>();
+    const auto deadline = std::chrono::steady_clock::now() + drain_timeout_;
+    std::thread completion;
+    try {
+      completion = std::thread([state, session, tickets, operation] {
+        static_cast<void>(tickets);
+        const auto status = session->complete_frames();
+        if (status != noErr) {
+          state->mark_fatal(
+              "VTCompressionSessionCompleteFrames failed with status " +
+              std::to_string(status));
+        }
+        state->gate.wait_until_empty();
+        static_cast<void>(state->close_writer());
+        {
+          std::lock_guard lock(operation->mutex);
+          operation->done = true;
+        }
+        operation->condition.notify_all();
+      });
+    } catch (const std::system_error& error) {
+      state->mark_fatal("cannot start HEVC drain worker: " +
+                        std::string(error.what()));
+      session->invalidate();
+      static_cast<void>(state->close_writer());
+      flush_metrics();
+      session_.reset();
+      tickets_.reset();
+      return;
+    }
+
+    bool completed = false;
+    {
+      std::unique_lock lock(operation->mutex);
+      completed = operation->condition.wait_until(
+          lock, deadline, [&operation] { return operation->done; });
+    }
+    if (completed) {
+      completion.join();
+    } else {
+      state->drain_timed_out.store(true, std::memory_order_relaxed);
+      session->invalidate();
+      completion.detach();
+    }
+    session->invalidate();
+    flush_metrics();
+    session_.reset();
+    tickets_.reset();
+  }
+
+  MetalEncoderStats stats() const noexcept {
+    const auto& state = *state_;
+    return MetalEncoderStats{
+        state.submissions.load(std::memory_order_relaxed),
+        state.completions.load(std::memory_order_relaxed),
+        state.bytes.load(std::memory_order_relaxed),
+        state.drops.load(std::memory_order_relaxed),
+        state.rejected_frames.load(std::memory_order_relaxed),
+        state.callback_errors.load(std::memory_order_relaxed),
+        state.gate.capacity(),
+        state.gate.high_water(),
+        state.gate.in_use(),
+        state.using_hardware.load(std::memory_order_relaxed),
+        state.drain_timed_out.load(std::memory_order_relaxed)};
+  }
+
+  bool has_fatal_error() const noexcept {
+    return state_->fatal.load(std::memory_order_acquire);
+  }
+
+  std::string fatal_error_message() const {
+    return state_->fatal_message();
+  }
+
+ private:
+  static void validate_dimensions(std::uint32_t width, std::uint32_t height) {
     if (width != 5002 || height != 2102) {
       throw std::runtime_error("HEVC encoder requires exact 5002x2102 output");
     }
-    metrics_.encode_input_capacity.store(kEncoderInputCapacity,
-                                         std::memory_order_relaxed);
-    if (!null_sink_) {
-      const auto parent = config.encode_path.parent_path();
-      if (!parent.empty()) {
-        std::filesystem::create_directories(parent);
-      }
-      file_ = std::fopen(config.encode_path.string().c_str(), "wb");
-      if (file_ == nullptr) {
-        throw std::runtime_error("cannot open HEVC output: " +
-                                 config.encode_path.string());
-      }
-    }
+  }
 
+  static void validate_dependencies(
+      const MetalEncoderDependencies& dependencies) {
+    if (dependencies.native.encode == nullptr ||
+        dependencies.native.complete_frames == nullptr ||
+        dependencies.native.invalidate == nullptr ||
+        dependencies.native.release == nullptr ||
+        dependencies.writer.append == nullptr ||
+        dependencies.writer.close == nullptr) {
+      throw std::invalid_argument("incomplete Metal encoder dependencies");
+    }
+  }
+
+  static bool file_append(
+      void* context, std::span<const std::uint8_t> bytes) noexcept {
+    auto* file = static_cast<std::FILE*>(context);
+    return std::fwrite(bytes.data(), 1, bytes.size(), file) == bytes.size();
+  }
+
+  static bool file_close(void* context) noexcept {
+    return std::fclose(static_cast<std::FILE*>(context)) == 0;
+  }
+
+  static bool null_append(void*, std::span<const std::uint8_t>) noexcept {
+    return true;
+  }
+
+  static bool null_close(void*) noexcept { return true; }
+
+  static MetalEncoderWriterOps make_production_writer(
+      const swim::core::AppConfig& config) {
+    if (config.encode_sink == swim::core::EncodeSink::null_sink) {
+      return {nullptr, &Impl::null_append, &Impl::null_close};
+    }
+    const auto parent = config.encode_path.parent_path();
+    if (!parent.empty()) {
+      std::filesystem::create_directories(parent);
+    }
+    auto* file = std::fopen(config.encode_path.string().c_str(), "wb");
+    if (file == nullptr) {
+      throw std::runtime_error("cannot open HEVC output: " +
+                               config.encode_path.string());
+    }
+    return {file, &Impl::file_append, &Impl::file_close};
+  }
+
+  static OSStatus vt_encode(
+      void* context, CVPixelBufferRef pixel_buffer, CMTime pts,
+      void* source_frame, VTEncodeInfoFlags* info_flags,
+      MetalEncoderInjectedCallback, void*) noexcept {
+    return VTCompressionSessionEncodeFrame(
+        static_cast<VTCompressionSessionRef>(context), pixel_buffer, pts,
+        kCMTimeInvalid, nullptr, source_frame, info_flags);
+  }
+
+  static OSStatus vt_complete_frames(void* context) noexcept {
+    return VTCompressionSessionCompleteFrames(
+        static_cast<VTCompressionSessionRef>(context), kCMTimeInvalid);
+  }
+
+  static void vt_invalidate(void* context) noexcept {
+    VTCompressionSessionInvalidate(
+        static_cast<VTCompressionSessionRef>(context));
+  }
+
+  static void vt_release(void* context) noexcept {
+    CFRelease(static_cast<VTCompressionSessionRef>(context));
+  }
+
+  static void output_callback(void*, void* source_frame_refcon,
+                              OSStatus status,
+                              VTEncodeInfoFlags info_flags,
+                              CMSampleBufferRef sample) noexcept {
+    auto* ticket = static_cast<CallbackTicket*>(source_frame_refcon);
+    if (ticket == nullptr || ticket->state == nullptr) {
+      return;
+    }
+    auto state = ticket->state;
+    state->handle_native(*ticket, status, info_flags, sample);
+  }
+
+  static void injected_callback(
+      void*, void* source_frame_refcon,
+      const MetalEncoderInjectedOutput& output) noexcept {
+    auto* ticket = static_cast<CallbackTicket*>(source_frame_refcon);
+    if (ticket == nullptr || ticket->state == nullptr) {
+      return;
+    }
+    auto state = ticket->state;
+    state->handle_injected(*ticket, output);
+  }
+
+  void create_production_session(std::uint32_t width,
+                                 std::uint32_t height) {
     const void* keys[] = {
         kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
         kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder};
@@ -332,293 +893,60 @@ class MetalEncoder::Impl final
         kCFAllocatorDefault, keys, values, 2,
         &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     if (specification == nullptr) {
-      close_file();
       throw std::runtime_error("cannot create HEVC encoder specification");
     }
+    VTCompressionSessionRef session = nullptr;
     const auto create_status = VTCompressionSessionCreate(
         kCFAllocatorDefault, static_cast<int32_t>(width),
         static_cast<int32_t>(height), kCMVideoCodecType_HEVC, specification,
-        nullptr, nullptr, &Impl::output_callback, this, &session_);
+        nullptr, nullptr, &Impl::output_callback, nullptr, &session);
     CFRelease(specification);
-    if (create_status != noErr) {
-      close_file();
-      require_status(create_status, "VTCompressionSessionCreate");
-    }
+    require_status(create_status, "VTCompressionSessionCreate");
     try {
-      configure_session();
+      configure_session(session);
     } catch (...) {
-      VTCompressionSessionInvalidate(session_);
-      CFRelease(session_);
-      session_ = nullptr;
-      close_file();
+      VTCompressionSessionInvalidate(session);
+      CFRelease(session);
       throw;
     }
+    state_->using_hardware.store(true, std::memory_order_relaxed);
+    session_ = std::make_shared<SessionHandle>(MetalEncoderNativeSession{
+        session, &Impl::vt_encode, &Impl::vt_complete_frames,
+        &Impl::vt_invalidate, &Impl::vt_release, true});
   }
 
-  ~Impl() {
-    if (session_ != nullptr) {
-      VTCompressionSessionInvalidate(session_);
-      CFRelease(session_);
-    }
-    close_file();
-  }
-
-  bool offer(MetalOutputLease output, CMTime pts) noexcept {
-    if (!output || session_ == nullptr) {
-      record_drop();
-      return false;
-    }
-    auto input = gate_.try_acquire();
-    if (!input.has_value()) {
-      record_drop();
-      return false;
-    }
-    metrics_.encode_input_in_use.store(gate_.in_use(),
-                                       std::memory_order_relaxed);
-    update_high_water(metrics_.encode_input_high_water, gate_.high_water());
-    input->operator->()->output = std::move(output);
-    input->operator->()->pts = pts;
-    input->operator->()->submission_sequence =
-        next_sequence_.fetch_add(1, std::memory_order_relaxed);
-    const auto slot = input->index();
-    auto* gate_ticket = gate_.arm(std::move(*input));
-    auto& callback_ticket = callback_tickets_[slot];
-    callback_ticket.owner = shared_from_this();
-    callback_ticket.gate_ticket = gate_ticket;
-
-    auto* record = gate_.record(gate_ticket);
-    const auto status = VTCompressionSessionEncodeFrame(
-        session_, record->output.pixel_buffer(), record->pts,
-        kCMTimeInvalid, nullptr, &callback_ticket, nullptr);
-    if (status == noErr) {
-      const auto now = steady_now_ns();
-      std::uint64_t zero = 0;
-      first_submit_ns_.compare_exchange_strong(zero, now,
-                                               std::memory_order_relaxed);
-      zero = 0;
-      metrics_.encode_first_submit_ns.compare_exchange_strong(
-          zero, now, std::memory_order_relaxed);
-      submissions_.fetch_add(1, std::memory_order_relaxed);
-      metrics_.encode_submissions.fetch_add(1, std::memory_order_relaxed);
-      return true;
-    }
-    rejected_frames_.fetch_add(1, std::memory_order_relaxed);
-    metrics_.encode_rejected_frames.fetch_add(1, std::memory_order_relaxed);
-    settle(callback_ticket);
-    return false;
-  }
-
-  void close_and_drain() {
-    bool expected = false;
-    if (!closed_.compare_exchange_strong(expected, true,
-                                         std::memory_order_acq_rel)) {
-      return;
-    }
-    gate_.close();
-    if (session_ != nullptr) {
-      const auto status = VTCompressionSessionCompleteFrames(
-          session_, kCMTimeInvalid);
-      if (status != noErr) {
-        mark_fatal("VTCompressionSessionCompleteFrames failed with status " +
-                   std::to_string(status));
-      }
-    }
-    if (!gate_.wait_until_empty(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                kDrainTimeout))) {
-      drain_timed_out_.store(true, std::memory_order_relaxed);
-      metrics_.encode_drain_timeouts.fetch_add(1,
-                                               std::memory_order_relaxed);
-    }
-    publish_gate_metrics();
-    if (session_ != nullptr) {
-      VTCompressionSessionInvalidate(session_);
-      CFRelease(session_);
-      session_ = nullptr;
-    }
-    if (!drain_timed_out_.load(std::memory_order_relaxed)) {
-      close_file();
-    }
-  }
-
-  MetalEncoderStats stats() const noexcept {
-    return MetalEncoderStats{
-        submissions_.load(std::memory_order_relaxed),
-        completions_.load(std::memory_order_relaxed),
-        bytes_.load(std::memory_order_relaxed),
-        drops_.load(std::memory_order_relaxed),
-        rejected_frames_.load(std::memory_order_relaxed),
-        callback_errors_.load(std::memory_order_relaxed),
-        gate_.capacity(),
-        gate_.high_water(),
-        gate_.in_use(),
-        using_hardware_.load(std::memory_order_relaxed),
-        drain_timed_out_.load(std::memory_order_relaxed)};
-  }
-
-  bool has_fatal_error() const noexcept {
-    return fatal_.load(std::memory_order_acquire);
-  }
-
-  std::string fatal_error_message() const {
-    std::lock_guard lock(error_mutex_);
-    return fatal_message_;
-  }
-
- private:
-  static void output_callback(void*, void* source_frame_refcon,
-                              OSStatus status,
-                              VTEncodeInfoFlags,
-                              CMSampleBufferRef sample) noexcept {
-    auto* ticket = static_cast<CallbackTicket*>(source_frame_refcon);
-    if (ticket == nullptr || ticket->owner == nullptr) {
-      return;
-    }
-    auto owner = ticket->owner;
-    owner->handle_output(*ticket, status, sample);
-  }
-
-  void handle_output(CallbackTicket& ticket, OSStatus status,
-                     CMSampleBufferRef sample) noexcept {
-    bool succeeded = false;
-    if (status != noErr || sample == nullptr ||
-        !CMSampleBufferDataIsReady(sample)) {
-      record_callback_error("VideoToolbox returned an invalid HEVC sample");
-      settle(ticket);
-      return;
-    }
-    auto format = CMSampleBufferGetFormatDescription(sample);
-    auto block = CMSampleBufferGetDataBuffer(sample);
-    if (format == nullptr || block == nullptr) {
-      record_callback_error("HEVC sample is missing format or payload");
-      settle(ticket);
-      return;
-    }
-
-    const auto attachments = CMSampleBufferGetSampleAttachmentsArray(sample,
-                                                                      false);
-    bool keyframe = true;
-    if (attachments != nullptr && CFArrayGetCount(attachments) != 0) {
-      auto dictionary = static_cast<CFDictionaryRef>(
-          CFArrayGetValueAtIndex(attachments, 0));
-      keyframe = !CFDictionaryContainsKey(
-          dictionary, kCMSampleAttachmentKey_NotSync);
-    }
-
-    std::array<std::span<const std::uint8_t>, 3> parameter_sets{};
-    std::size_t parameter_set_count = 0;
-    int nal_length_bytes = 0;
-    if (keyframe) {
-      std::size_t available_sets = 0;
-      for (std::size_t index = 0; index < parameter_sets.size(); ++index) {
-        const std::uint8_t* pointer = nullptr;
-        std::size_t length = 0;
-        const auto ps_status =
-            CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-                format, index, &pointer, &length, &available_sets,
-                &nal_length_bytes);
-        if (ps_status != noErr || pointer == nullptr || length == 0 ||
-            available_sets < parameter_sets.size()) {
-          record_callback_error("invalid HEVC VPS/SPS/PPS parameter sets");
-          settle(ticket);
-          return;
-        }
-        parameter_sets[index] = {pointer, length};
-        ++parameter_set_count;
-      }
-    } else {
-      const std::uint8_t* pointer = nullptr;
-      std::size_t length = 0;
-      std::size_t available_sets = 0;
-      const auto ps_status = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-          format, 0, &pointer, &length, &available_sets, &nal_length_bytes);
-      if (ps_status != noErr) {
-        record_callback_error("cannot read HEVC NAL length width");
-        settle(ticket);
-        return;
-      }
-    }
-    if (!valid_nal_length_width(static_cast<std::uint8_t>(nal_length_bytes))) {
-      record_callback_error("invalid HEVC NAL length width");
-      settle(ticket);
-      return;
-    }
-
-    {
-      std::lock_guard lock(writer_mutex_);
-      const AnnexBWriter writer{this, &Impl::append_output};
-      succeeded = true;
-      for (std::size_t index = 0; index < parameter_set_count; ++index) {
-        if (!append_nal(parameter_sets[index], writer)) {
-          succeeded = false;
-          break;
-        }
-      }
-      if (succeeded) {
-        succeeded = write_length_prefixed_nals_as_annex_b(
-            block, CMBlockBufferGetDataLength(block),
-            static_cast<std::uint8_t>(nal_length_bytes), writer);
-      }
-    }
-    if (!succeeded) {
-      record_callback_error("cannot write HEVC Annex-B access unit");
-    } else {
-      completions_.fetch_add(1, std::memory_order_relaxed);
-      last_completion_ns_.store(steady_now_ns(), std::memory_order_relaxed);
-      metrics_.encode_completions.fetch_add(1, std::memory_order_relaxed);
-      metrics_.encode_last_completion_ns.store(steady_now_ns(),
-                                                std::memory_order_relaxed);
-    }
-    settle(ticket);
-  }
-
-  static bool append_output(void* context,
-                            std::span<const std::uint8_t> bytes) noexcept {
-    auto& self = *static_cast<Impl*>(context);
-    if (bytes.empty()) {
-      return true;
-    }
-    if (!self.null_sink_ &&
-        std::fwrite(bytes.data(), 1, bytes.size(), self.file_) != bytes.size()) {
-      self.mark_fatal("cannot write HEVC output");
-      return false;
-    }
-    self.bytes_.fetch_add(bytes.size(), std::memory_order_relaxed);
-    self.metrics_.encode_bytes.fetch_add(bytes.size(),
-                                         std::memory_order_relaxed);
-    return true;
-  }
-
-  void configure_session() {
+  static void configure_session(VTCompressionSessionRef session) {
     require_status(VTSessionSetProperty(
-                       session_, kVTCompressionPropertyKey_RealTime,
+                       session, kVTCompressionPropertyKey_RealTime,
                        kCFBooleanTrue),
                    "set HEVC realtime mode");
     require_status(VTSessionSetProperty(
-                       session_, kVTCompressionPropertyKey_AllowFrameReordering,
+                       session,
+                       kVTCompressionPropertyKey_AllowFrameReordering,
                        kCFBooleanFalse),
                    "disable HEVC frame reordering");
     require_status(VTSessionSetProperty(
-                       session_, kVTCompressionPropertyKey_ProfileLevel,
+                       session, kVTCompressionPropertyKey_ProfileLevel,
                        kVTProfileLevel_HEVC_Main_AutoLevel),
                    "set HEVC profile");
     require_status(VTSessionSetProperty(
-                       session_, kVTCompressionPropertyKey_ExpectedFrameRate,
+                       session, kVTCompressionPropertyKey_ExpectedFrameRate,
                        (__bridge CFTypeRef)@(30000.0 / 1001.0)),
                    "set HEVC expected frame rate");
     require_status(VTSessionSetProperty(
-                       session_, kVTCompressionPropertyKey_AverageBitRate,
+                       session, kVTCompressionPropertyKey_AverageBitRate,
                        (__bridge CFTypeRef)@(60'000'000)),
                    "set HEVC average bitrate");
     require_status(VTSessionSetProperty(
-                       session_, kVTCompressionPropertyKey_MaxKeyFrameInterval,
+                       session,
+                       kVTCompressionPropertyKey_MaxKeyFrameInterval,
                        (__bridge CFTypeRef)@(60)),
                    "set HEVC keyframe interval");
-    require_status(VTCompressionSessionPrepareToEncodeFrames(session_),
+    require_status(VTCompressionSessionPrepareToEncodeFrames(session),
                    "prepare HEVC encoder");
     CFTypeRef hardware = nullptr;
     require_status(VTSessionCopyProperty(
-                       session_,
+                       session,
                        kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
                        kCFAllocatorDefault, &hardware),
                    "query HEVC hardware encoder");
@@ -629,89 +957,74 @@ class MetalEncoder::Impl final
     if (!enabled) {
       throw std::runtime_error("hardware HEVC encoder is required");
     }
-    using_hardware_.store(true, std::memory_order_relaxed);
-    metrics_.encode_using_hardware.store(1, std::memory_order_relaxed);
   }
 
-  void settle(CallbackTicket& ticket) noexcept {
-    auto* const gate_ticket = ticket.gate_ticket;
-    ticket.gate_ticket = nullptr;
-    ticket.owner.reset();
-    gate_.settle(gate_ticket);
-    metrics_.encode_input_in_use.store(gate_.in_use(),
-                                       std::memory_order_relaxed);
-  }
-
-  void record_drop() noexcept {
-    drops_.fetch_add(1, std::memory_order_relaxed);
-    metrics_.encode_drops.fetch_add(1, std::memory_order_relaxed);
-    metrics_.encode_input_pool_misses.store(gate_.misses(),
-                                            std::memory_order_relaxed);
-  }
-
-  void record_callback_error(std::string message) noexcept {
-    callback_errors_.fetch_add(1, std::memory_order_relaxed);
-    metrics_.encode_callback_errors.fetch_add(1, std::memory_order_relaxed);
-    mark_fatal(std::move(message));
-  }
-
-  void mark_fatal(std::string message) noexcept {
-    if (fatal_.load(std::memory_order_acquire)) {
+  void flush_metrics() noexcept {
+    if (metrics_ == nullptr) {
       return;
     }
-    std::lock_guard lock(error_mutex_);
-    if (!fatal_.load(std::memory_order_relaxed)) {
-      fatal_message_ = std::move(message);
-      fatal_.store(true, std::memory_order_release);
-    }
-  }
-
-  void publish_gate_metrics() noexcept {
-    metrics_.encode_input_capacity.store(gate_.capacity(),
-                                         std::memory_order_relaxed);
-    metrics_.encode_input_in_use.store(gate_.in_use(),
-                                       std::memory_order_relaxed);
-    metrics_.encode_input_high_water.store(gate_.high_water(),
+    auto& metrics = *metrics_;
+    const auto& state = *state_;
+    metrics.encode_submissions.fetch_add(
+        state.submissions.load(std::memory_order_relaxed),
+        std::memory_order_relaxed);
+    metrics.encode_completions.fetch_add(
+        state.completions.load(std::memory_order_relaxed),
+        std::memory_order_relaxed);
+    metrics.encode_bytes.fetch_add(
+        state.bytes.load(std::memory_order_relaxed),
+        std::memory_order_relaxed);
+    metrics.encode_drops.fetch_add(
+        state.drops.load(std::memory_order_relaxed),
+        std::memory_order_relaxed);
+    metrics.encode_rejected_frames.fetch_add(
+        state.rejected_frames.load(std::memory_order_relaxed),
+        std::memory_order_relaxed);
+    metrics.encode_callback_errors.fetch_add(
+        state.callback_errors.load(std::memory_order_relaxed),
+        std::memory_order_relaxed);
+    metrics.encode_first_submit_ns.store(
+        state.first_submit_ns.load(std::memory_order_relaxed),
+        std::memory_order_relaxed);
+    metrics.encode_last_completion_ns.store(
+        state.last_completion_ns.load(std::memory_order_relaxed),
+        std::memory_order_relaxed);
+    metrics.encode_input_capacity.store(state.gate.capacity(),
+                                        std::memory_order_relaxed);
+    metrics.encode_input_in_use.store(state.gate.in_use(),
+                                      std::memory_order_relaxed);
+    metrics.encode_input_high_water.store(state.gate.high_water(),
+                                          std::memory_order_relaxed);
+    metrics.encode_input_pool_misses.store(state.gate.misses(),
                                            std::memory_order_relaxed);
-    metrics_.encode_input_pool_misses.store(gate_.misses(),
-                                            std::memory_order_relaxed);
+    metrics.encode_using_hardware.store(
+        state.using_hardware.load(std::memory_order_relaxed) ? 1U : 0U,
+        std::memory_order_relaxed);
+    metrics.encode_drain_timeouts.fetch_add(
+        state.drain_timed_out.load(std::memory_order_relaxed) ? 1U : 0U,
+        std::memory_order_relaxed);
+    metrics_ = nullptr;
   }
 
-  void close_file() noexcept {
-    if (file_ != nullptr) {
-      std::fclose(file_);
-      file_ = nullptr;
-    }
-  }
-
-  VTCompressionSessionRef session_{};
-  EncoderInputGate gate_;
-  std::unique_ptr<CallbackTicket[]> callback_tickets_;
-  swim::core::RuntimeCounters& metrics_;
-  const bool null_sink_{};
-  std::FILE* file_{};
-  std::mutex writer_mutex_;
-  std::atomic_uint64_t next_sequence_{};
-  std::atomic_uint64_t first_submit_ns_{};
-  std::atomic_uint64_t last_completion_ns_{};
-  std::atomic_uint64_t submissions_{};
-  std::atomic_uint64_t completions_{};
-  std::atomic_uint64_t bytes_{};
-  std::atomic_uint64_t drops_{};
-  std::atomic_uint64_t rejected_frames_{};
-  std::atomic_uint64_t callback_errors_{};
-  std::atomic_bool using_hardware_{};
-  std::atomic_bool drain_timed_out_{};
+  std::shared_ptr<State> state_;
+  std::shared_ptr<CallbackTicket[]> tickets_;
+  std::shared_ptr<SessionHandle> session_;
+  swim::core::RuntimeCounters* metrics_{};
+  std::chrono::milliseconds drain_timeout_;
   std::atomic_bool closed_{};
-  std::atomic_bool fatal_{};
-  mutable std::mutex error_mutex_;
-  std::string fatal_message_;
 };
 
 MetalEncoder::MetalEncoder(std::uint32_t width, std::uint32_t height,
                            const swim::core::AppConfig& config,
                            swim::core::RuntimeCounters& metrics)
     : impl_(std::make_shared<Impl>(width, height, config, metrics)) {}
+
+MetalEncoder::MetalEncoder(std::uint32_t width, std::uint32_t height,
+                           const swim::core::AppConfig& config,
+                           swim::core::RuntimeCounters& metrics,
+                           MetalEncoderDependencies dependencies)
+    : impl_(std::make_shared<Impl>(width, height, config, metrics,
+                                   std::move(dependencies))) {}
 
 MetalEncoder::~MetalEncoder() {
   if (impl_ != nullptr) {

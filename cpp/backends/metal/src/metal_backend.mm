@@ -20,6 +20,11 @@
 #include <utility>
 
 namespace swim::metal {
+
+bool metal_encoder_admits_render(const MetalEncoder& encoder) noexcept {
+  return !encoder.has_fatal_error();
+}
+
 namespace {
 
 std::shared_ptr<MetalContext> make_context() {
@@ -98,6 +103,9 @@ class MetalRendererAdapter final : public swim::core::IRenderer {
 
   swim::core::RenderSubmitResult submit(
       const swim::core::RenderSnapshot& snapshot) override {
+    if (encoder_ != nullptr && !metal_encoder_admits_render(*encoder_)) {
+      return swim::core::RenderSubmitResult::fatal;
+    }
     for (std::size_t camera = 0; camera < snapshot.frames.size(); ++camera) {
       const auto& lease = snapshot.frames[camera];
       if (!lease) {

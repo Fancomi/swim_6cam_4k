@@ -6,6 +6,7 @@
 #include <swim/metal/metal_frame.hpp>
 
 #import <CoreMedia/CoreMedia.h>
+#import <VideoToolbox/VideoToolbox.h>
 
 #include <chrono>
 #include <condition_variable>
@@ -92,6 +93,7 @@ class EncoderInputGate final {
   void settle(Ticket* ticket) noexcept;
   void close() noexcept;
   bool wait_until_empty(std::chrono::milliseconds timeout) noexcept;
+  void wait_until_empty() noexcept;
   std::uint32_t capacity() const noexcept;
   std::uint32_t in_use() const noexcept;
   std::uint32_t high_water() const noexcept;
@@ -125,11 +127,60 @@ struct MetalEncoderStats final {
   bool drain_timed_out{};
 };
 
+enum class MetalEncoderInjectedOutputKind : std::uint8_t {
+  access_unit,
+  frame_dropped,
+  callback_error,
+};
+
+struct MetalEncoderInjectedOutput final {
+  MetalEncoderInjectedOutputKind kind{MetalEncoderInjectedOutputKind::callback_error};
+  std::span<const std::uint8_t> access_unit;
+  std::uint8_t nal_length_bytes{};
+  std::span<const std::span<const std::uint8_t>> parameter_sets;
+};
+
+using MetalEncoderInjectedCallback = void (*)(
+    void*, void*, const MetalEncoderInjectedOutput&) noexcept;
+
+struct MetalEncoderNativeSession final {
+  void* context{};
+  OSStatus (*encode)(void*, CVPixelBufferRef, CMTime, void*,
+                     VTEncodeInfoFlags*, MetalEncoderInjectedCallback,
+                     void*) noexcept{};
+  OSStatus (*complete_frames)(void*) noexcept{};
+  void (*invalidate)(void*) noexcept{};
+  void (*release)(void*) noexcept{};
+  bool using_hardware{};
+};
+
+struct MetalEncoderWriterOps final {
+  void* context{};
+  bool (*append)(void*, std::span<const std::uint8_t>) noexcept{};
+  bool (*close)(void*) noexcept{};
+};
+
+// Production uses the default constructor. This dependency bundle is a
+// backend-local deterministic seam for native timeout/callback and writer
+// failure tests; all callbacks and contexts must remain valid until release.
+struct MetalEncoderDependencies final {
+  MetalEncoderNativeSession native;
+  MetalEncoderWriterOps writer;
+  void* now_context{};
+  std::uint64_t (*now_ns)(void*) noexcept{};
+  std::chrono::milliseconds drain_timeout{std::chrono::seconds{2}};
+  std::shared_ptr<void> lifetime_anchor;
+};
+
 class MetalEncoder final {
  public:
   MetalEncoder(std::uint32_t width, std::uint32_t height,
                const swim::core::AppConfig& config,
                swim::core::RuntimeCounters& metrics);
+  MetalEncoder(std::uint32_t width, std::uint32_t height,
+               const swim::core::AppConfig& config,
+               swim::core::RuntimeCounters& metrics,
+               MetalEncoderDependencies dependencies);
   ~MetalEncoder();
   MetalEncoder(const MetalEncoder&) = delete;
   MetalEncoder& operator=(const MetalEncoder&) = delete;

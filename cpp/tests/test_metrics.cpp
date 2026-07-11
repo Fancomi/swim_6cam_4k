@@ -280,6 +280,21 @@ TEST_CASE(encode_completion_fps_rejects_zero_and_regressing_intervals) {
   CHECK_EQ(zero.encode_completion_fps(), 0.0);
 }
 
+TEST_CASE(encode_total_drops_and_reason_counters_snapshot_independently) {
+  swim::core::RuntimeCounters counters;
+  counters.encode_drops.store(4);
+  counters.encode_rejected_frames.store(1);
+  counters.encode_callback_errors.store(2);
+  const auto snapshot = counters.snapshot_and_reset();
+  CHECK_EQ(snapshot.encode_drops, 4u);
+  CHECK_EQ(snapshot.encode_rejected_frames, 1u);
+  CHECK_EQ(snapshot.encode_callback_errors, 2u);
+  const auto empty = counters.snapshot_and_reset();
+  CHECK_EQ(empty.encode_drops, 0u);
+  CHECK_EQ(empty.encode_rejected_frames, 0u);
+  CHECK_EQ(empty.encode_callback_errors, 0u);
+}
+
 TEST_CASE(render_completion_capacity_and_frame_age_metrics_snapshot_exactly) {
   swim::core::RuntimeCounters counters;
   counters.render_submissions.store(31);

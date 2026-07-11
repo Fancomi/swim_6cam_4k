@@ -212,7 +212,7 @@ if(APPLE)
     cpp/tests/test_main.cpp
     cpp/tests/metal_encoder_test.mm)
   target_compile_options(metal_encoder_test PRIVATE -fobjc-arc)
-  target_link_libraries(metal_encoder_test PRIVATE swim_metal_encode)
+  target_link_libraries(metal_encoder_test PRIVATE swim_metal_backend)
   swim_enable_warnings(metal_encoder_test)
   swim_enable_sanitizers(metal_encoder_test)
   add_test(NAME metal_encoder_test COMMAND metal_encoder_test)
