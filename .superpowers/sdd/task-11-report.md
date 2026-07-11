@@ -17,8 +17,9 @@ completed-output router.
 - `e625295 feat: integrate HEVC encoding metrics and runtime`
 - `8c50625 fix: settle HEVC callback tickets before slot reuse`
 - `c7b3bee fix: harden bounded HEVC callback shutdown`
+- `2257362 fix: retire timed-out HEVC callback tickets`
 
-Implementation commit range: `55484e5..c7b3bee`
+Implementation commit range: `55484e5..2257362`
 
 ## TDD RED Evidence
 
@@ -389,3 +390,167 @@ The only remaining concern is the previously documented raw elementary-stream
 ffprobe VUI rate (`1200000/1`). The independent review explicitly judged it
 non-blocking for Task 11; submitted PTS generation remains the exact serial
 `sequence * 1001 / 30000` contract.
+
+## Second Re-review Remediation (`5067884..2257362`)
+
+The second independent review's new C1, I1, and I2 are closed in `2257362`.
+The production drain no longer creates a worker, allocates a drain operation,
+or detaches a thread.
+
+### New C1 — worker-creation failure and raw callback lifetime
+
+The fallible worker-creation step was eliminated rather than given another
+fallback. Shutdown now uses the two callback records allocated at encoder
+startup. Each record has an atomic phase:
+
+```text
+idle -> armed -> callback_claimed -> settled
+               \-> retired
+```
+
+Callback entry and timeout retirement race through one compare/exchange from
+`armed`. The winner has exclusive ownership of the stable State/gate-ticket
+fields:
+
+- A callback winner copies the shared State, performs output/drop settlement,
+  clears the record, publishes `settled`, and only then releases the gate slot.
+- A timeout winner publishes `retired`, counts the frame as one total drop,
+  clears the State, and settles the gate/output lease exactly once.
+- Any callback arriving after invalidation sees `retired` and returns without
+  accessing State, writer, session, metrics, gate, or output.
+
+On timeout, ownership of exactly two small callback records is intentionally
+released as stable raw-refCon tombstones. Their State and gate pointers are
+null for retired frames. No shutdown-worker creation path remains that can free
+raw callback addresses or close a writer before a callback claims its record.
+
+### New I1 — no-callback-after-invalidate retention
+
+Shutdown first closes admission and waits against one absolute two-second
+deadline for the fixed gate to settle naturally. If the gate becomes empty,
+there are no pending callback tickets; only then does shutdown call
+`CompleteFrames`, close/check the writer, invalidate, release the native
+session, and free the records.
+
+If the deadline expires, shutdown invalidates without calling a potentially
+blocking `CompleteFrames`, atomically retires every unclaimed fixed ticket,
+releases its output lease, counts its total drop, and releases the native
+session. An already-entered callback retains State until it returns; if no
+callback ever arrives, retirement immediately releases State, writer, gate,
+output, and session. There is no detached thread or unbounded waiter.
+
+The deterministic no-callback test never emits a callback, yet proves all of
+the following after timeout: invalidation occurred, the output pool slot is
+reusable, and the weak heavy-State lifetime sentinel expired. It then invokes
+the raw callback once after destruction to prove the tombstone is a no-op.
+
+### New I2 — no fallible drain allocation
+
+`close_and_drain()` now contains no `make_shared`, `new`, `std::thread`,
+`detach`, dynamically growing container, or string construction. Fatal-message
+capacity is reserved at startup and the drain error path passes a string view
+into that fixed capacity. A `HotPathAllocationScope` around the complete
+injected drain asserts the application allocation counter does not change.
+
+The architecture also removes thread-creation failure as a possible shutdown
+branch. This was verified with:
+
+```text
+! rg -n "std::thread|detach\\(|make_shared<DrainOperation" \
+  cpp/backends/metal/src/metal_encoder.mm
+```
+
+Result: exit 0 with no matches.
+
+### Deterministic RED evidence
+
+The new tests were first run against `5067884`:
+
+```text
+cmake --build build/macos --target metal_encoder_test
+build/macos/metal_encoder_test
+```
+
+Observed failures:
+
+```text
+FAIL total_drain_deadline_invalidates_and_late_callback_has_safe_lifetime:
+retired_before_late_callback
+FAIL blocked_callback_writer_is_inside_the_total_drain_deadline:
+sentinel_condition.wait_for(... sentinel_destroyed)
+FAIL timeout_without_a_callback_retires_output_and_heavy_state: destroyed
+FAIL close_and_drain_performs_no_application_heap_allocation:
+hot_path_allocation_count() == before
+```
+
+After implementing atomic retirement, a further RED asserted that the
+invalidated no-output frame contributes exactly one total drop:
+
+```text
+FAIL total_drain_deadline_invalidates_and_late_callback_has_safe_lifetime:
+encoder.stats().drops == 1u
+```
+
+The retirement owner now calls the same per-ticket exactly-once drop accounting
+before releasing the gate.
+
+### Focused and full GREEN verification
+
+```text
+cmake --build build/macos --target metal_encoder_test
+build/macos/metal_encoder_test
+```
+
+Result: PASS, 20/20. The new cases cover no callback after invalidate, a raw
+late callback against the retired tombstone, a callback already blocked in the
+writer at timeout, zero shutdown allocations, heavy-State sentinel release,
+output-pool reuse, and exact drop settlement.
+
+```text
+cmake --build build/macos
+ctest --test-dir build/macos --output-on-failure
+git diff --check
+```
+
+Result: PASS, full build exit 0, 10/10 CTests, zero failures, diff check exit 0.
+
+### Second re-review runtime acceptances
+
+Five-second file sink plus ffprobe/full decode:
+
+```text
+render_fps=30.128 encode_fps=29.980
+encode_submissions=148 encode_completions=148 encode_drops=2
+encode_bytes=38502371 encode_using_hardware=true
+encode_drain_timeouts=0 decoded_pixel_host_copies=0
+codec_name=hevc width=5002 height=2102
+```
+
+Five-second null sink:
+
+```text
+render_fps=30.118 encode_fps=30.350
+encode_submissions=150 encode_completions=150 encode_drops=0
+encode_bytes=38564096 encode_using_hardware=true
+encode_drain_timeouts=0 decoded_pixel_host_copies=0
+```
+
+Thirty-second preview plus encode:
+
+```text
+render_fps=29.928 encode_fps=29.906
+preview_presents=894 preview_drops=3
+encode_submissions=896 encode_completions=896 encode_drops=1
+encode_bytes=225388585 encode_using_hardware=true
+encode_input_capacity=2 encode_input_high_water=2 encode_input_in_use=0
+encode_drain_timeouts=0 decoded_pixel_host_copies=0
+output_width=5002 output_height=2102
+```
+
+### Remaining minor/public seam note
+
+The deterministic dependency seam remains in the backend-local Metal encoder
+header and the fatal-preflight helper remains in the backend header. They are
+not end-user/core API, introduce no per-frame allocation, and the re-review
+classified this as non-blocking. Further hiding them would add test-only build
+variants and is deferred to avoid changing the verified lifetime protocol.
