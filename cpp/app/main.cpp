@@ -126,6 +126,7 @@ void write_final_metrics(const swim::core::AppConfig& config,
   const auto completion_interval_ns =
       metrics.render_completion_interval_ns();
   const auto render_fps = metrics.render_completion_fps();
+  const auto encode_fps = metrics.encode_completion_fps();
   std::ostringstream line;
   line << std::fixed << std::setprecision(3)
        << "{\"final\":true"
@@ -165,6 +166,26 @@ void write_final_metrics(const swim::core::AppConfig& config,
   line << ']'
        << ",\"preview_drops\":" << metrics.preview_drops
        << ",\"preview_presents\":" << metrics.preview_presents
+       << ",\"encode_submissions\":" << metrics.encode_submissions
+       << ",\"encode_completions\":" << metrics.encode_completions
+       << ",\"encode_bytes\":" << metrics.encode_bytes
+       << ",\"encode_drops\":" << metrics.encode_drops
+       << ",\"encode_rejected_frames\":" << metrics.encode_rejected_frames
+       << ",\"encode_callback_errors\":" << metrics.encode_callback_errors
+       << ",\"encode_first_submit_ns\":" << metrics.encode_first_submit_ns
+       << ",\"encode_last_completion_ns\":"
+       << metrics.encode_last_completion_ns
+       << ",\"encode_fps\":" << encode_fps
+       << ",\"encode_input_capacity\":" << metrics.encode_input_capacity
+       << ",\"encode_input_in_use\":" << metrics.encode_input_in_use
+       << ",\"encode_input_high_water\":"
+       << metrics.encode_input_high_water
+       << ",\"encode_input_pool_misses\":"
+       << metrics.encode_input_pool_misses
+       << ",\"encode_using_hardware\":"
+       << (metrics.encode_using_hardware ? "true" : "false")
+       << ",\"encode_drain_timeouts\":" << metrics.encode_drain_timeouts
+       << ",\"encode_codec\":\"hevc\""
        << ",\"pool_exhaustion\":" << metrics.pool_exhaustion
        << ",\"decoded_pixel_host_copies\":"
        << metrics.decoded_pixel_host_copies

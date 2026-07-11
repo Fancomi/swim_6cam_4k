@@ -178,7 +178,8 @@ if(APPLE)
   target_compile_options(swim_metal_backend PRIVATE -fobjc-arc)
   target_link_libraries(swim_metal_backend PUBLIC
     swim_metal_decode
-    swim_metal_preview)
+    swim_metal_preview
+    swim_metal_encode)
   swim_enable_warnings(swim_metal_backend)
   swim_enable_sanitizers(swim_metal_backend)
 

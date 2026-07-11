@@ -135,6 +135,12 @@ TEST_CASE(runtime_counter_snapshot_is_immutable_and_resets_every_counter) {
         128u);
   CHECK(address(counters.encode_drops) - address(counters.preview_presents) >=
         128u);
+  CHECK(address(counters.encode_rejected_frames) -
+            address(counters.encode_drops) >=
+        128u);
+  CHECK(address(counters.encode_callback_errors) -
+            address(counters.encode_rejected_frames) >=
+        128u);
   CHECK(address(counters.decoded_pixel_host_copies) -
             address(counters.encode_drops) >=
         128u);
@@ -165,7 +171,20 @@ TEST_CASE(runtime_counter_snapshot_is_immutable_and_resets_every_counter) {
   counters.render_active_ns.fetch_add(10);
   counters.preview_drops.fetch_add(11);
   counters.preview_presents.fetch_add(12);
-  counters.encode_drops.fetch_add(13);
+  counters.encode_submissions.store(21);
+  counters.encode_completions.store(20);
+  counters.encode_bytes.store(1'000'000);
+  counters.encode_drops.store(3);
+  counters.encode_rejected_frames.store(1);
+  counters.encode_callback_errors.store(0);
+  counters.encode_first_submit_ns.store(2'000'000'000);
+  counters.encode_last_completion_ns.store(3'000'000'000);
+  counters.encode_input_capacity.store(2);
+  counters.encode_input_in_use.store(0);
+  counters.encode_input_high_water.store(2);
+  counters.encode_input_pool_misses.store(3);
+  counters.encode_using_hardware.store(1);
+  counters.encode_drain_timeouts.store(0);
   counters.decoded_pixel_host_copies.fetch_add(14);
   counters.pool_exhaustion.fetch_add(15);
   counters.native_texture_wrappers.fetch_add(16);
@@ -186,7 +205,21 @@ TEST_CASE(runtime_counter_snapshot_is_immutable_and_resets_every_counter) {
   CHECK_EQ(snapshot.render_active_ns, 10u);
   CHECK_EQ(snapshot.preview_drops, 11u);
   CHECK_EQ(snapshot.preview_presents, 12u);
-  CHECK_EQ(snapshot.encode_drops, 13u);
+  CHECK_EQ(snapshot.encode_submissions, 21u);
+  CHECK_EQ(snapshot.encode_completions, 20u);
+  CHECK_EQ(snapshot.encode_bytes, 1'000'000u);
+  CHECK_EQ(snapshot.encode_drops, 3u);
+  CHECK_EQ(snapshot.encode_rejected_frames, 1u);
+  CHECK_EQ(snapshot.encode_callback_errors, 0u);
+  CHECK_EQ(snapshot.encode_first_submit_ns, 2'000'000'000u);
+  CHECK_EQ(snapshot.encode_last_completion_ns, 3'000'000'000u);
+  CHECK_EQ(snapshot.encode_input_capacity, 2u);
+  CHECK_EQ(snapshot.encode_input_in_use, 0u);
+  CHECK_EQ(snapshot.encode_input_high_water, 2u);
+  CHECK_EQ(snapshot.encode_input_pool_misses, 3u);
+  CHECK(snapshot.encode_using_hardware);
+  CHECK_EQ(snapshot.encode_drain_timeouts, 0u);
+  CHECK_EQ(snapshot.encode_completion_fps(), 20.0);
   CHECK_EQ(snapshot.decoded_pixel_host_copies, 14u);
   CHECK_EQ(snapshot.pool_exhaustion, 15u);
   CHECK_EQ(snapshot.native_texture_wrappers, 16u);
@@ -208,12 +241,43 @@ TEST_CASE(runtime_counter_snapshot_is_immutable_and_resets_every_counter) {
   CHECK_EQ(empty.preview_drops, 0u);
   CHECK_EQ(empty.preview_presents, 0u);
   CHECK_EQ(empty.encode_drops, 0u);
+  CHECK_EQ(empty.encode_submissions, 0u);
+  CHECK_EQ(empty.encode_completions, 0u);
+  CHECK_EQ(empty.encode_bytes, 0u);
+  CHECK_EQ(empty.encode_rejected_frames, 0u);
+  CHECK_EQ(empty.encode_callback_errors, 0u);
+  CHECK_EQ(empty.encode_first_submit_ns, 0u);
+  CHECK_EQ(empty.encode_last_completion_ns, 0u);
+  CHECK_EQ(empty.encode_input_capacity, 0u);
+  CHECK_EQ(empty.encode_input_in_use, 0u);
+  CHECK_EQ(empty.encode_input_high_water, 0u);
+  CHECK_EQ(empty.encode_input_pool_misses, 0u);
+  CHECK(!empty.encode_using_hardware);
+  CHECK_EQ(empty.encode_drain_timeouts, 0u);
+  CHECK_EQ(empty.encode_completion_fps(), 0.0);
   CHECK_EQ(empty.decoded_pixel_host_copies, 0u);
   CHECK_EQ(empty.pool_exhaustion, 0u);
   CHECK_EQ(empty.native_texture_wrappers, 0u);
   CHECK_EQ(empty.native_command_buffers, 0u);
   CHECK_EQ(empty.native_decode_tickets, 0u);
   CHECK_EQ(empty.native_callback_wrappers, 0u);
+}
+
+TEST_CASE(encode_completion_fps_rejects_zero_and_regressing_intervals) {
+  swim::core::RuntimeCounters counters;
+  counters.encode_completions.store(20);
+  counters.encode_first_submit_ns.store(3'000'000'000);
+  counters.encode_last_completion_ns.store(2'000'000'000);
+  const auto regressing = counters.snapshot_and_reset();
+  CHECK_EQ(regressing.encode_completion_interval_ns(), 0u);
+  CHECK_EQ(regressing.encode_completion_fps(), 0.0);
+
+  counters.encode_completions.store(20);
+  counters.encode_first_submit_ns.store(2'000'000'000);
+  counters.encode_last_completion_ns.store(2'000'000'000);
+  const auto zero = counters.snapshot_and_reset();
+  CHECK_EQ(zero.encode_completion_interval_ns(), 0u);
+  CHECK_EQ(zero.encode_completion_fps(), 0.0);
 }
 
 TEST_CASE(render_completion_capacity_and_frame_age_metrics_snapshot_exactly) {

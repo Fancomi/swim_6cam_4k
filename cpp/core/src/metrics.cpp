@@ -54,6 +54,20 @@ double MetricsSnapshot::render_completion_fps() const noexcept {
                    static_cast<double>(interval);
 }
 
+std::uint64_t MetricsSnapshot::encode_completion_interval_ns() const noexcept {
+  return encode_last_completion_ns > encode_first_submit_ns
+             ? encode_last_completion_ns - encode_first_submit_ns
+             : 0;
+}
+
+double MetricsSnapshot::encode_completion_fps() const noexcept {
+  const auto interval = encode_completion_interval_ns();
+  return interval == 0
+             ? 0.0
+             : static_cast<double>(encode_completions) * 1'000'000'000.0 /
+                   static_cast<double>(interval);
+}
+
 FixedLatencyHistogramSnapshot::FixedLatencyHistogramSnapshot(
     const std::array<std::uint64_t, 1001>& buckets,
     std::uint64_t count) noexcept
@@ -121,7 +135,20 @@ MetricsSnapshot RuntimeCounters::snapshot_and_reset() noexcept {
       frame_age_p99,
       preview_drops.exchange(0, std::memory_order_relaxed),
       preview_presents.exchange(0, std::memory_order_relaxed),
+      encode_submissions.exchange(0, std::memory_order_relaxed),
+      encode_completions.exchange(0, std::memory_order_relaxed),
+      encode_bytes.exchange(0, std::memory_order_relaxed),
       encode_drops.exchange(0, std::memory_order_relaxed),
+      encode_rejected_frames.exchange(0, std::memory_order_relaxed),
+      encode_callback_errors.exchange(0, std::memory_order_relaxed),
+      encode_first_submit_ns.exchange(0, std::memory_order_relaxed),
+      encode_last_completion_ns.exchange(0, std::memory_order_relaxed),
+      encode_input_capacity.exchange(0, std::memory_order_relaxed),
+      encode_input_in_use.exchange(0, std::memory_order_relaxed),
+      encode_input_high_water.exchange(0, std::memory_order_relaxed),
+      encode_input_pool_misses.exchange(0, std::memory_order_relaxed),
+      encode_using_hardware.exchange(0, std::memory_order_relaxed) != 0,
+      encode_drain_timeouts.exchange(0, std::memory_order_relaxed),
       decoded_pixel_host_copies.exchange(0, std::memory_order_relaxed),
       pool_exhaustion.exchange(0, std::memory_order_relaxed),
       native_texture_wrappers.exchange(0, std::memory_order_relaxed),

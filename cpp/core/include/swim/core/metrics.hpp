@@ -70,7 +70,20 @@ struct MetricsSnapshot final {
   const std::array<std::uint64_t, 6> frame_age_ms_p99;
   const std::uint64_t preview_drops;
   const std::uint64_t preview_presents;
+  const std::uint64_t encode_submissions;
+  const std::uint64_t encode_completions;
+  const std::uint64_t encode_bytes;
   const std::uint64_t encode_drops;
+  const std::uint64_t encode_rejected_frames;
+  const std::uint64_t encode_callback_errors;
+  const std::uint64_t encode_first_submit_ns;
+  const std::uint64_t encode_last_completion_ns;
+  const std::uint64_t encode_input_capacity;
+  const std::uint64_t encode_input_in_use;
+  const std::uint64_t encode_input_high_water;
+  const std::uint64_t encode_input_pool_misses;
+  const bool encode_using_hardware;
+  const std::uint64_t encode_drain_timeouts;
   const std::uint64_t decoded_pixel_host_copies;
   const std::uint64_t pool_exhaustion;
   const std::uint64_t native_texture_wrappers;
@@ -80,6 +93,8 @@ struct MetricsSnapshot final {
 
   std::uint64_t render_completion_interval_ns() const noexcept;
   double render_completion_fps() const noexcept;
+  std::uint64_t encode_completion_interval_ns() const noexcept;
+  double encode_completion_fps() const noexcept;
 };
 
 struct RuntimeCounters final {
@@ -106,7 +121,23 @@ struct RuntimeCounters final {
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_output_pool_misses{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t preview_drops{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t preview_presents{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t encode_submissions{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t encode_completions{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t encode_bytes{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t encode_drops{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t encode_rejected_frames{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t encode_callback_errors{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t encode_first_submit_ns{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t
+      encode_last_completion_ns{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t encode_input_capacity{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t encode_input_in_use{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t
+      encode_input_high_water{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t
+      encode_input_pool_misses{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t encode_using_hardware{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t encode_drain_timeouts{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t
       decoded_pixel_host_copies{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t pool_exhaustion{};

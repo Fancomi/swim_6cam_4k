@@ -1,6 +1,7 @@
 #include <swim/metal/metal_backend.hpp>
 
 #include <swim/core/backend.hpp>
+#include <swim/metal/metal_encoder.hpp>
 #include <swim/metal/metal_preview.hpp>
 #include <swim/metal/metal_renderer.hpp>
 #include <swim/metal/mp4_source.hpp>
@@ -63,10 +64,12 @@ class MetalRendererAdapter final : public swim::core::IRenderer {
                        const swim::core::AppConfig& config,
                        swim::core::RuntimeCounters& metrics,
                        std::shared_ptr<MetalCompletedOutputRouter> router,
-                       std::shared_ptr<MetalPreview> preview)
+                       std::shared_ptr<MetalPreview> preview,
+                       std::shared_ptr<MetalEncoder> encoder)
       : context_(std::move(context)),
         router_(std::move(router)),
         preview_(std::move(preview)),
+        encoder_(std::move(encoder)),
         renderer_(context_, asset, config, &metrics, router_sink(router_)) {
     auto* descriptor = [MTLTextureDescriptor
         texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
@@ -176,21 +179,36 @@ class MetalRendererAdapter final : public swim::core::IRenderer {
         error = std::current_exception();
       }
     }
+    try {
+      if (encoder_ != nullptr) {
+        encoder_->close_and_drain();
+      }
+    } catch (...) {
+      if (!error) {
+        error = std::current_exception();
+      }
+    }
     if (error) {
       std::rethrow_exception(error);
     }
   }
   bool has_fatal_error() const noexcept override {
-    return renderer_.has_fatal_error();
+    return renderer_.has_fatal_error() ||
+           (encoder_ != nullptr && encoder_->has_fatal_error());
   }
   std::string last_error() const override {
-    return renderer_.fatal_error_message();
+    if (renderer_.has_fatal_error()) {
+      return renderer_.fatal_error_message();
+    }
+    return encoder_ == nullptr ? std::string{}
+                               : encoder_->fatal_error_message();
   }
 
  private:
   std::shared_ptr<MetalContext> context_;
   std::shared_ptr<MetalCompletedOutputRouter> router_;
   std::shared_ptr<MetalPreview> preview_;
+  std::shared_ptr<MetalEncoder> encoder_;
   MetalStitchRenderer renderer_;
   id<MTLTexture> replacement_texture_ = nil;
   std::array<MetalFrameView, 6> replacements_;
@@ -277,8 +295,12 @@ class MetalBackend final : public swim::core::IBackend {
       const swim::core::AppConfig& config) override {
     config_ = config;
     config_ready_ = true;
-    if (config.preview) {
+    if (config.preview || config.encode) {
       router_ = std::make_shared<MetalCompletedOutputRouter>();
+    } else {
+      router_.reset();
+    }
+    if (config.preview) {
       preview_ = std::make_shared<MetalPreview>(
           context_, asset.encoded_width, asset.encoded_height, *metrics_,
           [this] { stop_main_loop(); });
@@ -289,11 +311,29 @@ class MetalBackend final : public swim::core::IBackend {
         }
       });
     } else {
-      router_.reset();
       preview_.reset();
     }
+    if (config.encode) {
+      encoder_ = std::make_shared<MetalEncoder>(
+          asset.encoded_width, asset.encoded_height, config, *metrics_);
+      const std::weak_ptr<MetalEncoder> weak_encoder = encoder_;
+      const auto fps_num = config.fps_num;
+      const auto fps_den = config.fps_den;
+      router_->add_sink(
+          [weak_encoder, sequence = std::uint64_t{0}, fps_num, fps_den]
+          (MetalOutputLease output) mutable {
+            const CMTime pts = CMTimeMake(
+                static_cast<std::int64_t>(sequence++) * fps_den,
+                static_cast<std::int32_t>(fps_num));
+            if (auto encoder = weak_encoder.lock()) {
+              static_cast<void>(encoder->offer(std::move(output), pts));
+            }
+          });
+    } else {
+      encoder_.reset();
+    }
     return std::make_unique<MetalRendererAdapter>(
-        context_, asset, config, *metrics_, router_, preview_);
+        context_, asset, config, *metrics_, router_, preview_, encoder_);
   }
 
   void run_main_loop(std::stop_token token) override {
@@ -320,6 +360,7 @@ class MetalBackend final : public swim::core::IBackend {
   std::shared_ptr<MetalContext> context_;
   std::shared_ptr<MetalCompletedOutputRouter> router_;
   std::shared_ptr<MetalPreview> preview_;
+  std::shared_ptr<MetalEncoder> encoder_;
   swim::core::AppConfig config_;
   swim::core::RuntimeCounters fallback_metrics_;
   swim::core::RuntimeCounters* metrics_{&fallback_metrics_};

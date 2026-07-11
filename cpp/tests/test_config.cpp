@@ -105,7 +105,7 @@ TEST_CASE(loads_exact_camera_order_and_all_config_values) {
   CHECK(!config.encode);
   CHECK(!config.diagnostic_replacement);
   CHECK_EQ(config.encode_path,
-           std::filesystem::path{"outputs/test-output.h264"});
+           std::filesystem::path{"outputs/test-output.h265"});
   CHECK_EQ(config.stale_after, 100ms);
   CHECK_EQ(config.replace_after, 1000ms);
   CHECK_EQ(config.decode_surface_pool, 8u);
@@ -145,7 +145,7 @@ TEST_CASE(applies_every_supported_cli_override) {
       "--preview=false",
       "--encode=true",
       "--diagnostic-replacement=true",
-      "--encode-path=outputs/override.h264",
+      "--encode-path=outputs/override.h265",
       "--encode-sink=null",
       "--duration-seconds=27",
       "--mode=benchmark",
@@ -161,13 +161,50 @@ TEST_CASE(applies_every_supported_cli_override) {
   CHECK(config.encode);
   CHECK(config.diagnostic_replacement);
   CHECK_EQ(config.encode_path,
-           std::filesystem::path{"outputs/override.h264"});
+           std::filesystem::path{"outputs/override.h265"});
   CHECK_EQ(config.encode_sink, EncodeSink::null_sink);
   CHECK_EQ(config.duration, 27s);
   CHECK_EQ(config.mode, RunMode::benchmark);
   CHECK_EQ(config.stage, BenchmarkStage::decode_render_encode);
   CHECK_EQ(config.stream_count, 4u);
   CHECK_EQ(config.metrics_path, std::filesystem::path{"bench/run.jsonl"});
+}
+
+TEST_CASE(validates_hevc_encode_sink_path_and_fixed_frame_rate) {
+  auto config = AppConfig{};
+  config.encode = true;
+  config.preview = false;
+  config.encode_sink = EncodeSink::file;
+  config.encode_path.clear();
+  CHECK_THROWS_WITH(
+      swim::core::validate_runtime_compatibility(config,
+                                                 compatible_runtime_asset()),
+      "file HEVC encoding requires --encode-path");
+
+  config.encode_path = "outputs/video.h264";
+  CHECK_THROWS_WITH(
+      swim::core::validate_runtime_compatibility(config,
+                                                 compatible_runtime_asset()),
+      "HEVC encode path extension must be .h265 or .hevc");
+
+  config.encode_path = "outputs/video.h265";
+  swim::core::validate_runtime_compatibility(config,
+                                              compatible_runtime_asset());
+  config.encode_path = "outputs/video.hevc";
+  swim::core::validate_runtime_compatibility(config,
+                                              compatible_runtime_asset());
+
+  config.fps_num = 30;
+  CHECK_THROWS_WITH(
+      swim::core::validate_runtime_compatibility(config,
+                                                 compatible_runtime_asset()),
+      "HEVC encoding requires fps_num/fps_den=30000/1001");
+
+  config.encode_sink = EncodeSink::null_sink;
+  config.encode_path.clear();
+  config.fps_num = 30000;
+  swim::core::validate_runtime_compatibility(config,
+                                              compatible_runtime_asset());
 }
 
 TEST_CASE(accepts_every_exact_stage_and_stream_count_value) {

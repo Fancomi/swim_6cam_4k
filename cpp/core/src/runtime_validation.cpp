@@ -36,6 +36,24 @@ void validate_runtime_compatibility(const AppConfig& config,
           "camera order must be cam3,cam2,cam1,cam4,cam5,cam6");
     }
   }
+  if (!config.encode) {
+    return;
+  }
+  if (config.fps_num != 30000 || config.fps_den != 1001) {
+    throw std::runtime_error(
+        "HEVC encoding requires fps_num/fps_den=30000/1001");
+  }
+  if (config.encode_sink == EncodeSink::null_sink) {
+    return;
+  }
+  if (config.encode_path.empty()) {
+    throw std::runtime_error("file HEVC encoding requires --encode-path");
+  }
+  const auto extension = config.encode_path.extension();
+  if (extension != ".h265" && extension != ".hevc") {
+    throw std::runtime_error(
+        "HEVC encode path extension must be .h265 or .hevc");
+  }
 }
 
 }  // namespace swim::core

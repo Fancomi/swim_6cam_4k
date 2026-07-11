@@ -48,11 +48,13 @@ std::uint64_t steady_now_ns() noexcept {
           .count());
 }
 
-void update_high_water(std::atomic_uint32_t& high_water,
-                       std::uint32_t value) noexcept {
+template <class AtomicValue, class Value>
+void update_high_water(std::atomic<AtomicValue>& high_water,
+                       Value value) noexcept {
+  const auto desired = static_cast<AtomicValue>(value);
   auto observed = high_water.load(std::memory_order_relaxed);
-  while (observed < value &&
-         !high_water.compare_exchange_weak(observed, value,
+  while (observed < desired &&
+         !high_water.compare_exchange_weak(observed, desired,
                                            std::memory_order_relaxed,
                                            std::memory_order_relaxed)) {
   }
@@ -309,6 +311,8 @@ class MetalEncoder::Impl final
     if (width != 5002 || height != 2102) {
       throw std::runtime_error("HEVC encoder requires exact 5002x2102 output");
     }
+    metrics_.encode_input_capacity.store(kEncoderInputCapacity,
+                                         std::memory_order_relaxed);
     if (!null_sink_) {
       const auto parent = config.encode_path.parent_path();
       if (!parent.empty()) {
@@ -333,7 +337,10 @@ class MetalEncoder::Impl final
         static_cast<int32_t>(height), kCMVideoCodecType_HEVC, specification,
         nullptr, nullptr, &Impl::output_callback, this, &session_);
     CFRelease(specification);
-    require_status(create_status, "VTCompressionSessionCreate");
+    if (create_status != noErr) {
+      close_file();
+      require_status(create_status, "VTCompressionSessionCreate");
+    }
     try {
       configure_session();
     } catch (...) {
@@ -363,6 +370,9 @@ class MetalEncoder::Impl final
       record_drop();
       return false;
     }
+    metrics_.encode_input_in_use.store(gate_.in_use(),
+                                       std::memory_order_relaxed);
+    update_high_water(metrics_.encode_input_high_water, gate_.high_water());
     input->operator->()->output = std::move(output);
     input->operator->()->pts = pts;
     input->operator->()->submission_sequence =
@@ -374,19 +384,23 @@ class MetalEncoder::Impl final
     callback_ticket.gate_ticket = gate_ticket;
 
     auto* record = gate_.record(gate_ticket);
-    const auto now = steady_now_ns();
-    std::uint64_t zero = 0;
-    first_submit_ns_.compare_exchange_strong(zero, now,
-                                             std::memory_order_relaxed);
-    submissions_.fetch_add(1, std::memory_order_relaxed);
     const auto status = VTCompressionSessionEncodeFrame(
-        session_, record->output.pixel_buffer(), record->pts, kCMTimeInvalid,
-        nullptr, &callback_ticket, nullptr);
+        session_, record->output.pixel_buffer(), record->pts,
+        kCMTimeInvalid, nullptr, &callback_ticket, nullptr);
     if (status == noErr) {
+      const auto now = steady_now_ns();
+      std::uint64_t zero = 0;
+      first_submit_ns_.compare_exchange_strong(zero, now,
+                                               std::memory_order_relaxed);
+      zero = 0;
+      metrics_.encode_first_submit_ns.compare_exchange_strong(
+          zero, now, std::memory_order_relaxed);
+      submissions_.fetch_add(1, std::memory_order_relaxed);
+      metrics_.encode_submissions.fetch_add(1, std::memory_order_relaxed);
       return true;
     }
-    submissions_.fetch_sub(1, std::memory_order_relaxed);
     rejected_frames_.fetch_add(1, std::memory_order_relaxed);
+    metrics_.encode_rejected_frames.fetch_add(1, std::memory_order_relaxed);
     settle(callback_ticket);
     return false;
   }
@@ -410,6 +424,8 @@ class MetalEncoder::Impl final
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 kDrainTimeout))) {
       drain_timed_out_.store(true, std::memory_order_relaxed);
+      metrics_.encode_drain_timeouts.fetch_add(1,
+                                               std::memory_order_relaxed);
     }
     publish_gate_metrics();
     if (session_ != nullptr) {
@@ -546,6 +562,9 @@ class MetalEncoder::Impl final
     } else {
       completions_.fetch_add(1, std::memory_order_relaxed);
       last_completion_ns_.store(steady_now_ns(), std::memory_order_relaxed);
+      metrics_.encode_completions.fetch_add(1, std::memory_order_relaxed);
+      metrics_.encode_last_completion_ns.store(steady_now_ns(),
+                                                std::memory_order_relaxed);
     }
     settle(ticket);
   }
@@ -562,6 +581,8 @@ class MetalEncoder::Impl final
       return false;
     }
     self.bytes_.fetch_add(bytes.size(), std::memory_order_relaxed);
+    self.metrics_.encode_bytes.fetch_add(bytes.size(),
+                                         std::memory_order_relaxed);
     return true;
   }
 
@@ -606,10 +627,13 @@ class MetalEncoder::Impl final
       throw std::runtime_error("hardware HEVC encoder is required");
     }
     using_hardware_.store(true, std::memory_order_relaxed);
+    metrics_.encode_using_hardware.store(1, std::memory_order_relaxed);
   }
 
   void settle(CallbackTicket& ticket) noexcept {
     gate_.settle(ticket.gate_ticket);
+    metrics_.encode_input_in_use.store(gate_.in_use(),
+                                       std::memory_order_relaxed);
     ticket.gate_ticket = nullptr;
     ticket.owner.reset();
   }
@@ -617,10 +641,13 @@ class MetalEncoder::Impl final
   void record_drop() noexcept {
     drops_.fetch_add(1, std::memory_order_relaxed);
     metrics_.encode_drops.fetch_add(1, std::memory_order_relaxed);
+    metrics_.encode_input_pool_misses.store(gate_.misses(),
+                                            std::memory_order_relaxed);
   }
 
   void record_callback_error(std::string message) noexcept {
     callback_errors_.fetch_add(1, std::memory_order_relaxed);
+    metrics_.encode_callback_errors.fetch_add(1, std::memory_order_relaxed);
     mark_fatal(std::move(message));
   }
 
@@ -634,6 +661,14 @@ class MetalEncoder::Impl final
   }
 
   void publish_gate_metrics() noexcept {
+    metrics_.encode_input_capacity.store(gate_.capacity(),
+                                         std::memory_order_relaxed);
+    metrics_.encode_input_in_use.store(gate_.in_use(),
+                                       std::memory_order_relaxed);
+    metrics_.encode_input_high_water.store(gate_.high_water(),
+                                           std::memory_order_relaxed);
+    metrics_.encode_input_pool_misses.store(gate_.misses(),
+                                            std::memory_order_relaxed);
   }
 
   void close_file() noexcept {
