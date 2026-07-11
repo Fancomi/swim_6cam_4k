@@ -1698,7 +1698,8 @@ struct MetalEncoderStats {
   std::uint64_t completions{};
   std::uint64_t bytes{};
   std::uint64_t drops{};
-  std::uint64_t errors{};
+  std::uint64_t rejected_frames{};
+  std::uint64_t callback_errors{};
   std::uint32_t input_capacity{};
   std::uint32_t input_high_water{};
   std::uint32_t input_in_use{};
@@ -1802,12 +1803,14 @@ CHECK_EQ(snapshot.encode_submissions, 21u);
 CHECK_EQ(snapshot.encode_completions, 20u);
 CHECK_EQ(snapshot.encode_bytes, 1'000'000u);
 CHECK_EQ(snapshot.encode_drops, 3u);
-CHECK_EQ(snapshot.encode_errors, 0u);
+CHECK_EQ(snapshot.encode_rejected_frames, 1u);
+CHECK_EQ(snapshot.encode_callback_errors, 0u);
 CHECK_EQ(snapshot.encode_input_capacity, 2u);
+CHECK_EQ(snapshot.encode_input_in_use, 0u);
 CHECK_EQ(snapshot.encode_input_high_water, 2u);
 CHECK_EQ(snapshot.encode_input_pool_misses, 3u);
 CHECK(snapshot.encode_using_hardware);
-CHECK(!snapshot.encode_drain_timed_out);
+CHECK_EQ(snapshot.encode_drain_timeouts, 0u);
 CHECK_EQ(snapshot.encode_completion_fps(), 20.0);
 ```
 
@@ -1816,7 +1819,8 @@ The completion FPS interval is
 zero or regressing interval. Update the config fixture and CLI override
 expectations from `.h264` to `.h265`. Extend
 `AssertRuntimeFinalMetrics.cmake` so the setup-failure JSON must contain every
-new encode field with zero values and `encode_using_hardware:false`.
+new numeric encode field with zero values, `encode_using_hardware:false`, and
+`encode_codec:"hevc"`.
 
 - [ ] **Step 6: Run core tests and verify RED**
 
@@ -1828,11 +1832,20 @@ Expected: FAIL because the new snapshot fields and FPS function do not exist.
 
 Add cache-line-separated atomic counters and immutable snapshot fields for:
 `encode_submissions`, `encode_completions`, `encode_bytes`, `encode_drops`,
-`encode_errors`, `encode_first_submit_ns`, `encode_last_completion_ns`,
-`encode_input_capacity`, `encode_input_high_water`,
-`encode_input_pool_misses`, `encode_using_hardware`, and
-`encode_drain_timed_out`. `snapshot_and_reset()` exchanges every field exactly
-once. Final JSON emits these exact names plus `encode_fps`.
+`encode_rejected_frames`, `encode_callback_errors`,
+`encode_first_submit_ns`, `encode_last_completion_ns`,
+`encode_input_capacity`, `encode_input_in_use`,
+`encode_input_high_water`, `encode_input_pool_misses`,
+`encode_using_hardware`, and `encode_drain_timeouts`.
+`snapshot_and_reset()` exchanges every field exactly once. Final JSON emits
+these exact names plus `encode_fps` and `encode_codec:"hevc"`; existing
+`output_width` and `output_height` remain the authoritative dimensions.
+
+Before backend creation, runtime validation rejects a file-sink encode request
+with an empty path or an extension other than `.h265`/`.hevc`, and rejects an
+encode request whose frame-rate pair is not exactly `30000/1001`. A null sink
+does not require a file path. `encode=false` creates no compression session and
+opens no output file.
 
 - [ ] **Step 8: Integrate serial zero-copy fan-out and shutdown**
 
