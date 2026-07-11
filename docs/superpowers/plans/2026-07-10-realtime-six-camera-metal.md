@@ -1935,6 +1935,12 @@ git commit -m "feat: add bounded VideoToolbox HEVC output"
 
 ### Task 12: Implement the Benchmark Matrix and Machine-Readable Reports
 
+> Superseded by the reviewed three-task plan in
+> `docs/superpowers/plans/2026-07-11-metal-benchmark-matrix.md`. Preflight found
+> that stage/stream fields were parse-only and interval snapshots would race the
+> existing producer-owned histograms, so the runtime graph and telemetry must
+> be implemented before the runner.
+
 **Files:**
 - Create: `python/validation/summarize_benchmarks.py`
 - Create: `scripts/run_metal_benchmarks.sh`
