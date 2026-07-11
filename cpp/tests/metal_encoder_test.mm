@@ -3,6 +3,7 @@
 #include <swim/metal/metal_encoder.hpp>
 #include <swim/metal/metal_backend.hpp>
 #include <swim/core/config.hpp>
+#include <swim/core/hot_path_allocations.hpp>
 #include <swim/core/metrics.hpp>
 
 #import <CoreMedia/CoreMedia.h>
@@ -159,6 +160,13 @@ struct FakeNativeSession {
   void callback_drop() {
     callback(callback_context, source_frame,
              {.kind = swim::metal::MetalEncoderInjectedOutputKind::frame_dropped});
+  }
+
+  void callback_output() {
+    callback(callback_context, source_frame,
+             {.kind = swim::metal::MetalEncoderInjectedOutputKind::access_unit,
+              .access_unit = kInjectedAccessUnit,
+              .nal_length_bytes = 1});
   }
 
   void unblock_complete() {
@@ -547,15 +555,71 @@ TEST_CASE(total_drain_deadline_invalidates_and_late_callback_has_safe_lifetime) 
     CHECK(encoder.offer(std::move(*output), CMTimeMake(0, 30000)));
     encoder.close_and_drain();
     CHECK(encoder.stats().drain_timed_out);
-    {
-      std::unique_lock lock(native.mutex);
-      native.condition.wait(lock, [&native] { return native.complete_entered; });
-      CHECK(native.invalidated);
-    }
+    CHECK_EQ(encoder.stats().drops, 1u);
+    CHECK(native.invalidated);
   }
 
+  bool retired_before_late_callback = false;
+  {
+    std::unique_lock lock(sentinel_mutex);
+    retired_before_late_callback = sentinel_condition.wait_for(
+        lock, std::chrono::milliseconds{50},
+        [&] { return sentinel_destroyed; });
+  }
+  if (!retired_before_late_callback) {
+    native.callback_drop();
+    native.unblock_complete();
+    std::unique_lock lock(sentinel_mutex);
+    static_cast<void>(sentinel_condition.wait_for(
+        lock, std::chrono::seconds{1}, [&] { return sentinel_destroyed; }));
+  }
+  CHECK(retired_before_late_callback);
+  CHECK(weak_sentinel.expired());
+  CHECK(pool.try_acquire().has_value());
   native.callback_drop();
-  native.unblock_complete();
+}
+
+TEST_CASE(blocked_callback_writer_is_inside_the_total_drain_deadline) {
+  FakeNativeSession native;
+  FakeWriter writer;
+  writer.block_append = true;
+  FakeClock clock;
+  std::mutex sentinel_mutex;
+  std::condition_variable sentinel_condition;
+  bool sentinel_destroyed = false;
+  auto sentinel = std::make_shared<LifetimeSentinel>();
+  sentinel->mutex = &sentinel_mutex;
+  sentinel->condition = &sentinel_condition;
+  sentinel->destroyed = &sentinel_destroyed;
+  std::weak_ptr<LifetimeSentinel> weak_sentinel = sentinel;
+  auto context = test_metal_context();
+  swim::metal::MetalOutputPool pool{context, 1, 2, 2};
+  {
+    swim::core::RuntimeCounters metrics;
+    swim::metal::MetalEncoder encoder(
+        5002, 2102, null_encode_config(), metrics,
+        dependencies(native, writer, clock, std::chrono::milliseconds{0},
+                     sentinel));
+    sentinel.reset();
+    auto output = pool.try_acquire();
+    CHECK(output.has_value());
+    CHECK(encoder.offer(std::move(*output), CMTimeMake(0, 30000)));
+    std::thread callback([&native] { native.callback_output(); });
+    {
+      std::unique_lock lock(writer.mutex);
+      writer.condition.wait(lock,
+                            [&writer] { return writer.append_entered; });
+    }
+    encoder.close_and_drain();
+    CHECK(encoder.stats().drain_timed_out);
+    CHECK(native.invalidated);
+    {
+      std::lock_guard lock(writer.mutex);
+      writer.release_append = true;
+      writer.condition.notify_all();
+    }
+    callback.join();
+  }
   {
     std::unique_lock lock(sentinel_mutex);
     CHECK(sentinel_condition.wait_for(
@@ -565,12 +629,9 @@ TEST_CASE(total_drain_deadline_invalidates_and_late_callback_has_safe_lifetime) 
   CHECK(pool.try_acquire().has_value());
 }
 
-TEST_CASE(blocked_callback_writer_is_inside_the_total_drain_deadline) {
+TEST_CASE(timeout_without_a_callback_retires_output_and_heavy_state) {
   FakeNativeSession native;
-  native.output_during_complete = true;
-  native.release_complete = true;
   FakeWriter writer;
-  writer.block_append = true;
   FakeClock clock;
   std::mutex sentinel_mutex;
   std::condition_variable sentinel_condition;
@@ -596,17 +657,37 @@ TEST_CASE(blocked_callback_writer_is_inside_the_total_drain_deadline) {
     CHECK(encoder.stats().drain_timed_out);
     CHECK(native.invalidated);
   }
-  {
-    std::unique_lock lock(writer.mutex);
-    writer.condition.wait(lock, [&writer] { return writer.append_entered; });
-    writer.release_append = true;
-    writer.condition.notify_all();
-  }
+  native.unblock_complete();
+  bool destroyed = false;
   {
     std::unique_lock lock(sentinel_mutex);
-    CHECK(sentinel_condition.wait_for(
+    destroyed = sentinel_condition.wait_for(
+        lock, std::chrono::milliseconds{50},
+        [&] { return sentinel_destroyed; });
+  }
+  if (!destroyed) {
+    native.callback_drop();
+    std::unique_lock lock(sentinel_mutex);
+    static_cast<void>(sentinel_condition.wait_for(
         lock, std::chrono::seconds{1}, [&] { return sentinel_destroyed; }));
   }
+  CHECK(destroyed);
   CHECK(weak_sentinel.expired());
   CHECK(pool.try_acquire().has_value());
+}
+
+TEST_CASE(close_and_drain_performs_no_application_heap_allocation) {
+  FakeNativeSession native;
+  native.release_complete = true;
+  FakeWriter writer;
+  FakeClock clock;
+  swim::core::RuntimeCounters metrics;
+  swim::metal::MetalEncoder encoder(5002, 2102, null_encode_config(), metrics,
+                                    dependencies(native, writer, clock));
+  const auto before = swim::core::hot_path_allocation_count();
+  {
+    swim::core::HotPathAllocationScope scope;
+    encoder.close_and_drain();
+  }
+  CHECK_EQ(swim::core::hot_path_allocation_count(), before);
 }

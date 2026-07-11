@@ -93,6 +93,8 @@ class EncoderInputGate final {
   void settle(Ticket* ticket) noexcept;
   void close() noexcept;
   bool wait_until_empty(std::chrono::milliseconds timeout) noexcept;
+  bool wait_until_empty(
+      std::chrono::steady_clock::time_point deadline) noexcept;
   void wait_until_empty() noexcept;
   std::uint32_t capacity() const noexcept;
   std::uint32_t in_use() const noexcept;

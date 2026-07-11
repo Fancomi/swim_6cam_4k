@@ -12,7 +12,7 @@
 #include <limits>
 #include <mutex>
 #include <stdexcept>
-#include <thread>
+#include <string_view>
 #include <utility>
 
 namespace swim::metal {
@@ -269,6 +269,14 @@ bool EncoderInputGate::wait_until_empty(
   });
 }
 
+bool EncoderInputGate::wait_until_empty(
+    std::chrono::steady_clock::time_point deadline) noexcept {
+  std::unique_lock lock(mutex_);
+  return condition_.wait_until(lock, deadline, [this] {
+    return in_use_.load(std::memory_order_acquire) == 0;
+  });
+}
+
 void EncoderInputGate::wait_until_empty() noexcept {
   std::unique_lock lock(mutex_);
   condition_.wait(lock, [this] {
@@ -304,11 +312,20 @@ class MetalEncoder::Impl final {
  private:
   class State;
 
+  enum class TicketPhase : std::uint8_t {
+    idle,
+    armed,
+    callback_claimed,
+    settled,
+    retired,
+  };
+
   struct CallbackTicket final {
     std::shared_ptr<State> state;
     EncoderInputGate::Ticket* gate_ticket{};
     std::atomic_bool drop_recorded{};
     std::atomic_bool frame_dropped{};
+    std::atomic<TicketPhase> phase{TicketPhase::idle};
   };
 
   class State final {
@@ -320,7 +337,9 @@ class MetalEncoder::Impl final {
           writer_(writer),
           now_context_(now_context),
           now_ns_(now_ns),
-          lifetime_anchor_(std::move(lifetime_anchor)) {}
+          lifetime_anchor_(std::move(lifetime_anchor)) {
+      fatal_message_.reserve(256);
+    }
 
     ~State() { static_cast<void>(close_writer()); }
 
@@ -360,23 +379,23 @@ class MetalEncoder::Impl final {
     }
 
     void record_callback_error(CallbackTicket* ticket,
-                               std::string message) noexcept {
+                               std::string_view message) noexcept {
       callback_errors.fetch_add(1, std::memory_order_relaxed);
       if (ticket == nullptr) {
         record_drop();
       } else {
         record_drop_once(*ticket);
       }
-      mark_fatal(std::move(message));
+      mark_fatal(message);
     }
 
-    void mark_fatal(std::string message) noexcept {
+    void mark_fatal(std::string_view message) noexcept {
       if (fatal.load(std::memory_order_acquire)) {
         return;
       }
       std::lock_guard lock(error_mutex_);
       if (!fatal.load(std::memory_order_relaxed)) {
-        fatal_message_ = std::move(message);
+        fatal_message_.assign(message.data(), message.size());
         fatal.store(true, std::memory_order_release);
       }
     }
@@ -390,6 +409,7 @@ class MetalEncoder::Impl final {
       auto* const gate_ticket = ticket.gate_ticket;
       ticket.gate_ticket = nullptr;
       ticket.state.reset();
+      ticket.phase.store(TicketPhase::settled, std::memory_order_release);
       gate.settle(gate_ticket);
     }
 
@@ -612,12 +632,6 @@ class MetalEncoder::Impl final {
     std::atomic_bool invalidated_{};
   };
 
-  struct DrainOperation final {
-    std::mutex mutex;
-    std::condition_variable condition;
-    bool done{};
-  };
-
  public:
   Impl(std::uint32_t width, std::uint32_t height,
        const swim::core::AppConfig& config,
@@ -626,9 +640,7 @@ class MetalEncoder::Impl final {
     validate_dimensions(width, height);
     auto writer = make_production_writer(config);
     state_ = std::make_shared<State>(writer, nullptr, nullptr, nullptr);
-    tickets_ = std::shared_ptr<CallbackTicket[]>(
-        new CallbackTicket[kEncoderInputCapacity],
-        std::default_delete<CallbackTicket[]>());
+    tickets_ = std::make_unique<CallbackTicket[]>(kEncoderInputCapacity);
     create_production_session(width, height);
   }
 
@@ -644,9 +656,7 @@ class MetalEncoder::Impl final {
         std::move(dependencies.lifetime_anchor));
     state_->using_hardware.store(dependencies.native.using_hardware,
                                  std::memory_order_relaxed);
-    tickets_ = std::shared_ptr<CallbackTicket[]>(
-        new CallbackTicket[kEncoderInputCapacity],
-        std::default_delete<CallbackTicket[]>());
+    tickets_ = std::make_unique<CallbackTicket[]>(kEncoderInputCapacity);
     session_ = std::make_shared<SessionHandle>(dependencies.native);
   }
 
@@ -671,12 +681,13 @@ class MetalEncoder::Impl final {
         state->next_sequence.fetch_add(1, std::memory_order_relaxed);
     const auto slot = input->index();
     auto* gate_ticket = state->gate.arm(std::move(*input));
-    auto& callback_ticket =
-        tickets_[static_cast<std::ptrdiff_t>(slot)];
+    auto& callback_ticket = tickets_[slot];
     callback_ticket.drop_recorded.store(false, std::memory_order_relaxed);
     callback_ticket.frame_dropped.store(false, std::memory_order_relaxed);
     callback_ticket.state = state;
     callback_ticket.gate_ticket = gate_ticket;
+    callback_ticket.phase.store(TicketPhase::armed,
+                                std::memory_order_release);
 
     auto* record = state->gate.record(gate_ticket);
     const auto submitted_at = state->now();
@@ -687,15 +698,19 @@ class MetalEncoder::Impl final {
         &info_flags, &Impl::injected_callback, nullptr);
     if (status != noErr) {
       state->rejected_frames.fetch_add(1, std::memory_order_relaxed);
-      state->record_drop_once(callback_ticket);
-      state->settle(callback_ticket);
+      if (claim_ticket(callback_ticket)) {
+        state->record_drop_once(callback_ticket);
+        state->settle(callback_ticket);
+      }
       state->rollback_first_submit(submitted_at, claimed_first);
       return false;
     }
     state->submissions.fetch_add(1, std::memory_order_relaxed);
     if ((info_flags & kVTEncodeInfo_FrameDropped) != 0) {
-      state->record_frame_drop(callback_ticket);
-      state->settle(callback_ticket);
+      if (claim_ticket(callback_ticket)) {
+        state->record_frame_drop(callback_ticket);
+        state->settle(callback_ticket);
+      }
       return false;
     }
     return !callback_ticket.frame_dropped.load(std::memory_order_relaxed);
@@ -709,56 +724,31 @@ class MetalEncoder::Impl final {
     }
     auto state = state_;
     auto session = session_;
-    auto tickets = tickets_;
     state->gate.close();
-    auto operation = std::make_shared<DrainOperation>();
     const auto deadline = std::chrono::steady_clock::now() + drain_timeout_;
-    std::thread completion;
-    try {
-      completion = std::thread([state, session, tickets, operation] {
-        static_cast<void>(tickets);
-        const auto status = session->complete_frames();
-        if (status != noErr) {
-          state->mark_fatal(
-              "VTCompressionSessionCompleteFrames failed with status " +
-              std::to_string(status));
-        }
-        state->gate.wait_until_empty();
-        static_cast<void>(state->close_writer());
-        {
-          std::lock_guard lock(operation->mutex);
-          operation->done = true;
-        }
-        operation->condition.notify_all();
-      });
-    } catch (const std::system_error& error) {
-      state->mark_fatal("cannot start HEVC drain worker: " +
-                        std::string(error.what()));
-      session->invalidate();
+    const bool callbacks_settled = state->gate.wait_until_empty(deadline);
+    if (callbacks_settled) {
+      const auto status = session->complete_frames();
+      if (status != noErr) {
+        state->mark_fatal("VTCompressionSessionCompleteFrames failed");
+      }
       static_cast<void>(state->close_writer());
-      flush_metrics();
-      session_.reset();
+      session->invalidate();
       tickets_.reset();
-      return;
-    }
-
-    bool completed = false;
-    {
-      std::unique_lock lock(operation->mutex);
-      completed = operation->condition.wait_until(
-          lock, deadline, [&operation] { return operation->done; });
-    }
-    if (completed) {
-      completion.join();
     } else {
       state->drain_timed_out.store(true, std::memory_order_relaxed);
       session->invalidate();
-      completion.detach();
+      const bool callback_in_flight = retire_unclaimed_tickets();
+      if (!callback_in_flight) {
+        static_cast<void>(state->close_writer());
+      }
+      // VideoToolbox owns only raw sourceFrameRefCon addresses. After timeout
+      // the two fixed records become tiny stable tombstones: retired records
+      // no-op, while an already-entered callback owns State until settlement.
+      static_cast<void>(tickets_.release());
     }
-    session->invalidate();
     flush_metrics();
     session_.reset();
-    tickets_.reset();
   }
 
   MetalEncoderStats stats() const noexcept {
@@ -860,12 +850,40 @@ class MetalEncoder::Impl final {
     CFRelease(static_cast<VTCompressionSessionRef>(context));
   }
 
+  static bool claim_ticket(CallbackTicket& ticket) noexcept {
+    auto expected = TicketPhase::armed;
+    return ticket.phase.compare_exchange_strong(
+        expected, TicketPhase::callback_claimed,
+        std::memory_order_acq_rel, std::memory_order_acquire);
+  }
+
+  bool retire_unclaimed_tickets() noexcept {
+    bool callback_in_flight = false;
+    for (std::uint32_t index = 0; index < kEncoderInputCapacity; ++index) {
+      auto& ticket = tickets_[index];
+      auto expected = TicketPhase::armed;
+      if (ticket.phase.compare_exchange_strong(
+              expected, TicketPhase::retired,
+              std::memory_order_acq_rel, std::memory_order_acquire)) {
+        auto state = ticket.state;
+        auto* const gate_ticket = ticket.gate_ticket;
+        ticket.gate_ticket = nullptr;
+        ticket.state.reset();
+        state->record_drop_once(ticket);
+        state->gate.settle(gate_ticket);
+      } else if (expected == TicketPhase::callback_claimed) {
+        callback_in_flight = true;
+      }
+    }
+    return callback_in_flight;
+  }
+
   static void output_callback(void*, void* source_frame_refcon,
                               OSStatus status,
                               VTEncodeInfoFlags info_flags,
                               CMSampleBufferRef sample) noexcept {
     auto* ticket = static_cast<CallbackTicket*>(source_frame_refcon);
-    if (ticket == nullptr || ticket->state == nullptr) {
+    if (ticket == nullptr || !claim_ticket(*ticket)) {
       return;
     }
     auto state = ticket->state;
@@ -876,7 +894,7 @@ class MetalEncoder::Impl final {
       void*, void* source_frame_refcon,
       const MetalEncoderInjectedOutput& output) noexcept {
     auto* ticket = static_cast<CallbackTicket*>(source_frame_refcon);
-    if (ticket == nullptr || ticket->state == nullptr) {
+    if (ticket == nullptr || !claim_ticket(*ticket)) {
       return;
     }
     auto state = ticket->state;
@@ -1007,7 +1025,7 @@ class MetalEncoder::Impl final {
   }
 
   std::shared_ptr<State> state_;
-  std::shared_ptr<CallbackTicket[]> tickets_;
+  std::unique_ptr<CallbackTicket[]> tickets_;
   std::shared_ptr<SessionHandle> session_;
   swim::core::RuntimeCounters* metrics_{};
   std::chrono::milliseconds drain_timeout_;
