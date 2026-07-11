@@ -8,6 +8,7 @@ from python.validation.summarize_benchmarks import (
     load_records,
     summarize_records,
     validate_soak_records,
+    validate_cell_records,
     validate_matrix,
 )
 
@@ -48,6 +49,7 @@ def record_for(
     rendered = 0 if stage == "decode-only" else 450
     previewed = rendered if graph["preview"] else 0
     encoded = rendered if graph["encode"] else 0
+    camera_received = [450 if i < graph["active_sources"] else 0 for i in range(6)]
     return {
         "schema": 1,
         "run_id": "run-fixed",
@@ -70,32 +72,94 @@ def record_for(
         "frame_age_ms_p95": [2] * 6,
         "frame_age_ms_p99": [3] * 6,
         "snapshot_age_spread_ms_p99": 1,
+        "camera_received": camera_received,
+        "camera_decoded": camera_received,
+        "camera_published": camera_received,
+        "mailbox_overwrites": [0] * 6,
+        "frame_reuses": [0] * 6,
         "received": received,
         "decoded": received,
         "published": received,
+        "overwritten": 0,
+        "reused": 0,
+        "malformed": 0,
+        "reconnects": 0,
         "render_submissions": rendered,
         "render_completions": rendered,
+        "render_drops": 0,
+        "render_active_ns": 1_000_000 if rendered else 0,
+        "render_first_submit_ns": 1 if rendered else 0,
+        "render_last_completion_ns": 2 if rendered else 0,
+        "render_completion_interval_ns": 1 if rendered else 0,
         "preview_submissions": previewed,
         "preview_completions": previewed,
+        "preview_drops": 0,
         "preview_presents": previewed,
         "encode_submissions": encoded,
         "encode_completions": encoded,
+        "encode_bytes": encoded * 100,
+        "encode_drops": 0,
+        "encode_rejected_frames": 0,
         "encode_callback_errors": 0,
+        "encode_first_submit_ns": 1 if encoded else 0,
+        "encode_last_completion_ns": 2 if encoded else 0,
         "encode_using_hardware": bool(graph["encode"]),
         "encode_drain_timeouts": 0,
+        "encode_codec": "hevc",
+        "pool_exhaustion": 0,
         "decoded_pixel_host_copies": 0,
         "application_owned_frame_allocations": 0,
         "render_inflight_capacity": 3,
+        "render_inflight_in_use": 0,
         "render_inflight_high_water": 2 if rendered else 0,
+        "render_inflight_pool_misses": 0,
         "render_output_capacity": 4,
+        "render_output_in_use": 0,
         "render_output_high_water": 2 if rendered else 0,
+        "render_output_pool_misses": 0,
         "decode_surface_pool_capacity": [8] * 6,
+        "decode_surface_pool_in_use": [0] * 6,
         "decode_surface_pool_high_water": [4 if i < graph["active_sources"] else 0 for i in range(6)],
+        "decode_surface_pool_misses": [0] * 6,
         "decode_ticket_pool_capacity": [16] * 6,
+        "decode_ticket_pool_in_use": [0] * 6,
         "decode_ticket_pool_high_water": [4 if i < graph["active_sources"] else 0 for i in range(6)],
+        "decode_ticket_pool_misses": [0] * 6,
         "encode_input_capacity": 2,
+        "encode_input_in_use": 0,
         "encode_input_high_water": 2 if graph["encode"] else 0,
+        "encode_input_pool_misses": 0,
+        "native_texture_wrappers": 1,
+        "native_command_buffers": 1,
+        "native_decode_tickets": 1,
+        "native_callback_wrappers": 1,
+        "native_wrapper_creations": {
+            "cv_metal_texture": 1,
+            "metal_command_buffer": 1,
+            "videotoolbox_ticket": 1,
+        },
+        "sources_healthy": graph["active_sources"],
+        "output_width": 5002,
+        "output_height": 2102,
+        "requested_stage": stage,
+        "requested_pacing": "realtime" if pacing == "paced" else "benchmark",
+        "requested_stream_count": stream_count,
+        "requested_preview": True,
+        "requested_encode": True,
+        "resolved_active_sources": graph["active_sources"],
+        "resolved_create_renderer": graph["create_renderer"],
+        "resolved_synthetic_inputs": graph["synthetic_inputs"],
+        "resolved_preview": graph["preview"],
+        "resolved_encode": graph["encode"],
         "resolved_graph": graph,
+        "resolved_config": {
+            "fps_num": 30000,
+            "fps_den": 1001,
+            "decode_surface_pool": 8,
+            "decode_ticket_pool": 16,
+            "render_inflight": 3,
+            "output_pool": 4,
+        },
         "fingerprints_verified": True,
         "asset_sha256": "b" * 64,
         "source_sha256": [f"{i:x}" * 64 for i in range(1, 7)],
@@ -200,6 +264,43 @@ class ValidateMatrixTest(unittest.TestCase):
                 with self.assertRaisesRegex(MatrixValidationError, field):
                     validate_matrix(records, publishable=True)
 
+    def test_rejects_booleans_strings_and_nonfinite_values_in_numeric_fields(self):
+        corruptions = (
+            ("schema", True),
+            ("stream_count", True),
+            ("received", 1.5),
+            ("snapshot_age_spread_ms_p99", "1"),
+            ("gpu_render_ms_p95", float("nan")),
+            ("frame_age_ms_p95", [2, 2, 2, 2, 2, float("inf")]),
+        )
+        for field, value in corruptions:
+            with self.subTest(field=field):
+                record = record_for("full", 1, "paced", final=True)
+                record[field] = value
+                with self.assertRaisesRegex(MatrixValidationError, field):
+                    validate_cell_records([record])
+
+    def test_rejects_wrong_fixed_geometry_codec_cadence_and_nested_graph_types(self):
+        corruptions = (
+            ("output_width", 5001),
+            ("output_height", 2101),
+            ("encode_codec", "h264"),
+            ("resolved_config", {"fps_num": 30, "fps_den": 1, "decode_surface_pool": 8, "decode_ticket_pool": 16, "render_inflight": 3, "output_pool": 4}),
+            ("resolved_graph", {"active_sources": True, "create_renderer": True, "synthetic_inputs": False, "preview": True, "encode": True}),
+        )
+        for field, value in corruptions:
+            with self.subTest(field=field):
+                record = record_for("full", 1, "paced", final=True)
+                record[field] = value
+                with self.assertRaisesRegex(MatrixValidationError, field):
+                    validate_cell_records([record])
+
+    def test_publishable_rejects_any_malformed_input(self):
+        records = complete_matrix()
+        records[-1]["malformed"] = 1
+        with self.assertRaisesRegex(MatrixValidationError, "malformed"):
+            validate_matrix(records, publishable=True)
+
 
 class SummarizeRecordsTest(unittest.TestCase):
     def test_groups_cells_and_aggregates_interval_p50_p95(self):
@@ -266,6 +367,68 @@ class ValidateSoakTest(unittest.TestCase):
         records.append(record_for("full", 6, "paced", final=True, elapsed_s=600.0))
         with self.assertRaisesRegex(MatrixValidationError, "sustained FPS"):
             validate_soak_records(records, warmup_seconds=30, min_fps=29.0)
+
+    def test_uses_cumulative_interval_elapsed_time_for_slopes(self):
+        durations = (0.5, 2.0, 0.5, 2.0, 1.0, 3.0)
+        records = []
+        cumulative = 0.0
+        for duration in durations:
+            cumulative += duration
+            record = record_for("full", 6, "paced", final=False, elapsed_s=duration)
+            record["rss_bytes"] = int(1_000_000 + cumulative * 1_000)
+            record["gpu_allocated_bytes"] = int(2_000_000 + cumulative * 2_000)
+            records.append(record)
+        records.append(record_for("full", 6, "paced", final=True, elapsed_s=cumulative))
+        summary = validate_soak_records(
+            records,
+            warmup_seconds=0,
+            min_fps=29.0,
+            max_rss_slope_bytes_per_minute=100_000,
+            max_gpu_slope_bytes_per_minute=200_000,
+        )
+        self.assertAlmostEqual(summary.rss_slope_bytes_per_minute, 60_000, delta=1)
+        self.assertAlmostEqual(summary.gpu_slope_bytes_per_minute, 120_000, delta=1)
+
+    def test_default_limits_reject_sustained_memory_growth(self):
+        records = []
+        for index in range(40):
+            record = record_for("full", 6, "paced", final=False, elapsed_s=1.0)
+            record["rss_bytes"] += index * 2_000_000
+            record["gpu_allocated_bytes"] += index * 2_000_000
+            records.append(record)
+        records.append(record_for("full", 6, "paced", final=True, elapsed_s=40.0))
+        with self.assertRaisesRegex(MatrixValidationError, "slope"):
+            validate_soak_records(records, warmup_seconds=5, min_fps=29.0)
+
+    def test_rejects_debug_unverified_and_mixed_soak_identity(self):
+        for field, value in (
+            ("build_type", "Debug"),
+            ("fingerprints_verified", False),
+            ("run_id", "mixed-run"),
+        ):
+            with self.subTest(field=field):
+                records = [
+                    record_for("full", 6, "paced", final=False, elapsed_s=1.0)
+                    for _ in range(8)
+                ]
+                records.append(record_for("full", 6, "paced", final=True, elapsed_s=8.0))
+                records[3][field] = value
+                with self.assertRaisesRegex(MatrixValidationError, field):
+                    validate_soak_records(records, warmup_seconds=1, min_fps=29.0)
+
+    def test_rejects_nonfinite_slope_limits(self):
+        records = [
+            record_for("full", 6, "paced", final=False, elapsed_s=1.0)
+            for _ in range(8)
+        ]
+        records.append(record_for("full", 6, "paced", final=True, elapsed_s=8.0))
+        with self.assertRaisesRegex(MatrixValidationError, "max_rss"):
+            validate_soak_records(
+                records,
+                warmup_seconds=1,
+                min_fps=29.0,
+                max_rss_slope_bytes_per_minute=float("inf"),
+            )
 
 
 if __name__ == "__main__":

@@ -54,32 +54,83 @@ REQUIRED_FIELDS = {
     "frame_age_ms_p95",
     "frame_age_ms_p99",
     "snapshot_age_spread_ms_p99",
+    "camera_received",
+    "camera_decoded",
+    "camera_published",
+    "mailbox_overwrites",
+    "frame_reuses",
     "received",
     "decoded",
     "published",
+    "overwritten",
+    "reused",
+    "malformed",
+    "reconnects",
     "render_submissions",
     "render_completions",
+    "render_drops",
+    "render_active_ns",
+    "render_first_submit_ns",
+    "render_last_completion_ns",
+    "render_completion_interval_ns",
     "preview_submissions",
     "preview_completions",
+    "preview_drops",
     "preview_presents",
     "encode_submissions",
     "encode_completions",
+    "encode_bytes",
+    "encode_drops",
+    "encode_rejected_frames",
     "encode_callback_errors",
+    "encode_first_submit_ns",
+    "encode_last_completion_ns",
     "encode_using_hardware",
     "encode_drain_timeouts",
+    "encode_codec",
+    "pool_exhaustion",
     "decoded_pixel_host_copies",
     "application_owned_frame_allocations",
     "render_inflight_capacity",
+    "render_inflight_in_use",
     "render_inflight_high_water",
+    "render_inflight_pool_misses",
     "render_output_capacity",
+    "render_output_in_use",
     "render_output_high_water",
+    "render_output_pool_misses",
     "decode_surface_pool_capacity",
+    "decode_surface_pool_in_use",
     "decode_surface_pool_high_water",
+    "decode_surface_pool_misses",
     "decode_ticket_pool_capacity",
+    "decode_ticket_pool_in_use",
     "decode_ticket_pool_high_water",
+    "decode_ticket_pool_misses",
     "encode_input_capacity",
+    "encode_input_in_use",
     "encode_input_high_water",
+    "encode_input_pool_misses",
+    "native_texture_wrappers",
+    "native_command_buffers",
+    "native_decode_tickets",
+    "native_callback_wrappers",
+    "native_wrapper_creations",
+    "sources_healthy",
+    "output_width",
+    "output_height",
+    "requested_stage",
+    "requested_pacing",
+    "requested_stream_count",
+    "requested_preview",
+    "requested_encode",
+    "resolved_active_sources",
+    "resolved_create_renderer",
+    "resolved_synthetic_inputs",
+    "resolved_preview",
+    "resolved_encode",
     "resolved_graph",
+    "resolved_config",
     "fingerprints_verified",
     "asset_sha256",
     "source_sha256",
@@ -87,6 +138,47 @@ REQUIRED_FIELDS = {
     "rss_bytes",
     "gpu_allocated_bytes",
 }
+
+NONNEGATIVE_INTEGER_FIELDS = {
+    "stream_count", "received", "decoded", "published", "overwritten",
+    "reused", "malformed", "reconnects", "render_submissions",
+    "render_completions", "render_drops", "render_active_ns",
+    "render_first_submit_ns", "render_last_completion_ns",
+    "render_completion_interval_ns", "render_inflight_capacity",
+    "render_inflight_in_use", "render_inflight_high_water",
+    "render_inflight_pool_misses", "render_output_capacity",
+    "render_output_in_use", "render_output_high_water",
+    "render_output_pool_misses", "preview_submissions",
+    "preview_completions", "preview_drops", "preview_presents",
+    "encode_submissions", "encode_completions", "encode_bytes",
+    "encode_drops", "encode_rejected_frames", "encode_callback_errors",
+    "encode_first_submit_ns", "encode_last_completion_ns",
+    "encode_input_capacity", "encode_input_in_use", "encode_input_high_water",
+    "encode_input_pool_misses", "encode_drain_timeouts", "pool_exhaustion",
+    "decoded_pixel_host_copies", "native_texture_wrappers",
+    "native_command_buffers", "native_decode_tickets",
+    "native_callback_wrappers", "application_owned_frame_allocations",
+    "sources_healthy", "output_width", "output_height",
+    "requested_stream_count", "resolved_active_sources", "rss_bytes",
+    "gpu_allocated_bytes",
+}
+
+SIX_INTEGER_ARRAY_FIELDS = {
+    "camera_received", "camera_decoded", "camera_published",
+    "mailbox_overwrites", "frame_reuses", "decode_surface_pool_capacity",
+    "decode_surface_pool_in_use", "decode_surface_pool_high_water",
+    "decode_surface_pool_misses", "decode_ticket_pool_capacity",
+    "decode_ticket_pool_in_use", "decode_ticket_pool_high_water",
+    "decode_ticket_pool_misses",
+}
+
+IDENTITY_FIELDS = (
+    "schema", "run_id", "backend", "build_type", "compiler", "git_sha",
+    "asset_sha256", "source_sha256", "machine",
+)
+
+DEFAULT_MAX_RSS_SLOPE_BYTES_PER_MINUTE = 64 * 1024 * 1024
+DEFAULT_MAX_GPU_SLOPE_BYTES_PER_MINUTE = 32 * 1024 * 1024
 
 
 class MatrixValidationError(ValueError):
@@ -162,6 +254,22 @@ def _require_nonnegative_number(record: dict, field: str, context: str) -> float
     return float(value)
 
 
+def _require_nonnegative_integer(record: dict, field: str, context: str) -> int:
+    value = record[field]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise MatrixValidationError(f"{context}: {field} must be a nonnegative integer")
+    return value
+
+
+def _require_six_integer_array(record: dict, field: str, context: str) -> list[int]:
+    values = record[field]
+    if not isinstance(values, list) or len(values) != 6:
+        raise MatrixValidationError(f"{context}: {field} must be a six-element integer array")
+    if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in values):
+        raise MatrixValidationError(f"{context}: {field} must contain nonnegative integers")
+    return values
+
+
 def _validate_capacity(record: dict, capacity: str, high_water: str, context: str) -> None:
     capacities = record[capacity]
     high_waters = record[high_water]
@@ -183,20 +291,20 @@ def _validate_record(record: dict, index: int) -> None:
     missing = sorted(REQUIRED_FIELDS - record.keys())
     if missing:
         raise MatrixValidationError(f"{context}: missing required field {missing[0]}")
-    if record["schema"] != 1:
+    if isinstance(record["schema"], bool) or not isinstance(record["schema"], int) or record["schema"] != 1:
         raise MatrixValidationError(f"{context}: schema must be 1")
-    if record["backend"] != "metal":
+    if not isinstance(record["backend"], str) or record["backend"] != "metal":
         raise MatrixValidationError(f"{context}: backend must be metal")
     if not isinstance(record["final"], bool):
         raise MatrixValidationError(f"{context}: final must be boolean")
-    if record["stage"] not in STAGES:
+    if not isinstance(record["stage"], str) or record["stage"] not in STAGES:
         raise MatrixValidationError(f"{context}: unknown stage {record['stage']!r}")
-    if record["stream_count"] not in STREAM_COUNTS:
+    if isinstance(record["stream_count"], bool) or not isinstance(record["stream_count"], int) or record["stream_count"] not in STREAM_COUNTS:
         raise MatrixValidationError(f"{context}: invalid stream_count")
-    if record["pacing"] not in PACINGS:
+    if not isinstance(record["pacing"], str) or record["pacing"] not in PACINGS:
         raise MatrixValidationError(f"{context}: invalid pacing")
     expected_mode = "realtime" if record["pacing"] == "paced" else "benchmark"
-    if record["mode"] != expected_mode:
+    if not isinstance(record["mode"], str) or record["mode"] != expected_mode:
         raise MatrixValidationError(f"{context}: mode/pacing mismatch")
     if not isinstance(record["run_id"], str) or not record["run_id"]:
         raise MatrixValidationError(f"{context}: run_id must be nonempty")
@@ -206,12 +314,16 @@ def _validate_record(record: dict, index: int) -> None:
         raise MatrixValidationError(f"{context}: build_type must be nonempty")
     if not isinstance(record["compiler"], str) or not record["compiler"]:
         raise MatrixValidationError(f"{context}: compiler must be nonempty")
+    if not isinstance(record["encode_using_hardware"], bool):
+        raise MatrixValidationError(f"{context}: encode_using_hardware must be boolean")
+    if not isinstance(record["encode_codec"], str) or record["encode_codec"] != "hevc":
+        raise MatrixValidationError(f"{context}: encode_codec must be hevc")
+    for field in NONNEGATIVE_INTEGER_FIELDS:
+        _require_nonnegative_integer(record, field, context)
     for field in (
         "elapsed_s", "render_fps", "preview_fps", "encode_fps",
-        "gpu_render_ms_p50", "gpu_render_ms_p95", "rss_bytes",
-        "gpu_allocated_bytes", "decoded_pixel_host_copies",
-        "application_owned_frame_allocations", "encode_callback_errors",
-        "encode_drain_timeouts",
+        "gpu_render_ms_p50", "gpu_render_ms_p95",
+        "snapshot_age_spread_ms_p99",
     ):
         _require_nonnegative_number(record, field, context)
     for field in ("frame_age_ms_p50", "frame_age_ms_p95", "frame_age_ms_p99"):
@@ -219,8 +331,10 @@ def _validate_record(record: dict, index: int) -> None:
         if not isinstance(values, list) or len(values) != 6:
             raise MatrixValidationError(f"{context}: {field} must be a six-element array")
         for value in values:
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
                 raise MatrixValidationError(f"{context}: {field} contains an invalid value")
+    for field in SIX_INTEGER_ARRAY_FIELDS:
+        _require_six_integer_array(record, field, context)
     if record["decoded_pixel_host_copies"] != 0:
         raise MatrixValidationError(f"{context}: decoded_pixel_host_copies must be zero")
     if record["application_owned_frame_allocations"] != 0:
@@ -231,15 +345,65 @@ def _validate_record(record: dict, index: int) -> None:
         raise MatrixValidationError(f"{context}: encode_drain_timeouts must be zero")
     for capacity, high_water in (
         ("render_inflight_capacity", "render_inflight_high_water"),
+        ("render_inflight_capacity", "render_inflight_in_use"),
         ("render_output_capacity", "render_output_high_water"),
+        ("render_output_capacity", "render_output_in_use"),
         ("decode_surface_pool_capacity", "decode_surface_pool_high_water"),
+        ("decode_surface_pool_capacity", "decode_surface_pool_in_use"),
         ("decode_ticket_pool_capacity", "decode_ticket_pool_high_water"),
+        ("decode_ticket_pool_capacity", "decode_ticket_pool_in_use"),
         ("encode_input_capacity", "encode_input_high_water"),
+        ("encode_input_capacity", "encode_input_in_use"),
     ):
         _validate_capacity(record, capacity, high_water, context)
     expected_graph = _expected_graph(record["stage"], record["stream_count"])
-    if record["resolved_graph"] != expected_graph:
+    graph = record["resolved_graph"]
+    if not isinstance(graph, dict) or set(graph) != set(expected_graph):
+        raise MatrixValidationError(f"{context}: resolved_graph has invalid fields")
+    if isinstance(graph["active_sources"], bool) or not isinstance(graph["active_sources"], int):
+        raise MatrixValidationError(f"{context}: resolved_graph active_sources must be integer")
+    if any(not isinstance(graph[field], bool) for field in ("create_renderer", "synthetic_inputs", "preview", "encode")):
+        raise MatrixValidationError(f"{context}: resolved_graph flags must be boolean")
+    if graph != expected_graph:
         raise MatrixValidationError(f"{context}: resolved_graph violates stage invariant")
+    resolved_config = record["resolved_config"]
+    expected_config_fields = {
+        "fps_num", "fps_den", "decode_surface_pool", "decode_ticket_pool",
+        "render_inflight", "output_pool",
+    }
+    if not isinstance(resolved_config, dict) or set(resolved_config) != expected_config_fields:
+        raise MatrixValidationError(f"{context}: resolved_config has invalid fields")
+    if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in resolved_config.values()):
+        raise MatrixValidationError(f"{context}: resolved_config values must be positive integers")
+    if resolved_config["fps_num"] != 30000 or resolved_config["fps_den"] != 1001:
+        raise MatrixValidationError(f"{context}: resolved_config cadence must be 30000/1001")
+    if resolved_config["render_inflight"] != record["render_inflight_capacity"] or resolved_config["output_pool"] != record["render_output_capacity"]:
+        raise MatrixValidationError(f"{context}: resolved_config capacity mismatch")
+    if record["output_width"] != 5002:
+        raise MatrixValidationError(f"{context}: output_width must be 5002")
+    if record["output_height"] != 2102:
+        raise MatrixValidationError(f"{context}: output_height must be 2102")
+    if record["requested_stage"] != record["stage"] or not isinstance(record["requested_stage"], str):
+        raise MatrixValidationError(f"{context}: requested_stage mismatch")
+    if record["requested_pacing"] != record["mode"] or not isinstance(record["requested_pacing"], str):
+        raise MatrixValidationError(f"{context}: requested_pacing mismatch")
+    if record["requested_stream_count"] != record["stream_count"]:
+        raise MatrixValidationError(f"{context}: requested_stream_count mismatch")
+    if not isinstance(record["requested_preview"], bool) or not isinstance(record["requested_encode"], bool):
+        raise MatrixValidationError(f"{context}: requested preview/encode flags must be boolean")
+    flat_resolved = {
+        "active_sources": record["resolved_active_sources"],
+        "create_renderer": record["resolved_create_renderer"],
+        "synthetic_inputs": record["resolved_synthetic_inputs"],
+        "preview": record["resolved_preview"],
+        "encode": record["resolved_encode"],
+    }
+    if isinstance(flat_resolved["active_sources"], bool) or not isinstance(flat_resolved["active_sources"], int):
+        raise MatrixValidationError(f"{context}: resolved_active_sources must be integer")
+    if any(not isinstance(flat_resolved[field], bool) for field in ("create_renderer", "synthetic_inputs", "preview", "encode")):
+        raise MatrixValidationError(f"{context}: resolved flat flags must be boolean")
+    if flat_resolved != graph:
+        raise MatrixValidationError(f"{context}: resolved flat fields mismatch resolved_graph")
     if not isinstance(record["fingerprints_verified"], bool):
         raise MatrixValidationError(f"{context}: fingerprints_verified must be boolean")
     if not isinstance(record["asset_sha256"], str) or HEX_64.fullmatch(record["asset_sha256"]) is None:
@@ -250,8 +414,22 @@ def _validate_record(record: dict, index: int) -> None:
     ):
         raise MatrixValidationError(f"{context}: source_sha256 must contain six SHA-256 values")
     machine = record["machine"]
-    if not isinstance(machine, dict) or any(not machine.get(key) for key in ("hostname", "os", "arch")):
+    if not isinstance(machine, dict) or set(machine) != {"hostname", "os", "arch"} or any(
+        not isinstance(machine[key], str) or not machine[key] for key in machine
+    ):
         raise MatrixValidationError(f"{context}: machine identity is incomplete")
+    wrappers = record["native_wrapper_creations"]
+    wrapper_fields = {"cv_metal_texture", "metal_command_buffer", "videotoolbox_ticket"}
+    if not isinstance(wrappers, dict) or set(wrappers) != wrapper_fields or any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in wrappers.values()
+    ):
+        raise MatrixValidationError(f"{context}: native_wrapper_creations is invalid")
+    if wrappers != {
+        "cv_metal_texture": record["native_texture_wrappers"],
+        "metal_command_buffer": record["native_command_buffers"],
+        "videotoolbox_ticket": record["native_decode_tickets"],
+    }:
+        raise MatrixValidationError(f"{context}: native_wrapper_creations mismatch")
 
 
 def _validate_final_stage_work(record: dict) -> None:
@@ -267,7 +445,11 @@ def _validate_final_stage_work(record: dict) -> None:
     if stage == "decode-only":
         if record["decoded"] <= 0:
             raise MatrixValidationError(f"{context}: decode-only performed no decode work")
-        if any(record[field] != 0 for field in ("render_submissions", "preview_submissions", "encode_submissions")):
+        if any(record[field] != 0 for field in (
+            "render_submissions", "render_completions", "preview_submissions",
+            "preview_completions", "preview_presents", "encode_submissions",
+            "encode_completions",
+        )):
             raise MatrixValidationError(f"{context}: decode-only executed an output stage")
     elif stage == "render-only":
         if any(record[field] != 0 for field in ("received", "decoded", "published")):
@@ -287,8 +469,25 @@ def _validate_final_stage_work(record: dict) -> None:
             raise MatrixValidationError(f"{context}: encode work is missing")
         if record["encode_using_hardware"] is not True:
             raise MatrixValidationError(f"{context}: encode_using_hardware must be true")
-    elif record["encode_submissions"] != 0 or record["encode_completions"] != 0:
+    elif any(record[field] != 0 for field in (
+        "encode_submissions", "encode_completions", "encode_bytes",
+        "encode_drops", "encode_rejected_frames", "encode_callback_errors",
+        "encode_drain_timeouts",
+    )) or record["encode_using_hardware"] is not False:
         raise MatrixValidationError(f"{context}: unexpected encode work")
+
+
+def _validate_uniform_identity(
+    records: list[dict], *, require_release: bool, require_verified: bool
+) -> None:
+    baseline = records[0]
+    for field in IDENTITY_FIELDS:
+        if any(record[field] != baseline[field] for record in records[1:]):
+            raise MatrixValidationError(f"mixed {field} identity in records")
+    if require_release and baseline["build_type"] != "Release":
+        raise MatrixValidationError("build_type must be Release")
+    if require_verified and not all(record["fingerprints_verified"] is True for record in records):
+        raise MatrixValidationError("fingerprints_verified must be true")
 
 
 def validate_cell_records(
@@ -298,6 +497,7 @@ def validate_cell_records(
         raise MatrixValidationError("cell contains no records")
     for index, record in enumerate(records, 1):
         _validate_record(record, index)
+    _validate_uniform_identity(records, require_release=False, require_verified=False)
     cells = {_cell(record) for record in records}
     if len(cells) != 1:
         raise MatrixValidationError(f"cell file contains mixed cells: {sorted(cells)}")
@@ -317,14 +517,10 @@ def validate_matrix(records: list[dict], publishable: bool) -> None:
     for index, record in enumerate(records, 1):
         _validate_record(record, index)
 
-    identity_fields = (
-        "schema", "run_id", "backend", "build_type", "compiler", "git_sha",
-        "asset_sha256", "source_sha256", "machine",
-    )
     baseline = records[0]
-    for field in identity_fields:
-        if any(record[field] != baseline[field] for record in records[1:]):
-            raise MatrixValidationError(f"mixed {field} identity in matrix")
+    _validate_uniform_identity(
+        records, require_release=publishable, require_verified=publishable
+    )
 
     records_by_cell: dict[tuple[str, int, str], list[dict]] = {}
     for record in records:
@@ -344,10 +540,8 @@ def validate_matrix(records: list[dict], publishable: bool) -> None:
         _validate_final_stage_work(finals[0])
 
     if publishable:
-        if baseline["build_type"] != "Release":
-            raise MatrixValidationError("publishable build_type must be Release")
-        if not all(record["fingerprints_verified"] is True for record in records):
-            raise MatrixValidationError("publishable fingerprints_verified must be true")
+        if any(record["malformed"] != 0 for record in records):
+            raise MatrixValidationError("publishable malformed input count must be zero")
         for cell, cell_records in records_by_cell.items():
             final = next(record for record in cell_records if record["final"])
             if final["elapsed_s"] < 15.0:
@@ -356,13 +550,15 @@ def validate_matrix(records: list[dict], publishable: bool) -> None:
                 raise MatrixValidationError(f"publishable cell {cell} has no interval telemetry")
 
 
-def _linear_slope_per_minute(values: Sequence[float]) -> float:
+def _linear_slope_per_minute(times_s: Sequence[float], values: Sequence[float]) -> float:
+    if len(times_s) != len(values):
+        raise MatrixValidationError("slope time/value sample counts differ")
     if len(values) < 2:
         return 0.0
-    mean_x = (len(values) - 1) / 2.0
+    mean_x = sum(times_s) / len(times_s)
     mean_y = sum(values) / len(values)
-    numerator = sum((index - mean_x) * (value - mean_y) for index, value in enumerate(values))
-    denominator = sum((index - mean_x) ** 2 for index in range(len(values)))
+    numerator = sum((time_s - mean_x) * (value - mean_y) for time_s, value in zip(times_s, values))
+    denominator = sum((time_s - mean_x) ** 2 for time_s in times_s)
     return 0.0 if denominator == 0 else numerator / denominator * 60.0
 
 
@@ -371,18 +567,35 @@ def validate_soak_records(
     *,
     warmup_seconds: int,
     min_fps: float,
-    max_rss_slope_bytes_per_minute: float | None = None,
-    max_gpu_slope_bytes_per_minute: float | None = None,
+    max_rss_slope_bytes_per_minute: float = DEFAULT_MAX_RSS_SLOPE_BYTES_PER_MINUTE,
+    max_gpu_slope_bytes_per_minute: float = DEFAULT_MAX_GPU_SLOPE_BYTES_PER_MINUTE,
 ) -> SoakSummary:
     if warmup_seconds < 0:
         raise MatrixValidationError("warmup_seconds must be nonnegative")
     if not math.isfinite(min_fps) or min_fps <= 0:
         raise MatrixValidationError("min_fps must be positive")
+    for name, value in (
+        ("max_rss_slope_bytes_per_minute", max_rss_slope_bytes_per_minute),
+        ("max_gpu_slope_bytes_per_minute", max_gpu_slope_bytes_per_minute),
+    ):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise MatrixValidationError(f"{name} must be a finite nonnegative number")
     validate_cell_records(records, ("full", 6, "paced"))
+    _validate_uniform_identity(records, require_release=True, require_verified=True)
     intervals = [record for record in records if not record["final"]]
-    if len(intervals) <= warmup_seconds:
+    cumulative_s = 0.0
+    timed_intervals: list[tuple[float, dict]] = []
+    for record in intervals:
+        duration_s = float(record["elapsed_s"])
+        if duration_s <= 0:
+            raise MatrixValidationError("soak interval elapsed_s must be positive")
+        cumulative_s += duration_s
+        if cumulative_s > warmup_seconds:
+            timed_intervals.append((cumulative_s, record))
+    if not timed_intervals:
         raise MatrixValidationError("soak has no post-warmup interval telemetry")
-    post_warmup = intervals[warmup_seconds:]
+    times_s = [time_s for time_s, _ in timed_intervals]
+    post_warmup = [record for _, record in timed_intervals]
     post_warmup_fps = [_throughput(record) for record in post_warmup]
     low_streak = 0
     for fps in post_warmup_fps:
@@ -391,15 +604,17 @@ def validate_soak_records(
             raise MatrixValidationError(
                 f"sustained FPS below {min_fps:.3f} for five consecutive intervals"
             )
-    rss_slope = _linear_slope_per_minute([float(record["rss_bytes"]) for record in post_warmup])
-    gpu_slope = _linear_slope_per_minute(
-        [float(record["gpu_allocated_bytes"]) for record in post_warmup]
+    rss_slope = _linear_slope_per_minute(
+        times_s, [float(record["rss_bytes"]) for record in post_warmup]
     )
-    if max_rss_slope_bytes_per_minute is not None and rss_slope > max_rss_slope_bytes_per_minute:
+    gpu_slope = _linear_slope_per_minute(
+        times_s, [float(record["gpu_allocated_bytes"]) for record in post_warmup]
+    )
+    if rss_slope > max_rss_slope_bytes_per_minute:
         raise MatrixValidationError(
             f"RSS slope {rss_slope:.3f} exceeds {max_rss_slope_bytes_per_minute:.3f} bytes/minute"
         )
-    if max_gpu_slope_bytes_per_minute is not None and gpu_slope > max_gpu_slope_bytes_per_minute:
+    if gpu_slope > max_gpu_slope_bytes_per_minute:
         raise MatrixValidationError(
             f"GPU allocation slope {gpu_slope:.3f} exceeds {max_gpu_slope_bytes_per_minute:.3f} bytes/minute"
         )
