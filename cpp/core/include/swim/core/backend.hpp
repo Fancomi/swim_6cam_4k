@@ -13,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stop_token>
 #include <string>
 #include <string_view>
@@ -22,7 +23,7 @@ namespace swim::core {
 struct BenchmarkGraph;
 
 struct BackendRuntimeSample final {
-  std::uint64_t gpu_allocated_bytes{};
+  std::optional<std::uint64_t> gpu_allocated_bytes;
 };
 
 class ISource {

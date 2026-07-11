@@ -167,9 +167,14 @@ class RuntimeFinalizer final {
       signal_monitor.join();
     }
     swim::core::stop_sources(sources_);
-    reporter_.stop_intervals();
-
     std::exception_ptr cleanup_error = render_error;
+    try {
+      reporter_.stop_intervals();
+    } catch (...) {
+      if (!cleanup_error) {
+        cleanup_error = std::current_exception();
+      }
+    }
     if (renderer_ != nullptr) {
       try {
         renderer_->drain();
@@ -206,8 +211,15 @@ class RuntimeFinalizer final {
       cleanup_error = std::make_exception_ptr(
           std::runtime_error("one or more source lanes failed"));
     }
+    try {
+      reporter_.write_final(start_state_.healthy_count(failed));
+    } catch (...) {
+      if (!cleanup_error) {
+        cleanup_error = std::current_exception();
+      }
+    }
+    reporter_.unbind_backend();
     finalized_ = true;
-    reporter_.write_final(start_state_.healthy_count(failed));
     if (cleanup_error) {
       std::rethrow_exception(cleanup_error);
     }
@@ -298,12 +310,19 @@ int run_runtime(const swim::core::AppConfig& config,
     const auto primary_error = std::current_exception();
     try {
       reporter.stop_intervals();
+    } catch (const std::exception& cleanup_error) {
+      std::cerr << "runtime cleanup error: " << cleanup_error.what() << '\n';
+    } catch (...) {
+      std::cerr << "runtime cleanup error: unknown failure\n";
+    }
+    try {
       reporter.write_final(start_state.started_count());
     } catch (const std::exception& cleanup_error) {
       std::cerr << "runtime cleanup error: " << cleanup_error.what() << '\n';
     } catch (...) {
       std::cerr << "runtime cleanup error: unknown failure\n";
     }
+    reporter.unbind_backend();
     std::rethrow_exception(primary_error);
   }
   return 0;

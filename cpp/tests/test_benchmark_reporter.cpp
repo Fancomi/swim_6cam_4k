@@ -4,9 +4,14 @@
 #include <swim/core/benchmark_stage.hpp>
 
 #include <array>
+#include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <string>
+#include <thread>
+#include <unistd.h>
 
 using namespace std::chrono_literals;
 
@@ -152,4 +157,111 @@ TEST_CASE(schema_keeps_unverified_hash_keys_and_final_rates_use_completion_span)
   CHECK(line.find(
             "\"source_sha256\":[null,null,null,null,null,null]") !=
         std::string::npos);
+}
+
+TEST_CASE(schema_reports_unavailable_process_and_gpu_resources_as_null) {
+  const auto line = swim::core::serialize_benchmark_record(
+      reporter_metadata(), {}, {}, {}, 1.0, true, 0, std::nullopt);
+  CHECK(line.find("\"gpu_allocated_bytes\":null") != std::string::npos);
+  CHECK(line.find("\"rss_bytes\":null") != std::string::npos);
+
+  const auto measured_zero = swim::core::serialize_benchmark_record(
+      reporter_metadata(), {}, {}, {0}, 1.0, true, 0,
+      std::optional<std::uint64_t>{0});
+  CHECK(measured_zero.find("\"gpu_allocated_bytes\":0") !=
+        std::string::npos);
+  CHECK(measured_zero.find("\"rss_bytes\":0") != std::string::npos);
+}
+
+TEST_CASE(background_partial_write_propagates_and_final_is_attempted_once) {
+  std::filesystem::remove("/tmp/swim_benchmark_reporter_test.jsonl");
+  swim::core::RuntimeCounters counters;
+  std::atomic_uint32_t writes{};
+  std::string partial;
+  auto writer = [&](int, const void* bytes, std::size_t size) -> std::ptrdiff_t {
+    const auto call = writes.fetch_add(1, std::memory_order_relaxed);
+    if (call == 0) {
+      partial.assign(static_cast<const char*>(bytes), size - 1);
+      return static_cast<std::ptrdiff_t>(size - 1);
+    }
+    return static_cast<std::ptrdiff_t>(size);
+  };
+  swim::core::BenchmarkReporter reporter{reporter_metadata(), counters,
+                                          writer};
+  reporter.start();
+  const auto deadline = std::chrono::steady_clock::now() + 2s;
+  while (writes.load(std::memory_order_relaxed) == 0 &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(1ms);
+  }
+
+  CHECK_EQ(writes.load(std::memory_order_relaxed), 1u);
+  CHECK(!partial.ends_with('\n'));
+  CHECK_THROWS_WITH(reporter.stop_intervals(),
+                    "benchmark metrics write was partial");
+  CHECK_THROWS_WITH(reporter.write_final(0),
+                    "benchmark metrics write was partial");
+  CHECK_EQ(writes.load(std::memory_order_relaxed), 1u);
+  reporter.write_final(0);
+  CHECK_EQ(writes.load(std::memory_order_relaxed), 1u);
+}
+
+TEST_CASE(partial_file_write_is_rolled_back_before_output_is_poisoned) {
+  const auto path = std::filesystem::path{
+      "/tmp/swim_benchmark_reporter_partial_test.jsonl"};
+  std::filesystem::remove(path);
+  auto metadata = reporter_metadata();
+  metadata.config.metrics_path = path;
+  swim::core::RuntimeCounters counters;
+  auto partial_writer = [](int fd, const void* bytes,
+                           std::size_t size) -> std::ptrdiff_t {
+    return ::write(fd, bytes, size - 1);
+  };
+  {
+    swim::core::BenchmarkReporter reporter{std::move(metadata), counters,
+                                            partial_writer};
+    CHECK_THROWS_WITH(reporter.write_interval_now(),
+                      "benchmark metrics write was partial");
+    CHECK_THROWS_WITH(reporter.write_final(0),
+                      "benchmark metrics write was partial");
+  }
+  CHECK_EQ(std::filesystem::file_size(path), 0u);
+}
+
+TEST_CASE(negative_final_write_is_propagated_and_never_retried) {
+  std::filesystem::remove("/tmp/swim_benchmark_reporter_test.jsonl");
+  swim::core::RuntimeCounters counters;
+  std::uint32_t writes = 0;
+  auto failed_writer = [&](int, const void*, std::size_t) -> std::ptrdiff_t {
+    ++writes;
+    errno = EIO;
+    return -1;
+  };
+  swim::core::BenchmarkReporter reporter{reporter_metadata(), counters,
+                                          failed_writer};
+  CHECK_THROWS_WITH(reporter.write_final(0),
+                    "benchmark metrics write failed: " +
+                        std::to_string(EIO));
+  CHECK_EQ(writes, 1u);
+  reporter.write_final(0);
+  CHECK_EQ(writes, 1u);
+}
+
+TEST_CASE(reporter_can_drop_backend_borrow_before_backend_destruction) {
+  std::filesystem::remove("/tmp/swim_benchmark_reporter_test.jsonl");
+  swim::core::RuntimeCounters counters;
+  std::uint32_t writes = 0;
+  auto writer = [&](int, const void*, std::size_t size) -> std::ptrdiff_t {
+    ++writes;
+    return static_cast<std::ptrdiff_t>(size);
+  };
+  swim::core::BenchmarkReporter reporter{reporter_metadata(), counters,
+                                          writer};
+  {
+    SampleBackend backend;
+    reporter.bind_backend(backend);
+    reporter.unbind_backend();
+  }
+  reporter.write_final(0);
+  CHECK_EQ(writes, 1u);
 }

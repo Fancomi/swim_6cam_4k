@@ -126,7 +126,7 @@ std::string default_run_id() {
          std::string(build_info::git_sha.substr(0, short_length));
 }
 
-std::uint64_t resident_bytes() noexcept {
+std::optional<std::uint64_t> resident_bytes() noexcept {
 #if defined(__APPLE__)
   rusage_info_v2 info{};
   if (proc_pid_rusage(getpid(), RUSAGE_INFO_V2,
@@ -134,7 +134,7 @@ std::uint64_t resident_bytes() noexcept {
     return info.ri_resident_size;
   }
 #endif
-  return 0;
+  return std::nullopt;
 }
 
 std::array<std::string, 3> machine_identity() {
@@ -175,7 +175,7 @@ std::string serialize_benchmark_record(
     double elapsed_seconds,
     bool final,
     std::size_t healthy_sources,
-    std::uint64_t rss_bytes) {
+    std::optional<std::uint64_t> rss_bytes) {
   const auto render_completions = event_value(
       current.render_completions, previous.render_completions, final);
   const auto preview_completions = event_value(
@@ -393,9 +393,19 @@ std::string serialize_benchmark_record(
        << "\"cv_metal_texture\":" << texture_wrappers
        << ",\"metal_command_buffer\":" << command_buffers
        << ",\"videotoolbox_ticket\":" << decode_tickets << '}'
-       << ",\"rss_bytes\":" << rss_bytes
-       << ",\"gpu_allocated_bytes\":" << backend.gpu_allocated_bytes
-       << ",\"sources_healthy\":" << healthy_sources
+       << ",\"rss_bytes\":";
+  if (rss_bytes.has_value()) {
+    line << *rss_bytes;
+  } else {
+    line << "null";
+  }
+  line << ",\"gpu_allocated_bytes\":";
+  if (backend.gpu_allocated_bytes.has_value()) {
+    line << *backend.gpu_allocated_bytes;
+  } else {
+    line << "null";
+  }
+  line << ",\"sources_healthy\":" << healthy_sources
        << ",\"output_width\":" << metadata.output_width
        << ",\"output_height\":" << metadata.output_height;
 
@@ -478,8 +488,12 @@ BenchmarkReporter::BenchmarkReporter(BenchmarkReporterMetadata metadata,
 }
 
 BenchmarkReporter::~BenchmarkReporter() {
-  stop_intervals();
-  if (!final_written_) {
+  join_intervals();
+  // The backend is borrowed and may already have been destroyed during stack
+  // unwinding. Destructor fallback records therefore use unavailable/null GPU
+  // telemetry instead of sampling a possibly stale object.
+  backend_ = nullptr;
+  if (!final_attempted_) {
     try {
       write_final(0);
     } catch (...) {
@@ -493,6 +507,8 @@ BenchmarkReporter::~BenchmarkReporter() {
 void BenchmarkReporter::bind_backend(const IBackend& backend) noexcept {
   backend_ = &backend;
 }
+
+void BenchmarkReporter::unbind_backend() noexcept { backend_ = nullptr; }
 
 void BenchmarkReporter::start() {
   if (started_) {
@@ -513,6 +529,7 @@ void BenchmarkReporter::start() {
       try {
         write_interval_now();
       } catch (...) {
+        remember_background_error(std::current_exception());
         return;
       }
       lock.lock();
@@ -521,7 +538,7 @@ void BenchmarkReporter::start() {
   });
 }
 
-void BenchmarkReporter::stop_intervals() noexcept {
+void BenchmarkReporter::join_intervals() noexcept {
   if (thread_.joinable()) {
     thread_.request_stop();
     wait_condition_.notify_all();
@@ -529,9 +546,19 @@ void BenchmarkReporter::stop_intervals() noexcept {
   }
 }
 
+void BenchmarkReporter::stop_intervals() {
+  join_intervals();
+  if (const auto error = background_error()) {
+    std::rethrow_exception(error);
+  }
+}
+
 void BenchmarkReporter::write_interval_now() {
-  if (final_written_) {
+  if (final_attempted_) {
     throw std::logic_error("benchmark final record already written");
+  }
+  if (const auto error = background_error()) {
+    std::rethrow_exception(error);
   }
   const auto now = std::chrono::steady_clock::now();
   const auto current = metrics_.sample_totals();
@@ -544,10 +571,14 @@ void BenchmarkReporter::write_interval_now() {
 }
 
 void BenchmarkReporter::write_final(std::size_t healthy_sources) {
-  if (final_written_) {
+  if (final_attempted_) {
     return;
   }
-  stop_intervals();
+  join_intervals();
+  final_attempted_ = true;
+  if (const auto error = background_error()) {
+    std::rethrow_exception(error);
+  }
   const auto now = std::chrono::steady_clock::now();
   const auto current = metrics_.sample_totals();
   const auto backend = backend_ == nullptr ? BackendRuntimeSample{}
@@ -555,7 +586,22 @@ void BenchmarkReporter::write_final(std::size_t healthy_sources) {
   const auto elapsed = std::chrono::duration<double>(now - started_at_).count();
   write_record(current, *previous_, backend, elapsed, true,
                healthy_sources);
-  final_written_ = true;
+  if (const auto error = background_error()) {
+    std::rethrow_exception(error);
+  }
+}
+
+void BenchmarkReporter::remember_background_error(
+    std::exception_ptr error) noexcept {
+  std::lock_guard lock(error_mutex_);
+  if (!background_error_) {
+    background_error_ = std::move(error);
+  }
+}
+
+std::exception_ptr BenchmarkReporter::background_error() const noexcept {
+  std::lock_guard lock(error_mutex_);
+  return background_error_;
 }
 
 void BenchmarkReporter::write_record(const MetricsSnapshot& current,
@@ -567,13 +613,30 @@ void BenchmarkReporter::write_record(const MetricsSnapshot& current,
   const auto line = serialize_benchmark_record(
       metadata_, current, previous, backend, elapsed_seconds, final,
       healthy_sources, resident_bytes());
+  const auto record_start = lseek(output_fd_, 0, SEEK_END);
   const auto written = writer_(output_fd_, line.data(), line.size());
   if (written < 0) {
-    throw std::runtime_error("benchmark metrics write failed: " +
-                             std::to_string(errno));
+    const auto write_error = errno;
+    if (record_start >= 0) {
+      static_cast<void>(ftruncate(output_fd_, record_start));
+    }
+    static_cast<void>(close(output_fd_));
+    output_fd_ = -1;
+    auto error = std::make_exception_ptr(std::runtime_error(
+        "benchmark metrics write failed: " + std::to_string(write_error)));
+    remember_background_error(error);
+    std::rethrow_exception(error);
   }
   if (static_cast<std::size_t>(written) != line.size()) {
-    throw std::runtime_error("benchmark metrics write was partial");
+    if (record_start >= 0) {
+      static_cast<void>(ftruncate(output_fd_, record_start));
+    }
+    static_cast<void>(close(output_fd_));
+    output_fd_ = -1;
+    auto error = std::make_exception_ptr(
+        std::runtime_error("benchmark metrics write was partial"));
+    remember_background_error(error);
+    std::rethrow_exception(error);
   }
 }
 

@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -37,7 +38,7 @@ std::string serialize_benchmark_record(
     double elapsed_seconds,
     bool final,
     std::size_t healthy_sources,
-    std::uint64_t rss_bytes);
+    std::optional<std::uint64_t> rss_bytes);
 
 class BenchmarkReporter final {
  public:
@@ -49,8 +50,9 @@ class BenchmarkReporter final {
   BenchmarkReporter& operator=(const BenchmarkReporter&) = delete;
 
   void bind_backend(const IBackend& backend) noexcept;
+  void unbind_backend() noexcept;
   void start();
-  void stop_intervals() noexcept;
+  void stop_intervals();
   void write_interval_now();
   void write_final(std::size_t healthy_sources);
 
@@ -61,6 +63,9 @@ class BenchmarkReporter final {
                     double elapsed_seconds,
                     bool final,
                     std::size_t healthy_sources);
+  void join_intervals() noexcept;
+  void remember_background_error(std::exception_ptr error) noexcept;
+  std::exception_ptr background_error() const noexcept;
 
   BenchmarkReporterMetadata metadata_;
   RuntimeCounters& metrics_;
@@ -73,8 +78,10 @@ class BenchmarkReporter final {
   std::jthread thread_;
   std::mutex wait_mutex_;
   std::condition_variable_any wait_condition_;
+  mutable std::mutex error_mutex_;
+  std::exception_ptr background_error_;
   bool started_{};
-  bool final_written_{};
+  bool final_attempted_{};
 };
 
 }  // namespace swim::core

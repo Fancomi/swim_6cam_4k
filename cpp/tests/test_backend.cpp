@@ -135,7 +135,7 @@ TEST_CASE(registry_creates_a_backend_that_implements_every_contract) {
   CHECK(null_backend != nullptr);
   CHECK(!null_backend->observed_preview);
   CHECK(!null_backend->observed_encode);
-  CHECK_EQ(backend->sample_runtime().gpu_allocated_bytes, 0u);
+  CHECK(!backend->sample_runtime().gpu_allocated_bytes.has_value());
 
   std::atomic<bool> exited{};
   std::jthread loop([&](std::stop_token token) {
