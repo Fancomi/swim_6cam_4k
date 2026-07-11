@@ -347,7 +347,7 @@ class MetalBackend final : public swim::core::IBackend {
     if (graph.preview) {
       preview_ = std::make_shared<MetalPreview>(
           context_, asset.encoded_width, asset.encoded_height, *metrics_,
-          [this] { stop_main_loop(); });
+          [this] { stop_main_loop(); }, config.preview_visible);
       const std::weak_ptr<MetalPreview> weak_preview = preview_;
       router_->add_sink([weak_preview](MetalOutputLease output) {
         if (auto preview = weak_preview.lock()) {

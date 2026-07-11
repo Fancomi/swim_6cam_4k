@@ -291,6 +291,8 @@ AppConfig apply_cli_overrides(
     const auto value = option_value(argument);
     if (name == "--preview") {
       config.preview = parse_boolean(value, name);
+    } else if (name == "--preview-visible") {
+      config.preview_visible = parse_boolean(value, name);
     } else if (name == "--encode") {
       config.encode = parse_boolean(value, name);
     } else if (name == "--diagnostic-replacement") {

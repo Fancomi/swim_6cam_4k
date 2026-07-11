@@ -175,7 +175,7 @@ class MetalPreview final {
 
   MetalPreview(std::shared_ptr<MetalContext> context, std::uint32_t width,
                std::uint32_t height, swim::core::RuntimeCounters& metrics,
-               CloseCallback close_callback);
+               CloseCallback close_callback, bool visible = true);
   ~MetalPreview();
   MetalPreview(const MetalPreview&) = delete;
   MetalPreview& operator=(const MetalPreview&) = delete;

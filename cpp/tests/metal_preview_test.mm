@@ -12,6 +12,9 @@
 #include <thread>
 #include <utility>
 
+#import <CoreVideo/CoreVideo.h>
+#import <Metal/Metal.h>
+
 namespace {
 using namespace std::chrono_literals;
 
@@ -72,6 +75,37 @@ class FakePresenter final {
   std::optional<TrackedLease> in_flight_;
 };
 }  // namespace
+
+TEST_CASE(offscreen_preview_executes_real_gpu_copy_without_appkit_window) {
+  auto context = std::make_shared<swim::metal::MetalContext>();
+  context->device = MTLCreateSystemDefaultDevice();
+  CHECK(context->device != nil);
+  context->command_queue = [context->device newCommandQueue];
+  CHECK(context->command_queue != nil);
+  CHECK_EQ(CVMetalTextureCacheCreate(kCFAllocatorDefault, nullptr,
+                                    context->device, nullptr,
+                                    &context->texture_cache),
+           kCVReturnSuccess);
+  swim::core::RuntimeCounters counters;
+  auto pool = std::make_shared<swim::metal::MetalOutputPool>(
+      context, 1, 64, 32);
+  auto lease = pool->try_acquire();
+  CHECK(lease.has_value());
+  if (!lease.has_value()) {
+    return;
+  }
+
+  swim::metal::MetalPreview preview{context, 64, 32, counters, [] {}, false};
+  CHECK(preview.offer(std::move(*lease)));
+  preview.close_and_drain();
+
+  const auto totals = counters.sample_totals();
+  CHECK_EQ(totals.preview_submissions, 1u);
+  CHECK_EQ(totals.preview_completions, 1u);
+  CHECK_EQ(totals.preview_presents, 1u);
+  CHECK_EQ(totals.preview_drops, 0u);
+  CHECK_EQ(pool->in_use(), 0u);
+}
 
 TEST_CASE(preview_offer_never_blocks_when_capacity_one_is_full) {
   swim::metal::PreviewMailbox<std::uint64_t> mailbox;

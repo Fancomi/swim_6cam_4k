@@ -149,9 +149,10 @@ TEST_CASE(rejects_missing_camera_instead_of_reordering_sources) {
 
 TEST_CASE(applies_every_supported_cli_override) {
   AppConfig config;
-  const std::array<std::string_view, 10> arguments{
+  const std::array<std::string_view, 11> arguments{
       "--validate-only",
       "--preview=false",
+      "--preview-visible=false",
       "--encode=true",
       "--diagnostic-replacement=true",
       "--encode-path=outputs/override.h265",
@@ -167,6 +168,7 @@ TEST_CASE(applies_every_supported_cli_override) {
 
   CHECK(config.validate_only);
   CHECK(!config.preview);
+  CHECK(!config.preview_visible);
   CHECK(config.encode);
   CHECK(config.diagnostic_replacement);
   CHECK_EQ(config.encode_path,

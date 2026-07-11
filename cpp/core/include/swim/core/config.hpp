@@ -57,6 +57,7 @@ struct AppConfig {
   std::uint32_t fps_num{30000};
   std::uint32_t fps_den{1001};
   bool preview{true};
+  bool preview_visible{true};
   bool encode{false};
   bool diagnostic_replacement{false};
   std::filesystem::path encode_path;

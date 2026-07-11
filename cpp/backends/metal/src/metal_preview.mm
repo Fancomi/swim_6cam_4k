@@ -10,7 +10,9 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -131,12 +133,13 @@ class MetalPreview::Impl final
 
   Impl(std::shared_ptr<MetalContext> context, std::uint32_t width,
        std::uint32_t height, swim::core::RuntimeCounters& metrics,
-       CloseCallback close_callback)
+       CloseCallback close_callback, bool visible)
       : context_(std::move(context)),
         source_width_(width),
         source_height_(height),
         metrics_(&metrics),
-        close_callback_(std::move(close_callback)) {
+        close_callback_(std::move(close_callback)),
+        visible_(visible) {
     if (context_ == nullptr || context_->device == nil ||
         context_->command_queue == nil || width == 0 || height == 0) {
       throw std::invalid_argument("Metal preview requires a valid context and dimensions");
@@ -144,8 +147,48 @@ class MetalPreview::Impl final
   }
 
   void initialize() {
-    require_main_thread("Metal preview initialization");
+    if (visible_) {
+      require_main_thread("Metal preview initialization");
+    }
     @autoreleasepool {
+      pipeline_ = make_preview_pipeline(context_->device);
+      preview_queue_ = [context_->device newCommandQueue];
+      preview_queue_.label = @"swim.preview.command-queue";
+      if (preview_queue_ == nil) {
+        throw std::runtime_error("cannot create Metal preview command queue");
+      }
+      auto* sampler_descriptor = [[MTLSamplerDescriptor alloc] init];
+      sampler_descriptor.minFilter = MTLSamplerMinMagFilterLinear;
+      sampler_descriptor.magFilter = MTLSamplerMinMagFilterLinear;
+      sampler_descriptor.sAddressMode = MTLSamplerAddressModeClampToEdge;
+      sampler_descriptor.tAddressMode = MTLSamplerAddressModeClampToEdge;
+      sampler_ =
+          [context_->device newSamplerStateWithDescriptor:sampler_descriptor];
+      if (sampler_ == nil) {
+        throw std::runtime_error("cannot create Metal preview sampler");
+      }
+
+      constexpr std::uint32_t target_width = 1280;
+      const auto scaled_height = static_cast<std::uint32_t>(std::lround(
+          static_cast<double>(target_width) * source_height_ / source_width_));
+      offscreen_width_ = target_width;
+      offscreen_height_ = std::max<std::uint32_t>(360, scaled_height);
+      if (!visible_) {
+        auto* descriptor = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                        width:offscreen_width_
+                                       height:offscreen_height_
+                                    mipmapped:NO];
+        descriptor.storageMode = MTLStorageModePrivate;
+        descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        offscreen_texture_ = [context_->device newTextureWithDescriptor:descriptor];
+        if (offscreen_texture_ == nil) {
+          throw std::runtime_error("cannot create Metal offscreen preview target");
+        }
+        offscreen_texture_.label = @"swim.preview.offscreen-target";
+        return;
+      }
+
       application_ = [NSApplication sharedApplication];
       [application_ setActivationPolicy:NSApplicationActivationPolicyRegular];
 
@@ -182,23 +225,6 @@ class MetalPreview::Impl final
       layer_.allowsNextDrawableTimeout = YES;
       view_.layer = layer_;
       window_.contentView = view_;
-
-      pipeline_ = make_preview_pipeline(context_->device);
-      preview_queue_ = [context_->device newCommandQueue];
-      preview_queue_.label = @"swim.preview.command-queue";
-      if (preview_queue_ == nil) {
-        throw std::runtime_error("cannot create Metal preview command queue");
-      }
-      auto* sampler_descriptor = [[MTLSamplerDescriptor alloc] init];
-      sampler_descriptor.minFilter = MTLSamplerMinMagFilterLinear;
-      sampler_descriptor.magFilter = MTLSamplerMinMagFilterLinear;
-      sampler_descriptor.sAddressMode = MTLSamplerAddressModeClampToEdge;
-      sampler_descriptor.tAddressMode = MTLSamplerAddressModeClampToEdge;
-      sampler_ =
-          [context_->device newSamplerStateWithDescriptor:sampler_descriptor];
-      if (sampler_ == nil) {
-        throw std::runtime_error("cannot create Metal preview sampler");
-      }
 
       const std::weak_ptr<Impl> weak = shared_from_this();
       delegate_ = [[SwimPreviewDelegate alloc] init];
@@ -239,10 +265,20 @@ class MetalPreview::Impl final
     if (!accepted) {
       record_preview_drop();
     }
+    if (!visible_) {
+      display_tick();
+    }
     return accepted;
   }
 
   void run_main_loop(std::stop_token token) {
+    if (!visible_) {
+      std::unique_lock lock(offscreen_loop_mutex_);
+      offscreen_loop_condition_.wait(lock, token, [this] {
+        return stop_requested_.load(std::memory_order_acquire);
+      });
+      return;
+    }
     require_main_thread("Metal preview event loop");
     if (token.stop_requested() || stop_requested_.load(std::memory_order_acquire)) {
       return;
@@ -254,6 +290,10 @@ class MetalPreview::Impl final
 
   void request_stop() noexcept {
     stop_requested_.store(true, std::memory_order_release);
+    if (!visible_) {
+      offscreen_loop_condition_.notify_all();
+      return;
+    }
     auto stop = ^{
       [NSApp stop:nil];
       auto* event = [NSEvent
@@ -276,7 +316,9 @@ class MetalPreview::Impl final
   }
 
   void close_and_drain() {
-    require_main_thread("Metal preview shutdown");
+    if (visible_) {
+      require_main_thread("Metal preview shutdown");
+    }
     if (closed_.exchange(true, std::memory_order_acq_rel)) {
       flush_metrics();
       return;
@@ -285,8 +327,10 @@ class MetalPreview::Impl final
     if (mailbox_.close_and_clear()) {
       record_preview_drop();
     }
-    [timer_ invalidate];
-    timer_ = nil;
+    if (visible_) {
+      [timer_ invalidate];
+      timer_ = nil;
+    }
     if (!present_gate_.close_and_wait_until(
             std::chrono::steady_clock::now() + kDrainTimeout)) {
       if (present_gate_.pending() != 0) {
@@ -369,15 +413,30 @@ class MetalPreview::Impl final
       present_in_flight_.store(false, std::memory_order_release);
       return;
     }
-    if (window_.miniaturized || !window_.visible ||
-        (window_.occlusionState & NSWindowOcclusionStateVisible) == 0) {
-      record_preview_drop();
-      present_in_flight_.store(false, std::memory_order_release);
-      return;
+    id<CAMetalDrawable> drawable = nil;
+    id<MTLTexture> target = offscreen_texture_;
+    double target_width = static_cast<double>(offscreen_width_);
+    double target_height = static_cast<double>(offscreen_height_);
+    if (visible_) {
+      if (window_.miniaturized || !window_.visible ||
+          (window_.occlusionState & NSWindowOcclusionStateVisible) == 0) {
+        record_preview_drop();
+        present_in_flight_.store(false, std::memory_order_release);
+        return;
+      }
+      update_drawable_size();
+      drawable = [layer_ nextDrawable];
+      if (drawable == nil) {
+        record_preview_drop();
+        present_in_flight_.store(false, std::memory_order_release);
+        return;
+      }
+      target = drawable.texture;
+      const auto drawable_size = layer_.drawableSize;
+      target_width = drawable_size.width;
+      target_height = drawable_size.height;
     }
-    update_drawable_size();
-    id<CAMetalDrawable> drawable = [layer_ nextDrawable];
-    if (drawable == nil || !present_gate_.try_accept()) {
+    if (target == nil || !present_gate_.try_accept()) {
       record_preview_drop();
       present_in_flight_.store(false, std::memory_order_release);
       return;
@@ -392,7 +451,7 @@ class MetalPreview::Impl final
     }
     native_command_buffers_.fetch_add(1, std::memory_order_relaxed);
     auto* pass = [MTLRenderPassDescriptor renderPassDescriptor];
-    pass.colorAttachments[0].texture = drawable.texture;
+    pass.colorAttachments[0].texture = target;
     pass.colorAttachments[0].loadAction = MTLLoadActionClear;
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
     pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
@@ -405,10 +464,9 @@ class MetalPreview::Impl final
       return;
     }
 
-    const auto drawable_size = layer_.drawableSize;
     const auto source_aspect = static_cast<double>(source_width_) /
                                static_cast<double>(source_height_);
-    const auto drawable_aspect = drawable_size.width / drawable_size.height;
+    const auto drawable_aspect = target_width / target_height;
     PreviewScale scale{1.0F, 1.0F};
     if (drawable_aspect > source_aspect) {
       scale.x = static_cast<float>(source_aspect / drawable_aspect);
@@ -427,7 +485,9 @@ class MetalPreview::Impl final
       present_in_flight_.store(false, std::memory_order_release);
       return;
     }
-    [command presentDrawable:drawable];
+    if (visible_) {
+      [command presentDrawable:drawable];
+    }
 
     auto owner = shared_from_this();
     MetalOutputLease retained_output = std::move(output);
@@ -446,6 +506,9 @@ class MetalPreview::Impl final
       }
       owner->present_gate_.complete();
       owner->present_in_flight_.store(false, std::memory_order_release);
+      if (!owner->visible_ && owner->mailbox_.has_pending()) {
+        owner->display_tick();
+      }
     }];
     [command commit];
   }
@@ -476,6 +539,7 @@ class MetalPreview::Impl final
     delegate_ = nil;
     view_ = nil;
     layer_ = nil;
+    offscreen_texture_ = nil;
     window_ = nil;
     pipeline_ = nil;
     sampler_ = nil;
@@ -487,6 +551,7 @@ class MetalPreview::Impl final
   const std::uint32_t source_height_;
   swim::core::RuntimeCounters* metrics_;
   CloseCallback close_callback_;
+  const bool visible_;
   PreviewMailbox<MetalOutputLease> mailbox_;
   swim::core::RenderCompletionGate present_gate_;
   std::atomic_uint64_t preview_drops_{0};
@@ -497,10 +562,15 @@ class MetalPreview::Impl final
   std::atomic_bool stop_requested_{false};
   std::atomic_bool closed_{false};
   std::atomic_bool metrics_flushed_{false};
+  std::mutex offscreen_loop_mutex_;
+  std::condition_variable_any offscreen_loop_condition_;
+  std::uint32_t offscreen_width_{};
+  std::uint32_t offscreen_height_{};
   NSApplication* application_ = nil;
   NSWindow* window_ = nil;
   NSView* view_ = nil;
   CAMetalLayer* layer_ = nil;
+  id<MTLTexture> offscreen_texture_ = nil;
   id<MTLRenderPipelineState> pipeline_ = nil;
   id<MTLSamplerState> sampler_ = nil;
   id<MTLCommandQueue> preview_queue_ = nil;
@@ -512,9 +582,9 @@ class MetalPreview::Impl final
 MetalPreview::MetalPreview(std::shared_ptr<MetalContext> context,
                            std::uint32_t width, std::uint32_t height,
                            swim::core::RuntimeCounters& metrics,
-                           CloseCallback close_callback)
+                           CloseCallback close_callback, bool visible)
     : impl_(std::make_shared<Impl>(std::move(context), width, height, metrics,
-                                   std::move(close_callback))) {
+                                   std::move(close_callback), visible)) {
   impl_->initialize();
 }
 
