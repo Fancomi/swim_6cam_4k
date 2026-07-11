@@ -35,4 +35,6 @@ class BenchmarkScriptsTest(unittest.TestCase):
         )
         self.assertIn("600", result.stdout)
         self.assertIn("29.0", result.stdout)
+        self.assertIn("67108864", result.stdout)
+        self.assertIn("33554432", result.stdout)
         self.assertTrue(os.access(script, os.X_OK))

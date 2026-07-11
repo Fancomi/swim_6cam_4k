@@ -10,8 +10,8 @@ DURATION=600
 WARMUP=30
 MIN_FPS=29.0
 VISIBLE=false
-MAX_RSS_SLOPE=""
-MAX_GPU_SLOPE=""
+MAX_RSS_SLOPE=67108864
+MAX_GPU_SLOPE=33554432
 
 usage() {
   cat <<'EOF'
@@ -19,8 +19,8 @@ Usage: scripts/run_metal_soak.sh [options]
   --duration N       Soak seconds (default: 600)
   --warmup N         Warm-up intervals ignored by FPS/slope gates (default: 30)
   --min-fps N        Fail after five sustained post-warmup intervals (default: 29.0)
-  --max-rss-slope N  Optional maximum RSS growth bytes/minute
-  --max-gpu-slope N  Optional maximum Metal allocation growth bytes/minute
+  --max-rss-slope N  Maximum RSS growth bytes/minute (default: 67108864)
+  --max-gpu-slope N  Maximum Metal allocation growth bytes/minute (default: 33554432)
   --visible          Use the AppKit preview window (default: offscreen Metal sink)
   --config PATH      Runtime config
   --build-dir PATH   Release CMake build directory
@@ -81,8 +81,8 @@ METRICS="$OUTPUT_DIR/results.jsonl"; rm -f "$METRICS"
   >"$OUTPUT_DIR/runtime.log" 2>&1
 "$PYTHON" -m python.validation.summarize_benchmarks "$METRICS" --cell-only \
   --expected-stage full --expected-stream-count 6 --expected-pacing paced
-SOAK_ARGS=("$METRICS" --soak-only --warmup-seconds "$WARMUP" --min-fps "$MIN_FPS")
-[[ -z "$MAX_RSS_SLOPE" ]] || SOAK_ARGS+=(--max-rss-slope-bytes-per-minute "$MAX_RSS_SLOPE")
-[[ -z "$MAX_GPU_SLOPE" ]] || SOAK_ARGS+=(--max-gpu-slope-bytes-per-minute "$MAX_GPU_SLOPE")
+SOAK_ARGS=("$METRICS" --soak-only --warmup-seconds "$WARMUP" --min-fps "$MIN_FPS"
+  --max-rss-slope-bytes-per-minute "$MAX_RSS_SLOPE"
+  --max-gpu-slope-bytes-per-minute "$MAX_GPU_SLOPE")
 "$PYTHON" -m python.validation.summarize_benchmarks "${SOAK_ARGS[@]}" | tee "$OUTPUT_DIR/soak-summary.json"
 echo "Metal soak complete: $OUTPUT_DIR"

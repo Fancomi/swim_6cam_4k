@@ -64,7 +64,7 @@ build/macos/swim_realtime --config configs/macos_20260629.conf \
 ./scripts/run_metal_soak.sh
 ```
 
-soak 会报告 RSS 与 Metal allocation 的每分钟线性斜率，并拒绝 host copy、容量 high-water 越界、编码 callback/drain 错误，以及 warm-up 后连续五个区间低于 29 FPS。可用 `--max-rss-slope` 和 `--max-gpu-slope` 增加显式增长阈值。
+soak 按每条 interval 的真实 `elapsed_s` 累加时间轴，报告 RSS 与 Metal allocation 的每分钟线性斜率，并拒绝 host copy、容量 high-water 越界、编码 callback/drain 错误，以及 warm-up 后连续五个区间低于 29 FPS。默认 RSS 增长上限为 64 MiB/min，Metal allocation 上限为 32 MiB/min；可用 `--max-rss-slope` 和 `--max-gpu-slope` 显式覆盖。
 
 ## 处理流程
 
