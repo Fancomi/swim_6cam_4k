@@ -18,8 +18,9 @@ completed-output router.
 - `8c50625 fix: settle HEVC callback tickets before slot reuse`
 - `c7b3bee fix: harden bounded HEVC callback shutdown`
 - `2257362 fix: retire timed-out HEVC callback tickets`
+- `9e06088 fix: flush cached HEVC tail within drain deadline`
 
-Implementation commit range: `55484e5..2257362`
+Implementation commit range: `55484e5..9e06088`
 
 ## TDD RED Evidence
 
@@ -554,3 +555,137 @@ header and the fatal-preflight helper remains in the backend header. They are
 not end-user/core API, introduce no per-frame allocation, and the re-review
 classified this as non-blocking. Further hiding them would add test-only build
 variants and is deferred to avoid changing the verified lifetime protocol.
+
+## Third Re-review Remediation (`cc3aea1..9e06088`)
+
+The final Important finding—native encoders may legally cache a tail frame and
+emit its callback only when `CompleteFrames` is requested—is closed in
+`9e06088`.
+
+### Cached-tail RED
+
+A deterministic fake session was configured with one accepted pending frame.
+Its only output callback occurs inside `complete_frames()`:
+
+```text
+cmake --build build/macos --target metal_encoder_test
+build/macos/metal_encoder_test
+```
+
+Against the gate-first implementation, the new case failed because shutdown
+timed out and retired the frame without ever requesting completion:
+
+```text
+FAIL complete_frames_flushes_a_cached_tail_before_gate_drain:
+native.complete_entered
+```
+
+A second deterministic case used an empty gate and a permanently blocked
+`complete_frames()`. The prior synchronous call could not return at the total
+deadline and failed:
+
+```text
+FAIL blocked_complete_frames_cannot_exceed_the_total_deadline:
+returned_before_native_unblock
+```
+
+Both tests use condition-variable events for observation and cleanup; no sleep
+is used to establish ordering.
+
+### Startup-preallocated asynchronous completion request
+
+Encoder startup now creates one GCD group and one application-owned
+`CompletionContext`. The context contains only:
+
+- one `shared_ptr<SessionHandle>`;
+- a fixed two-party atomic reference count;
+- one atomic native completion status.
+
+It contains no callback State, ticket, output lease, writer/file, gate,
+external metrics pointer, or growing container. Terminal drain transfers that
+already allocated context to `dispatch_group_async_f`; no `std::thread`,
+`make_shared`, `new`, or `detach` occurs during shutdown.
+
+The close sequence is now:
+
+1. close admission and compute one absolute deadline;
+2. submit the preallocated native `CompleteFrames` request to the framework
+   GCD queue;
+3. wait for that request until the absolute deadline;
+4. if it returned, drain the fixed callback gate using the same deadline;
+5. on normal completion, check native status, close/check the writer,
+   invalidate/release session, and free tickets;
+6. on either completion-request or gate timeout, invalidate, atomically retire
+   unclaimed tickets, preserve already-entered callback State, and publish
+   bounded timeout metrics exactly as in `2257362`.
+
+The GCD task and caller each release one predeclared context reference. On a
+normal return the context is deleted after both sides finish. If native
+`CompleteFrames` never returns, only this fixed minimal session-completion
+context remains quarantined; it cannot retain State, tickets, output, writer,
+file, or metrics. The fixed raw-refCon tombstones remain separately bounded at
+two only on timeout.
+
+This preserves the no-shutdown-application-allocation test. Static verification
+also continues to find no application worker or obsolete drain allocation:
+
+```text
+! rg -n "std::thread|detach\\(|make_shared<DrainOperation" \
+  cpp/backends/metal/src/metal_encoder.mm
+```
+
+### Third re-review GREEN verification
+
+```text
+cmake --build build/macos --target metal_encoder_test
+build/macos/metal_encoder_test
+```
+
+Result: PASS, 22/22. The cached-tail case asserts one submission, one
+completion, zero drops, zero in-use tickets, no drain timeout, and output-pool
+reuse. The blocked-completion case proves close returns at the injected total
+deadline before native completion is unblocked.
+
+```text
+cmake --build build/macos
+ctest --test-dir build/macos --output-on-failure
+git diff --check
+```
+
+Result: PASS; full build exit 0, 10/10 CTests, zero failures, diff check exit 0.
+
+### Third re-review runtime acceptances
+
+Five-second file sink plus ffprobe and full ffmpeg decode:
+
+```text
+render_fps=30.112 encode_fps=30.297
+encode_submissions=150 encode_completions=150 encode_drops=0
+encode_bytes=38566859 encode_using_hardware=true
+encode_drain_timeouts=0 decoded_pixel_host_copies=0
+codec_name=hevc width=5002 height=2102
+```
+
+Five-second null sink:
+
+```text
+render_fps=30.117 encode_fps=30.110
+encode_submissions=150 encode_completions=150 encode_drops=0
+encode_bytes=38477018 encode_using_hardware=true
+encode_drain_timeouts=0 decoded_pixel_host_copies=0
+```
+
+Thirty-second preview plus encode:
+
+```text
+render_fps=29.727 encode_fps=29.852
+preview_presents=888 preview_drops=4
+encode_submissions=890 encode_completions=890 encode_drops=2
+encode_bytes=224167268 encode_using_hardware=true
+encode_input_capacity=2 encode_input_high_water=2 encode_input_in_use=0
+encode_drain_timeouts=0 decoded_pixel_host_copies=0
+output_width=5002 output_height=2102
+```
+
+The previously documented raw Annex-B `r_frame_rate=1200000/1` remains the
+only codec-artifact concern and was already judged non-blocking for Task 11.
