@@ -1,6 +1,7 @@
 #include <swim/metal/metal_backend.hpp>
 
 #include <swim/core/backend.hpp>
+#include <swim/core/benchmark_stage.hpp>
 #include <swim/metal/metal_encoder.hpp>
 #include <swim/metal/metal_preview.hpp>
 #include <swim/metal/metal_renderer.hpp>
@@ -78,26 +79,49 @@ class MetalRendererAdapter final : public swim::core::IRenderer {
         renderer_(context_, asset, config, &metrics, router_sink(router_)) {
     auto* descriptor = [MTLTextureDescriptor
         texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-                                    width:2
-                                   height:2
+                                    width:3840
+                                   height:2160
                                 mipmapped:NO];
-    descriptor.storageMode = MTLStorageModeShared;
-    descriptor.usage = MTLTextureUsageShaderRead;
-    replacement_texture_ = [context_->device newTextureWithDescriptor:descriptor];
-    if (replacement_texture_ == nil) {
-      throw std::runtime_error("cannot create Metal replacement texture");
+    descriptor.storageMode = MTLStorageModePrivate;
+    descriptor.usage =
+        MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+    id<MTLCommandBuffer> command_buffer =
+        [context_->command_queue commandBuffer];
+    if (command_buffer == nil) {
+      throw std::runtime_error(
+          "cannot create Metal benchmark-frame command buffer");
     }
-    constexpr std::array<std::uint32_t, 4> black{};
-    [replacement_texture_ replaceRegion:MTLRegionMake2D(0, 0, 2, 2)
-                            mipmapLevel:0
-                              withBytes:black.data()
-                            bytesPerRow:2 * sizeof(std::uint32_t)];
-    for (std::uint32_t camera = 0; camera < replacements_.size(); ++camera) {
-      replacements_[camera].rgba = replacement_texture_;
-      replacements_[camera].metadata.camera_index = camera;
-      replacements_[camera].metadata.width = 2;
-      replacements_[camera].metadata.height = 2;
-      replacements_[camera].metadata.pixel_format = swim::core::PixelFormat::bgra8;
+    for (std::uint32_t camera = 0; camera < benchmark_frames_.size();
+         ++camera) {
+      benchmark_textures_[camera] =
+          [context_->device newTextureWithDescriptor:descriptor];
+      if (benchmark_textures_[camera] == nil) {
+        throw std::runtime_error("cannot create Metal benchmark texture");
+      }
+      auto* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+      pass.colorAttachments[0].texture = benchmark_textures_[camera];
+      pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+      pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+      pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+      id<MTLRenderCommandEncoder> clear_encoder =
+          [command_buffer renderCommandEncoderWithDescriptor:pass];
+      if (clear_encoder == nil) {
+        throw std::runtime_error(
+            "cannot create Metal benchmark-frame clear encoder");
+      }
+      [clear_encoder endEncoding];
+
+      benchmark_frames_[camera].rgba = benchmark_textures_[camera];
+      benchmark_frames_[camera].metadata.camera_index = camera;
+      benchmark_frames_[camera].metadata.width = 3840;
+      benchmark_frames_[camera].metadata.height = 2160;
+      benchmark_frames_[camera].metadata.pixel_format =
+          swim::core::PixelFormat::bgra8;
+    }
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+    if (command_buffer.status != MTLCommandBufferStatusCompleted) {
+      throw std::runtime_error("Metal benchmark-frame initialization failed");
     }
   }
 
@@ -153,13 +177,18 @@ class MetalRendererAdapter final : public swim::core::IRenderer {
 
   swim::core::FrameLease replacement_frame(
       std::uint32_t camera_index) const override {
-    if (camera_index >= replacements_.size()) {
+    return benchmark_frame(camera_index);
+  }
+
+  swim::core::FrameLease benchmark_frame(
+      std::uint32_t camera_index) const override {
+    if (camera_index >= benchmark_frames_.size()) {
       return {};
     }
     return swim::core::FrameLease{
-        const_cast<MetalFrameView*>(&replacements_[camera_index]),
+        const_cast<MetalFrameView*>(&benchmark_frames_[camera_index]),
         {retain_static_frame, release_static_frame, kMetalFrameBackendTag},
-        replacements_[camera_index].metadata};
+        benchmark_frames_[camera_index].metadata};
   }
 
   void drain() override {
@@ -218,8 +247,8 @@ class MetalRendererAdapter final : public swim::core::IRenderer {
   std::shared_ptr<MetalPreview> preview_;
   std::shared_ptr<MetalEncoder> encoder_;
   MetalStitchRenderer renderer_;
-  id<MTLTexture> replacement_texture_ = nil;
-  std::array<MetalFrameView, 6> replacements_;
+  std::array<id<MTLTexture>, 6> benchmark_textures_{};
+  std::array<MetalFrameView, 6> benchmark_frames_;
 };
 
 class MetalSourceAdapter final : public swim::core::ISource {
@@ -300,15 +329,22 @@ class MetalBackend final : public swim::core::IBackend {
 
   std::unique_ptr<swim::core::IRenderer> make_renderer(
       const swim::core::RuntimeAsset& asset,
-      const swim::core::AppConfig& config) override {
+      const swim::core::AppConfig& config,
+      const swim::core::BenchmarkGraph& graph) override {
     config_ = config;
     config_ready_ = true;
-    if (config.preview || config.encode) {
+    if (!graph.create_renderer) {
+      router_.reset();
+      preview_.reset();
+      encoder_.reset();
+      return {};
+    }
+    if (graph.preview || graph.encode) {
       router_ = std::make_shared<MetalCompletedOutputRouter>();
     } else {
       router_.reset();
     }
-    if (config.preview) {
+    if (graph.preview) {
       preview_ = std::make_shared<MetalPreview>(
           context_, asset.encoded_width, asset.encoded_height, *metrics_,
           [this] { stop_main_loop(); });
@@ -321,7 +357,7 @@ class MetalBackend final : public swim::core::IBackend {
     } else {
       preview_.reset();
     }
-    if (config.encode) {
+    if (graph.encode) {
       encoder_ = std::make_shared<MetalEncoder>(
           asset.encoded_width, asset.encoded_height, config, *metrics_);
       const std::weak_ptr<MetalEncoder> weak_encoder = encoder_;

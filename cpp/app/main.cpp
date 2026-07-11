@@ -1,5 +1,6 @@
 #include <swim/core/asset.hpp>
 #include <swim/core/backend.hpp>
+#include <swim/core/benchmark_stage.hpp>
 #include <swim/core/config.hpp>
 #include <swim/core/metrics.hpp>
 #include <swim/core/render_coordinator.hpp>
@@ -84,9 +85,12 @@ void require_regular_file(const std::filesystem::path& path,
   }
 }
 
-swim::core::RuntimeAsset validate_inputs(const swim::core::AppConfig& config) {
+swim::core::RuntimeAsset validate_inputs(
+    const swim::core::AppConfig& config,
+    const swim::core::BenchmarkGraph& graph) {
   require_regular_file(config.asset_path, "asset");
-  for (const auto& source : config.sources) {
+  for (std::uint32_t camera = 0; camera < graph.active_sources; ++camera) {
+    const auto& source = config.sources[camera];
     require_regular_file(source.path, "source " + source.camera_id);
   }
   auto asset = swim::core::load_asset(config.asset_path);
@@ -117,6 +121,7 @@ void print_validation(const swim::core::AppConfig& config,
 }
 
 void write_final_metrics(const swim::core::AppConfig& config,
+                         const swim::core::BenchmarkGraph& graph,
                          const swim::core::MetricsSnapshot& metrics,
                          std::chrono::steady_clock::duration elapsed,
                          std::size_t healthy_sources,
@@ -130,6 +135,24 @@ void write_final_metrics(const swim::core::AppConfig& config,
   std::ostringstream line;
   line << std::fixed << std::setprecision(3)
        << "{\"final\":true"
+       << ",\"requested_stage\":\""
+       << swim::core::benchmark_stage_name(config.stage) << '\"'
+       << ",\"requested_pacing\":\""
+       << swim::core::pacing_name(config.mode) << '\"'
+       << ",\"requested_stream_count\":" << config.stream_count
+       << ",\"requested_preview\":"
+       << (config.preview ? "true" : "false")
+       << ",\"requested_encode\":"
+       << (config.encode ? "true" : "false")
+       << ",\"resolved_active_sources\":" << graph.active_sources
+       << ",\"resolved_create_renderer\":"
+       << (graph.create_renderer ? "true" : "false")
+       << ",\"resolved_synthetic_inputs\":"
+       << (graph.synthetic_inputs ? "true" : "false")
+       << ",\"resolved_preview\":"
+       << (graph.preview ? "true" : "false")
+       << ",\"resolved_encode\":"
+       << (graph.encode ? "true" : "false")
        << ",\"received\":" << metrics.received
        << ",\"decoded\":" << metrics.decoded
        << ",\"published\":" << metrics.published
@@ -217,31 +240,17 @@ void write_final_metrics(const swim::core::AppConfig& config,
   }
 }
 
-std::array<std::unique_ptr<swim::core::ISource>, 6> make_six_sources(
-    swim::core::IBackend& backend, const swim::core::AppConfig& config) {
-  std::array<std::unique_ptr<swim::core::ISource>, 6> sources;
-  for (std::uint32_t camera = 0; camera < sources.size(); ++camera) {
-    sources[camera] = backend.make_source(config.sources[camera], camera);
-  }
-  return sources;
-}
-
-void stop_sources(
-    std::array<std::unique_ptr<swim::core::ISource>, 6>& sources) noexcept {
-  for (auto& source : sources) {
-    source->stop();
-  }
-}
-
 // Installed before any backend component exists. It owns no native pointers,
 // so setup failures at every phase can still emit exactly one final line.
 class FinalMetricsGuard final {
  public:
   FinalMetricsGuard(const swim::core::AppConfig& config,
+                    const swim::core::BenchmarkGraph& graph,
                     const swim::core::RuntimeAsset& asset,
                     swim::core::RuntimeCounters& metrics,
                     std::chrono::steady_clock::time_point started_at) noexcept
       : config_(config),
+        graph_(graph),
         asset_(asset),
         metrics_(metrics),
         started_at_(started_at) {}
@@ -267,12 +276,13 @@ class FinalMetricsGuard final {
     const auto elapsed = std::chrono::steady_clock::now() - started_at_;
     const auto snapshot = metrics_.snapshot_and_reset();
     emitted_ = true;
-    write_final_metrics(config_, snapshot, elapsed, healthy_sources_,
+    write_final_metrics(config_, graph_, snapshot, elapsed, healthy_sources_,
                         asset_.encoded_width, asset_.encoded_height);
   }
 
  private:
   const swim::core::AppConfig& config_;
+  const swim::core::BenchmarkGraph& graph_;
   const swim::core::RuntimeAsset& asset_;
   swim::core::RuntimeCounters& metrics_;
   std::chrono::steady_clock::time_point started_at_;
@@ -285,8 +295,8 @@ class RuntimeFinalizer final {
   RuntimeFinalizer(
       const swim::core::AppConfig& config,
       swim::core::IBackend& backend,
-      swim::core::IRenderer& renderer,
-      std::array<std::unique_ptr<swim::core::ISource>, 6>& sources,
+      swim::core::IRenderer* renderer,
+      swim::core::SourceArray& sources,
       swim::core::RunLifecycle& lifecycle,
       swim::core::RuntimeStartState& start_state,
       FinalMetricsGuard& final_metrics) noexcept
@@ -325,18 +335,21 @@ class RuntimeFinalizer final {
     if (signal_monitor.joinable()) {
       signal_monitor.join();
     }
-    stop_sources(sources_);
+    swim::core::stop_sources(sources_);
 
     std::exception_ptr cleanup_error = render_error;
-    try {
-      renderer_.drain();
-    } catch (...) {
-      if (!cleanup_error) {
-        cleanup_error = std::current_exception();
+    if (renderer_ != nullptr) {
+      try {
+        renderer_->drain();
+      } catch (...) {
+        if (!cleanup_error) {
+          cleanup_error = std::current_exception();
+        }
       }
     }
-    if (!cleanup_error && renderer_.has_fatal_error()) {
-      auto message = renderer_.last_error();
+    if (!cleanup_error && renderer_ != nullptr &&
+        renderer_->has_fatal_error()) {
+      auto message = renderer_->last_error();
       if (message.empty()) {
         message = "renderer reported a fatal native error during drain";
       }
@@ -347,6 +360,9 @@ class RuntimeFinalizer final {
     std::array<bool, 6> failed{};
     bool started_source_failed = false;
     for (std::size_t camera = 0; camera < sources_.size(); ++camera) {
+      if (!sources_[camera]) {
+        continue;
+      }
       failed[camera] = sources_[camera]->failed();
       if (start_state_.started(camera) && failed[camera]) {
         started_source_failed = true;
@@ -372,8 +388,8 @@ class RuntimeFinalizer final {
  private:
   const swim::core::AppConfig& config_;
   swim::core::IBackend& backend_;
-  swim::core::IRenderer& renderer_;
-  std::array<std::unique_ptr<swim::core::ISource>, 6>& sources_;
+  swim::core::IRenderer* renderer_;
+  swim::core::SourceArray& sources_;
   swim::core::RunLifecycle& lifecycle_;
   swim::core::RuntimeStartState& start_state_;
   FinalMetricsGuard& final_metrics_;
@@ -381,12 +397,13 @@ class RuntimeFinalizer final {
 };
 
 int run_runtime(const swim::core::AppConfig& config,
-                const swim::core::RuntimeAsset& asset) {
+                const swim::core::RuntimeAsset& asset,
+                const swim::core::BenchmarkGraph& graph) {
   swim::core::RuntimeCounters metrics;
   swim::core::RunLifecycle lifecycle{config.duration};
   swim::core::RuntimeStartState start_state;
   const auto started_at = std::chrono::steady_clock::now();
-  FinalMetricsGuard final_metrics{config, asset, metrics, started_at};
+  FinalMetricsGuard final_metrics{config, graph, asset, metrics, started_at};
   try {
 #if defined(SWIM_HAS_METAL_BACKEND)
     swim::metal::register_metal_backend();
@@ -395,21 +412,31 @@ int run_runtime(const swim::core::AppConfig& config,
         swim::core::BackendRegistry::instance().create(config.backend);
     backend->bind_metrics(metrics);
     backend->bind_lifecycle(lifecycle);
-    auto renderer = backend->make_renderer(asset, config);
+    auto renderer = backend->make_renderer(asset, config, graph);
+    if (graph.create_renderer != static_cast<bool>(renderer)) {
+      throw std::runtime_error(
+          "backend renderer creation does not match resolved graph");
+    }
     // Mailboxes precede publishers so reverse destruction can never destroy a
     // mailbox while a source object still owns its address.
-    std::array<swim::core::LatestFrameMailbox, 6> mailboxes;
-    auto sources = make_six_sources(*backend, config);
-    RuntimeFinalizer finalizer{config, *backend, *renderer, sources,
+    swim::core::MailboxArray mailboxes;
+    auto sources =
+        swim::core::make_sources(*backend, config, graph.active_sources);
+    RuntimeFinalizer finalizer{config, *backend, renderer.get(), sources,
                                lifecycle, start_state, final_metrics};
 
     swim::core::start_sources_recorded(sources, mailboxes, start_state);
 
     finalizer.render_thread = std::jthread([&](std::stop_token token) {
       try {
-        swim::core::RenderCoordinator coordinator{
-            mailboxes, *renderer, config, metrics, lifecycle};
-        coordinator.run(token);
+        if (renderer != nullptr) {
+          swim::core::RenderCoordinator coordinator{
+              mailboxes, *renderer, config, graph, metrics, lifecycle};
+          coordinator.run(token);
+        } else {
+          static_cast<void>(swim::core::run_decode_only(
+              sources, mailboxes, graph.active_sources, lifecycle, token));
+        }
       } catch (...) {
         finalizer.render_error = std::current_exception();
       }
@@ -449,13 +476,14 @@ int run(int argc, char* argv[]) {
   auto config = swim::core::load_config(command_line.config_path);
   config = swim::core::apply_cli_overrides(std::move(config),
                                            command_line.overrides);
-  auto asset = validate_inputs(config);
+  const auto graph = swim::core::resolve_benchmark_graph(config);
+  auto asset = validate_inputs(config, graph);
 
   if (config.validate_only) {
     print_validation(config, asset);
     return 0;
   }
-  return run_runtime(config, asset);
+  return run_runtime(config, asset, graph);
 }
 
 }  // namespace
