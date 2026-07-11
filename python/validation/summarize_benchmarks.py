@@ -377,8 +377,11 @@ def _validate_record(record: dict, index: int) -> None:
         raise MatrixValidationError(f"{context}: resolved_config values must be positive integers")
     if resolved_config["fps_num"] != 30000 or resolved_config["fps_den"] != 1001:
         raise MatrixValidationError(f"{context}: resolved_config cadence must be 30000/1001")
-    if resolved_config["render_inflight"] != record["render_inflight_capacity"] or resolved_config["output_pool"] != record["render_output_capacity"]:
-        raise MatrixValidationError(f"{context}: resolved_config capacity mismatch")
+    if graph["create_renderer"]:
+        if resolved_config["render_inflight"] != record["render_inflight_capacity"] or resolved_config["output_pool"] != record["render_output_capacity"]:
+            raise MatrixValidationError(f"{context}: resolved_config capacity mismatch")
+    elif record["render_inflight_capacity"] != 0 or record["render_output_capacity"] != 0:
+        raise MatrixValidationError(f"{context}: renderer capacities must be zero when renderer is absent")
     if record["output_width"] != 5002:
         raise MatrixValidationError(f"{context}: output_width must be 5002")
     if record["output_height"] != 2102:

@@ -109,11 +109,11 @@ def record_for(
         "pool_exhaustion": 0,
         "decoded_pixel_host_copies": 0,
         "application_owned_frame_allocations": 0,
-        "render_inflight_capacity": 3,
+        "render_inflight_capacity": 3 if graph["create_renderer"] else 0,
         "render_inflight_in_use": 0,
         "render_inflight_high_water": 2 if rendered else 0,
         "render_inflight_pool_misses": 0,
-        "render_output_capacity": 4,
+        "render_output_capacity": 4 if graph["create_renderer"] else 0,
         "render_output_in_use": 0,
         "render_output_high_water": 2 if rendered else 0,
         "render_output_pool_misses": 0,
@@ -294,6 +294,16 @@ class ValidateMatrixTest(unittest.TestCase):
                 record[field] = value
                 with self.assertRaisesRegex(MatrixValidationError, field):
                     validate_cell_records([record])
+
+    def test_decode_only_accepts_absent_renderer_capacity(self):
+        record = record_for("decode-only", 1, "paced", final=True)
+        for field in (
+            "render_inflight_capacity", "render_inflight_in_use",
+            "render_inflight_high_water", "render_output_capacity",
+            "render_output_in_use", "render_output_high_water",
+        ):
+            record[field] = 0
+        validate_cell_records([record])
 
     def test_publishable_rejects_any_malformed_input(self):
         records = complete_matrix()
