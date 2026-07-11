@@ -80,6 +80,7 @@ class MetalOutputPool final {
   MetalOutputPool& operator=(MetalOutputPool&&) = delete;
 
   std::optional<MetalOutputLease> try_acquire() noexcept;
+  std::uint32_t in_use() const noexcept;
   std::uint32_t high_water() const noexcept;
 
  private:

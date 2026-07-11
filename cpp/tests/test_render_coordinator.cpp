@@ -132,6 +132,15 @@ TEST_CASE(coordinator_reuses_stale_camera_without_waiting) {
     CHECK_EQ(renderer.snapshots[1].frames[camera].metadata().sequence, 1u);
   }
   CHECK_EQ(fixture.metrics.reused.load(std::memory_order_relaxed), 5u);
+  CHECK_EQ(fixture.metrics.camera_reused[0].load(std::memory_order_relaxed),
+           0u);
+  for (std::size_t camera = 1; camera < 6; ++camera) {
+    CHECK_EQ(
+        fixture.metrics.camera_reused[camera].load(std::memory_order_relaxed),
+        1u);
+  }
+  const auto totals = fixture.metrics.sample_totals();
+  CHECK_EQ(totals.snapshot_age_spread_ms_p99, 33u);
 }
 
 TEST_CASE(coordinator_replaces_camera_only_after_one_second) {
@@ -198,6 +207,8 @@ TEST_CASE(coordinator_counts_real_sequence_gap_after_replacement) {
   fixture.publish(0, 12, t0 + 1002ms);
   fixture.coordinator.tick(t0 + 1002ms);
   CHECK_EQ(fixture.metrics.overwritten.load(), 4u);
+  CHECK_EQ(fixture.metrics.camera_overwritten[0].load(), 4u);
+  CHECK_EQ(fixture.metrics.camera_overwritten[1].load(), 0u);
 }
 
 TEST_CASE(coordinator_finite_duration_starts_at_first_accepted_submit) {

@@ -334,13 +334,16 @@ class MetalEncoder::Impl final {
    public:
     State(MetalEncoderWriterOps writer, void* now_context,
           std::uint64_t (*now_ns)(void*) noexcept,
-          std::shared_ptr<void> lifetime_anchor)
+          std::shared_ptr<void> lifetime_anchor,
+          swim::core::RuntimeCounters* metrics)
         : gate(kEncoderInputCapacity),
           writer_(writer),
           now_context_(now_context),
           now_ns_(now_ns),
-          lifetime_anchor_(std::move(lifetime_anchor)) {
+          lifetime_anchor_(std::move(lifetime_anchor)),
+          metrics_(metrics) {
       fatal_message_.reserve(256);
+      sync_gate_metrics();
     }
 
     ~State() { static_cast<void>(close_writer()); }
@@ -351,8 +354,13 @@ class MetalEncoder::Impl final {
 
     bool claim_first_submit(std::uint64_t timestamp) noexcept {
       std::uint64_t zero = 0;
-      return first_submit_ns.compare_exchange_strong(
+      const auto claimed = first_submit_ns.compare_exchange_strong(
           zero, timestamp, std::memory_order_relaxed);
+      if (claimed && metrics_ != nullptr) {
+        metrics_->encode_first_submit_ns.store(timestamp,
+                                               std::memory_order_relaxed);
+      }
+      return claimed;
     }
 
     void rollback_first_submit(std::uint64_t timestamp,
@@ -363,10 +371,17 @@ class MetalEncoder::Impl final {
       }
       first_submit_ns.compare_exchange_strong(
           timestamp, 0, std::memory_order_relaxed);
+      if (metrics_ != nullptr) {
+        metrics_->encode_first_submit_ns.store(0,
+                                               std::memory_order_relaxed);
+      }
     }
 
     void record_drop() noexcept {
       drops.fetch_add(1, std::memory_order_relaxed);
+      if (metrics_ != nullptr) {
+        metrics_->encode_drops.fetch_add(1, std::memory_order_relaxed);
+      }
     }
 
     void record_drop_once(CallbackTicket& ticket) noexcept {
@@ -383,6 +398,10 @@ class MetalEncoder::Impl final {
     void record_callback_error(CallbackTicket* ticket,
                                std::string_view message) noexcept {
       callback_errors.fetch_add(1, std::memory_order_relaxed);
+      if (metrics_ != nullptr) {
+        metrics_->encode_callback_errors.fetch_add(
+            1, std::memory_order_relaxed);
+      }
       if (ticket == nullptr) {
         record_drop();
       } else {
@@ -413,6 +432,7 @@ class MetalEncoder::Impl final {
       ticket.state.reset();
       ticket.phase.store(TicketPhase::settled, std::memory_order_release);
       gate.settle(gate_ticket);
+      sync_gate_metrics();
     }
 
     void handle_injected(CallbackTicket& ticket,
@@ -551,6 +571,20 @@ class MetalEncoder::Impl final {
       return succeeded;
     }
 
+    void sync_gate_metrics() noexcept {
+      if (metrics_ == nullptr) {
+        return;
+      }
+      metrics_->encode_input_capacity.store(gate.capacity(),
+                                            std::memory_order_relaxed);
+      metrics_->encode_input_in_use.store(gate.in_use(),
+                                          std::memory_order_relaxed);
+      metrics_->encode_input_high_water.store(gate.high_water(),
+                                              std::memory_order_relaxed);
+      metrics_->encode_input_pool_misses.store(gate.misses(),
+                                               std::memory_order_relaxed);
+    }
+
     EncoderInputGate gate;
     std::atomic_uint64_t next_sequence{};
     std::atomic_uint64_t first_submit_ns{};
@@ -577,6 +611,10 @@ class MetalEncoder::Impl final {
         return false;
       }
       self.bytes.fetch_add(bytes.size(), std::memory_order_relaxed);
+      if (self.metrics_ != nullptr) {
+        self.metrics_->encode_bytes.fetch_add(bytes.size(),
+                                              std::memory_order_relaxed);
+      }
       return true;
     }
 
@@ -586,7 +624,14 @@ class MetalEncoder::Impl final {
                               "cannot write HEVC Annex-B access unit");
       } else {
         completions.fetch_add(1, std::memory_order_relaxed);
-        last_completion_ns.store(now(), std::memory_order_relaxed);
+        const auto completed_at = now();
+        last_completion_ns.store(completed_at, std::memory_order_relaxed);
+        if (metrics_ != nullptr) {
+          metrics_->encode_completions.fetch_add(
+              1, std::memory_order_relaxed);
+          metrics_->encode_last_completion_ns.store(
+              completed_at, std::memory_order_relaxed);
+        }
       }
       settle(ticket);
     }
@@ -595,10 +640,12 @@ class MetalEncoder::Impl final {
     void* now_context_{};
     std::uint64_t (*now_ns_)(void*) noexcept{};
     std::shared_ptr<void> lifetime_anchor_;
+    swim::core::RuntimeCounters* metrics_{};
     std::atomic_bool writer_closed_{};
     std::mutex writer_mutex_;
     mutable std::mutex error_mutex_;
     std::string fatal_message_;
+
   };
 
   class SessionHandle final {
@@ -653,7 +700,8 @@ class MetalEncoder::Impl final {
       : metrics_(&metrics), drain_timeout_(kDrainTimeout) {
     validate_dimensions(width, height);
     auto writer = make_production_writer(config);
-    state_ = std::make_shared<State>(writer, nullptr, nullptr, nullptr);
+    state_ = std::make_shared<State>(writer, nullptr, nullptr, nullptr,
+                                     metrics_);
     tickets_ = std::make_unique<CallbackTicket[]>(kEncoderInputCapacity);
     create_production_session(width, height);
     initialize_completion_context();
@@ -668,9 +716,12 @@ class MetalEncoder::Impl final {
     validate_dependencies(dependencies);
     state_ = std::make_shared<State>(
         dependencies.writer, dependencies.now_context, dependencies.now_ns,
-        std::move(dependencies.lifetime_anchor));
+        std::move(dependencies.lifetime_anchor), metrics_);
     state_->using_hardware.store(dependencies.native.using_hardware,
                                  std::memory_order_relaxed);
+    metrics_->encode_using_hardware.store(
+        dependencies.native.using_hardware ? 1U : 0U,
+        std::memory_order_relaxed);
     tickets_ = std::make_unique<CallbackTicket[]>(kEncoderInputCapacity);
     session_ = std::make_shared<SessionHandle>(dependencies.native);
     initialize_completion_context();
@@ -687,6 +738,7 @@ class MetalEncoder::Impl final {
       return false;
     }
     auto input = state->gate.try_acquire();
+    state->sync_gate_metrics();
     if (!input.has_value()) {
       state->record_drop();
       return false;
@@ -714,6 +766,10 @@ class MetalEncoder::Impl final {
         &info_flags, &Impl::injected_callback, nullptr);
     if (status != noErr) {
       state->rejected_frames.fetch_add(1, std::memory_order_relaxed);
+      if (metrics_ != nullptr) {
+        metrics_->encode_rejected_frames.fetch_add(
+            1, std::memory_order_relaxed);
+      }
       if (claim_ticket(callback_ticket)) {
         state->record_drop_once(callback_ticket);
         state->settle(callback_ticket);
@@ -722,6 +778,10 @@ class MetalEncoder::Impl final {
       return false;
     }
     state->submissions.fetch_add(1, std::memory_order_relaxed);
+    if (metrics_ != nullptr) {
+      metrics_->encode_submissions.fetch_add(1,
+                                             std::memory_order_relaxed);
+    }
     if ((info_flags & kVTEncodeInfo_FrameDropped) != 0) {
       if (claim_ticket(callback_ticket)) {
         state->record_frame_drop(callback_ticket);
@@ -760,6 +820,10 @@ class MetalEncoder::Impl final {
       tickets_.reset();
     } else {
       state->drain_timed_out.store(true, std::memory_order_relaxed);
+      if (metrics_ != nullptr) {
+        metrics_->encode_drain_timeouts.fetch_add(
+            1, std::memory_order_relaxed);
+      }
       session->invalidate();
       const bool callback_in_flight = retire_unclaimed_tickets();
       if (!callback_in_flight) {
@@ -981,6 +1045,9 @@ class MetalEncoder::Impl final {
       throw;
     }
     state_->using_hardware.store(true, std::memory_order_relaxed);
+    if (metrics_ != nullptr) {
+      metrics_->encode_using_hardware.store(1, std::memory_order_relaxed);
+    }
     session_ = std::make_shared<SessionHandle>(MetalEncoderNativeSession{
         session, &Impl::vt_encode, &Impl::vt_complete_frames,
         &Impl::vt_invalidate, &Impl::vt_release, true});
@@ -1036,24 +1103,6 @@ class MetalEncoder::Impl final {
     }
     auto& metrics = *metrics_;
     const auto& state = *state_;
-    metrics.encode_submissions.fetch_add(
-        state.submissions.load(std::memory_order_relaxed),
-        std::memory_order_relaxed);
-    metrics.encode_completions.fetch_add(
-        state.completions.load(std::memory_order_relaxed),
-        std::memory_order_relaxed);
-    metrics.encode_bytes.fetch_add(
-        state.bytes.load(std::memory_order_relaxed),
-        std::memory_order_relaxed);
-    metrics.encode_drops.fetch_add(
-        state.drops.load(std::memory_order_relaxed),
-        std::memory_order_relaxed);
-    metrics.encode_rejected_frames.fetch_add(
-        state.rejected_frames.load(std::memory_order_relaxed),
-        std::memory_order_relaxed);
-    metrics.encode_callback_errors.fetch_add(
-        state.callback_errors.load(std::memory_order_relaxed),
-        std::memory_order_relaxed);
     metrics.encode_first_submit_ns.store(
         state.first_submit_ns.load(std::memory_order_relaxed),
         std::memory_order_relaxed);
@@ -1070,9 +1119,6 @@ class MetalEncoder::Impl final {
                                            std::memory_order_relaxed);
     metrics.encode_using_hardware.store(
         state.using_hardware.load(std::memory_order_relaxed) ? 1U : 0U,
-        std::memory_order_relaxed);
-    metrics.encode_drain_timeouts.fetch_add(
-        state.drain_timed_out.load(std::memory_order_relaxed) ? 1U : 0U,
         std::memory_order_relaxed);
     metrics_ = nullptr;
   }

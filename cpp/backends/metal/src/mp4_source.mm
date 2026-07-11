@@ -426,6 +426,8 @@ class Mp4VideoToolboxSource::Impl final {
                   std::to_string(data_ready) + ")"};
         }
         counters_.received.fetch_add(1, std::memory_order_relaxed);
+        counters_.camera_received[camera_index_].fetch_add(
+            1, std::memory_order_relaxed);
         health.on_frame(std::chrono::steady_clock::now());
         const auto pts = CMSampleBufferGetPresentationTimeStamp(sample);
         pace(pts, first_pts, first_wall);

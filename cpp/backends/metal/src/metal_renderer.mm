@@ -208,6 +208,10 @@ std::uint32_t MetalOutputPool::high_water() const noexcept {
   return high_water_.load(std::memory_order_relaxed);
 }
 
+std::uint32_t MetalOutputPool::in_use() const noexcept {
+  return in_use_.load(std::memory_order_relaxed);
+}
+
 void MetalOutputPool::release(MetalOutputSlot* slot) noexcept {
   const auto previous =
       slot->references.fetch_sub(1, std::memory_order_release);
@@ -566,6 +570,10 @@ class MetalStitchRenderer::Impl final
     }
     const auto in_use =
         inflight_in_use_.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (metrics_ != nullptr) {
+      metrics_->render_inflight_in_use.store(in_use,
+                                             std::memory_order_relaxed);
+    }
     update_high_water(inflight_high_water_, in_use,
                       metrics_ == nullptr
                           ? nullptr
@@ -582,6 +590,8 @@ class MetalStitchRenderer::Impl final
     if (metrics_ != nullptr) {
       metrics_->render_output_high_water.store(output_pool_.high_water(),
                                                std::memory_order_relaxed);
+      metrics_->render_output_in_use.store(output_pool_.in_use(),
+                                           std::memory_order_relaxed);
     }
 
     try {
@@ -614,13 +624,20 @@ class MetalStitchRenderer::Impl final
           owner->record_fatal(
               metal_error(@"Metal command buffer failed", completed.error));
         } else {
-          owner->record_completion();
+          owner->record_completion(completed);
           completed_output = std::move(completed_record->output);
         }
         completed_record->input_leases = {};
         completed_record->frame_views = {};
         completed_record->output = {};
-        owner->inflight_in_use_.fetch_sub(1, std::memory_order_relaxed);
+        const auto remaining = owner->inflight_in_use_.fetch_sub(
+                                   1, std::memory_order_relaxed) - 1;
+        if (owner->metrics_ != nullptr) {
+          owner->metrics_->render_inflight_in_use.store(
+              remaining, std::memory_order_relaxed);
+          owner->metrics_->render_output_in_use.store(
+              owner->output_pool_.in_use(), std::memory_order_relaxed);
+        }
         completed_record->busy.store(false, std::memory_order_release);
         if (completed_output && owner->completed_output_sink_) {
           try {
@@ -758,14 +775,32 @@ class MetalStitchRenderer::Impl final
 
   void record_first_submit() noexcept {
     auto expected = std::uint64_t{0};
-    first_submit_ns_.compare_exchange_strong(
-        expected, steady_nanoseconds(), std::memory_order_relaxed,
-        std::memory_order_relaxed);
+    const auto submitted_at = steady_nanoseconds();
+    if (first_submit_ns_.compare_exchange_strong(
+            expected, submitted_at, std::memory_order_relaxed,
+            std::memory_order_relaxed) && metrics_ != nullptr) {
+      auto metrics_zero = std::uint64_t{0};
+      metrics_->render_first_submit_ns.compare_exchange_strong(
+          metrics_zero, submitted_at, std::memory_order_relaxed,
+          std::memory_order_relaxed);
+    }
   }
 
-  void record_completion() noexcept {
+  void record_completion(id<MTLCommandBuffer> command) noexcept {
     completed_count_.fetch_add(1, std::memory_order_relaxed);
-    swim::core::record_atomic_max(last_completion_ns_, steady_nanoseconds());
+    const auto completed_at = steady_nanoseconds();
+    swim::core::record_atomic_max(last_completion_ns_, completed_at);
+    if (metrics_ != nullptr) {
+      metrics_->render_completions.fetch_add(1,
+                                             std::memory_order_relaxed);
+      swim::core::record_atomic_max(metrics_->render_last_completion_ns,
+                                    completed_at);
+    }
+    if (metrics_ != nullptr && command.GPUEndTime >= command.GPUStartTime) {
+      const auto duration = command.GPUEndTime - command.GPUStartTime;
+      metrics_->gpu_render_duration.observe(std::chrono::milliseconds{
+          static_cast<std::chrono::milliseconds::rep>(duration * 1000.0)});
+    }
   }
 
   void flush_completion_metrics() noexcept {
@@ -777,9 +812,6 @@ class MetalStitchRenderer::Impl final
     if (metrics == nullptr) {
       return;
     }
-    metrics->render_completions.fetch_add(
-        completed_count_.load(std::memory_order_relaxed),
-        std::memory_order_relaxed);
     auto expected = std::uint64_t{0};
     metrics->render_first_submit_ns.compare_exchange_strong(
         expected, first_submit_ns_.load(std::memory_order_relaxed),
@@ -787,6 +819,11 @@ class MetalStitchRenderer::Impl final
     swim::core::record_atomic_max(
         metrics->render_last_completion_ns,
         last_completion_ns_.load(std::memory_order_relaxed));
+    metrics->render_inflight_in_use.store(
+        inflight_in_use_.load(std::memory_order_relaxed),
+        std::memory_order_relaxed);
+    metrics->render_output_in_use.store(output_pool_.in_use(),
+                                        std::memory_order_relaxed);
   }
 
   void drain_noexcept() noexcept {

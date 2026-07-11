@@ -1,6 +1,7 @@
 #include <swim/metal/videotoolbox_decoder.hpp>
 
 #include <swim/core/hot_path_allocations.hpp>
+#include <swim/core/render_completion_gate.hpp>
 
 #import <Foundation/Foundation.h>
 #import <VideoToolbox/VideoToolbox.h>
@@ -85,11 +86,17 @@ class MetalDecodedSurfacePool final
     : public std::enable_shared_from_this<MetalDecodedSurfacePool> {
  public:
   MetalDecodedSurfacePool(std::shared_ptr<MetalContext> context,
-                          std::uint32_t capacity)
+                          std::uint32_t capacity,
+                          std::uint32_t camera_index,
+                          swim::core::RuntimeCounters& metrics)
       : context_(std::move(context)),
         capacity_(capacity),
+        camera_index_(camera_index),
+        metrics_(metrics),
         slots_(std::make_unique<MetalDecodedSurface[]>(capacity)),
         free_mask_(surface_initial_mask(capacity)) {
+    metrics_.decode_surface_capacity[camera_index_].store(
+        capacity_, std::memory_order_relaxed);
     for (std::uint32_t index = 0; index < capacity_; ++index) {
       slots_[index].pool_index = index;
       slots_[index].owner = this;
@@ -114,9 +121,16 @@ class MetalDecodedSurfacePool final
         auto& slot = slots_[index];
         slot.lifetime_anchor = shared_from_this();
         slot.references.store(1, std::memory_order_release);
+        const auto in_use =
+            metrics_.decode_surface_in_use[camera_index_].fetch_add(
+                1, std::memory_order_relaxed) + 1;
+        swim::core::record_atomic_max(
+            metrics_.decode_surface_high_water[camera_index_], in_use);
         return &slot;
       }
     }
+    metrics_.decode_surface_pool_misses[camera_index_].fetch_add(
+        1, std::memory_order_relaxed);
     return nullptr;
   }
 
@@ -139,12 +153,16 @@ class MetalDecodedSurfacePool final
       surface->pixel_buffer = nullptr;
     }
     free_mask_.fetch_or(std::uint64_t{1} << index, std::memory_order_release);
+    metrics_.decode_surface_in_use[camera_index_].fetch_sub(
+        1, std::memory_order_relaxed);
   }
 
  private:
   // Leases can outlive the decoder, so the pool also anchors the device/cache.
   std::shared_ptr<MetalContext> context_;
   const std::uint32_t capacity_;
+  const std::uint32_t camera_index_;
+  swim::core::RuntimeCounters& metrics_;
   std::unique_ptr<MetalDecodedSurface[]> slots_;
   std::atomic_uint64_t free_mask_;
 };
@@ -249,13 +267,17 @@ class VideoToolboxDecoder::Impl final {
         metrics_(metrics),
         tickets_(ticket_capacity),
         surfaces_(std::make_shared<MetalDecodedSurfacePool>(context_,
-                                                            surface_capacity)) {
+                                                            surface_capacity,
+                                                            camera_index_,
+                                                            metrics_)) {
     if (context_ == nullptr || context_->device == nil ||
         context_->texture_cache == nullptr) {
       throw std::invalid_argument("VideoToolbox decoder requires a valid Metal context");
     }
     metrics_.native_decode_tickets.fetch_add(ticket_capacity,
                                              std::memory_order_relaxed);
+    metrics_.decode_ticket_capacity[camera_index_].store(
+        ticket_capacity, std::memory_order_relaxed);
   }
 
   ~Impl() { invalidate(); }
@@ -336,6 +358,11 @@ class VideoToolboxDecoder::Impl final {
       swim::core::HotPathAllocationScope hot_path;
       ticket = tickets_.try_acquire();
       if (ticket != nullptr) {
+        const auto in_use =
+            metrics_.decode_ticket_in_use[camera_index_].fetch_add(
+                1, std::memory_order_relaxed) + 1;
+        swim::core::record_atomic_max(
+            metrics_.decode_ticket_high_water[camera_index_], in_use);
         ticket->camera_index = camera_index_;
         ticket->decoder_generation = decoder_generation;
         ticket->arrived_at = std::chrono::steady_clock::now();
@@ -345,6 +372,8 @@ class VideoToolboxDecoder::Impl final {
     }
     if (ticket == nullptr) {
       metrics_.pool_exhaustion.fetch_add(1, std::memory_order_relaxed);
+      metrics_.decode_ticket_pool_misses[camera_index_].fetch_add(
+          1, std::memory_order_relaxed);
       stats_.dropped.fetch_add(1, std::memory_order_relaxed);
       return DecodeSubmitResult::dropped_pool;
     }
@@ -365,6 +394,8 @@ class VideoToolboxDecoder::Impl final {
       swim::core::HotPathAllocationScope hot_path;
       if (status != noErr) {
         tickets_.release(ticket);
+        metrics_.decode_ticket_in_use[camera_index_].fetch_sub(
+            1, std::memory_order_relaxed);
         stats_.errors.fetch_add(1, std::memory_order_relaxed);
         set_recoverable_error_for_generation(status, decoder_generation);
         return DecodeSubmitResult::recoverable_error;
@@ -452,7 +483,11 @@ class VideoToolboxDecoder::Impl final {
                        VTDecodeInfoFlags info_flags,
                        CVImageBufferRef image_buffer,
                        CMTime presentation_time) noexcept {
-    const auto release_ticket = [this, ticket] { tickets_.release(ticket); };
+    const auto release_ticket = [this, ticket] {
+      tickets_.release(ticket);
+      metrics_.decode_ticket_in_use[camera_index_].fetch_sub(
+          1, std::memory_order_relaxed);
+    };
     std::lock_guard publish_lock(publish_mutex_);
     CVPixelBufferRef pixel_buffer = nullptr;
     std::optional<swim::core::ColorMatrix> matrix;
@@ -594,6 +629,10 @@ class VideoToolboxDecoder::Impl final {
     first_frame_of_generation_ = false;
     metrics_.decoded.fetch_add(1, std::memory_order_relaxed);
     metrics_.published.fetch_add(1, std::memory_order_relaxed);
+    metrics_.camera_decoded[camera_index_].fetch_add(
+        1, std::memory_order_relaxed);
+    metrics_.camera_published[camera_index_].fetch_add(
+        1, std::memory_order_relaxed);
     release_ticket();
   }
 

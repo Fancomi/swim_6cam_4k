@@ -21,6 +21,10 @@ namespace swim::core {
 
 struct BenchmarkGraph;
 
+struct BackendRuntimeSample final {
+  std::uint64_t gpu_allocated_bytes{};
+};
+
 class ISource {
  public:
   virtual ~ISource() = default;
@@ -66,6 +70,7 @@ class IBackend {
       const BenchmarkGraph& graph) = 0;
   virtual void bind_metrics(RuntimeCounters&) noexcept {}
   virtual void bind_lifecycle(RunLifecycle&) noexcept {}
+  virtual BackendRuntimeSample sample_runtime() const noexcept { return {}; }
   virtual void run_main_loop(std::stop_token token) = 0;
   virtual void stop_main_loop() noexcept = 0;
 };

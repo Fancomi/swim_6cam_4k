@@ -231,9 +231,13 @@ class MetalPreview::Impl final
     if (!output) {
       return false;
     }
+    if (metrics_ != nullptr) {
+      metrics_->preview_submissions.fetch_add(1,
+                                              std::memory_order_relaxed);
+    }
     const auto accepted = mailbox_.offer(std::move(output));
     if (!accepted) {
-      preview_drops_.fetch_add(1, std::memory_order_relaxed);
+      record_preview_drop();
     }
     return accepted;
   }
@@ -279,14 +283,17 @@ class MetalPreview::Impl final
     }
     stop_requested_.store(true, std::memory_order_release);
     if (mailbox_.close_and_clear()) {
-      preview_drops_.fetch_add(1, std::memory_order_relaxed);
+      record_preview_drop();
     }
     [timer_ invalidate];
     timer_ = nil;
     if (!present_gate_.close_and_wait_until(
             std::chrono::steady_clock::now() + kDrainTimeout)) {
       if (present_gate_.pending() != 0) {
-        static_cast<void>(present_accounting_.settle_dropped());
+        if (present_accounting_.settle_dropped()) {
+          record_preview_drop();
+          record_preview_completion(false);
+        }
       }
       flush_metrics();
       destroy_ui();
@@ -308,6 +315,24 @@ class MetalPreview::Impl final
   }
 
  private:
+  void record_preview_drop() noexcept {
+    preview_drops_.fetch_add(1, std::memory_order_relaxed);
+    if (metrics_ != nullptr) {
+      metrics_->preview_drops.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+
+  void record_preview_completion(bool presented) noexcept {
+    if (metrics_ == nullptr) {
+      return;
+    }
+    metrics_->preview_completions.fetch_add(1,
+                                            std::memory_order_relaxed);
+    if (presented) {
+      metrics_->preview_presents.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+
   void window_closed() noexcept {
     stop_requested_.store(true, std::memory_order_release);
     try {
@@ -346,21 +371,21 @@ class MetalPreview::Impl final
     }
     if (window_.miniaturized || !window_.visible ||
         (window_.occlusionState & NSWindowOcclusionStateVisible) == 0) {
-      preview_drops_.fetch_add(1, std::memory_order_relaxed);
+      record_preview_drop();
       present_in_flight_.store(false, std::memory_order_release);
       return;
     }
     update_drawable_size();
     id<CAMetalDrawable> drawable = [layer_ nextDrawable];
     if (drawable == nil || !present_gate_.try_accept()) {
-      preview_drops_.fetch_add(1, std::memory_order_relaxed);
+      record_preview_drop();
       present_in_flight_.store(false, std::memory_order_release);
       return;
     }
 
     id<MTLCommandBuffer> command = [preview_queue_ commandBuffer];
     if (command == nil) {
-      preview_drops_.fetch_add(1, std::memory_order_relaxed);
+      record_preview_drop();
       present_gate_.complete();
       present_in_flight_.store(false, std::memory_order_release);
       return;
@@ -374,7 +399,7 @@ class MetalPreview::Impl final
     id<MTLRenderCommandEncoder> encoder =
         [command renderCommandEncoderWithDescriptor:pass];
     if (encoder == nil) {
-      preview_drops_.fetch_add(1, std::memory_order_relaxed);
+      record_preview_drop();
       present_gate_.complete();
       present_in_flight_.store(false, std::memory_order_release);
       return;
@@ -397,7 +422,7 @@ class MetalPreview::Impl final
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [encoder endEncoding];
     if (!present_accounting_.begin()) {
-      preview_drops_.fetch_add(1, std::memory_order_relaxed);
+      record_preview_drop();
       present_gate_.complete();
       present_in_flight_.store(false, std::memory_order_release);
       return;
@@ -410,9 +435,14 @@ class MetalPreview::Impl final
     [command addCompletedHandler:^(id<MTLCommandBuffer> completed) {
       static_cast<void>(retained_output.texture());
       if (completed.status == MTLCommandBufferStatusCompleted) {
-        static_cast<void>(owner->present_accounting_.settle_presented());
+        if (owner->present_accounting_.settle_presented()) {
+          owner->record_preview_completion(true);
+        }
       } else {
-        static_cast<void>(owner->present_accounting_.settle_dropped());
+        if (owner->present_accounting_.settle_dropped()) {
+          owner->record_preview_drop();
+          owner->record_preview_completion(false);
+        }
       }
       owner->present_gate_.complete();
       owner->present_in_flight_.store(false, std::memory_order_release);
@@ -428,14 +458,6 @@ class MetalPreview::Impl final
     if (metrics == nullptr) {
       return;
     }
-    const auto presentations = present_accounting_.snapshot();
-    metrics->preview_drops.fetch_add(
-        preview_drops_.load(std::memory_order_relaxed) +
-            presentations.drops,
-        std::memory_order_relaxed);
-    metrics->preview_presents.fetch_add(
-        presentations.presents,
-        std::memory_order_relaxed);
     metrics->native_command_buffers.fetch_add(
         native_command_buffers_.load(std::memory_order_relaxed),
         std::memory_order_relaxed);

@@ -400,6 +400,10 @@ class MetalBackend final : public swim::core::IBackend {
     }
   }
 
+  swim::core::BackendRuntimeSample sample_runtime() const noexcept override {
+    return {static_cast<std::uint64_t>(context_->device.currentAllocatedSize)};
+  }
+
  private:
   std::shared_ptr<MetalContext> context_;
   std::shared_ptr<MetalCompletedOutputRouter> router_;

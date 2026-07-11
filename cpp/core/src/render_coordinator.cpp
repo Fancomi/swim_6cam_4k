@@ -78,9 +78,11 @@ RenderSubmitResult RenderCoordinator::tick(Clock::time_point sampled_at) {
           last_real_generations_[camera] == next.decoder_generation &&
           next.sequence > last_real_sequences_[camera] &&
           next.sequence - last_real_sequences_[camera] > 1) {
-          metrics_.overwritten.fetch_add(next.sequence -
-                                             last_real_sequences_[camera] - 1,
-                                         std::memory_order_relaxed);
+          const auto missed =
+              next.sequence - last_real_sequences_[camera] - 1;
+          metrics_.overwritten.fetch_add(missed, std::memory_order_relaxed);
+          metrics_.camera_overwritten[camera].fetch_add(
+              missed, std::memory_order_relaxed);
       }
       last_real_generations_[camera] = next.decoder_generation;
       last_real_sequences_[camera] = next.sequence;
@@ -97,6 +99,8 @@ RenderSubmitResult RenderCoordinator::tick(Clock::time_point sampled_at) {
 
     if (fronts_[camera]) {
       metrics_.reused.fetch_add(1, std::memory_order_relaxed);
+      metrics_.camera_reused[camera].fetch_add(1,
+                                               std::memory_order_relaxed);
     }
     const auto age_origin = last_source_frames_[camera] == Clock::time_point{}
                                 ? first_tick_
@@ -108,16 +112,25 @@ RenderSubmitResult RenderCoordinator::tick(Clock::time_point sampled_at) {
     }
   }
 
+  auto youngest_age = std::chrono::milliseconds::max();
+  auto oldest_age = std::chrono::milliseconds::zero();
+  std::size_t measured_frames = 0;
   for (std::size_t camera = 0; camera < kCameraCount; ++camera) {
     if (!fronts_[camera] || replacements_[camera]) {
       continue;
     }
     const auto arrived = fronts_[camera].metadata().arrived_at;
     if (arrived != Clock::time_point{} && sampled_at >= arrived) {
-      metrics_.frame_age[camera].observe(
-          std::chrono::duration_cast<std::chrono::milliseconds>(sampled_at -
-                                                                 arrived));
+      const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
+          sampled_at - arrived);
+      metrics_.frame_age[camera].observe(age);
+      youngest_age = std::min(youngest_age, age);
+      oldest_age = std::max(oldest_age, age);
+      ++measured_frames;
     }
+  }
+  if (measured_frames > 1) {
+    metrics_.snapshot_age_spread.observe(oldest_age - youngest_age);
   }
 
   RenderSnapshot snapshot{fronts_, sampled_at};
