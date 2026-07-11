@@ -99,7 +99,6 @@ class EncoderInputGate final {
 
  private:
   friend class Lease;
-  void release_unarmed(PoolLease& lease) noexcept;
   void record_release() noexcept;
 
   Pool pool_;

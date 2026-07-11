@@ -190,11 +190,15 @@ std::size_t EncoderInputGate::Lease::index() const noexcept {
 }
 
 void EncoderInputGate::Lease::release() noexcept {
+  auto* const owner = owner_;
   if (owner_ != nullptr && lease_.has_value()) {
-    owner_->release_unarmed(*lease_);
+    lease_->operator->()->output = {};
   }
   lease_.reset();
   owner_ = nullptr;
+  if (owner != nullptr) {
+    owner->record_release();
+  }
 }
 
 EncoderInputGate::EncoderInputGate(std::uint32_t capacity)
@@ -279,11 +283,6 @@ std::uint64_t EncoderInputGate::misses() const noexcept {
   return misses_.load(std::memory_order_relaxed);
 }
 
-void EncoderInputGate::release_unarmed(PoolLease& lease) noexcept {
-  lease->output = {};
-  record_release();
-}
-
 void EncoderInputGate::record_release() noexcept {
   const auto previous = in_use_.fetch_sub(1, std::memory_order_release);
   if (previous == 1) {
@@ -332,6 +331,10 @@ class MetalEncoder::Impl final
     CFDictionaryRef specification = CFDictionaryCreate(
         kCFAllocatorDefault, keys, values, 2,
         &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    if (specification == nullptr) {
+      close_file();
+      throw std::runtime_error("cannot create HEVC encoder specification");
+    }
     const auto create_status = VTCompressionSessionCreate(
         kCFAllocatorDefault, static_cast<int32_t>(width),
         static_cast<int32_t>(height), kCMVideoCodecType_HEVC, specification,
@@ -631,11 +634,12 @@ class MetalEncoder::Impl final
   }
 
   void settle(CallbackTicket& ticket) noexcept {
-    gate_.settle(ticket.gate_ticket);
-    metrics_.encode_input_in_use.store(gate_.in_use(),
-                                       std::memory_order_relaxed);
+    auto* const gate_ticket = ticket.gate_ticket;
     ticket.gate_ticket = nullptr;
     ticket.owner.reset();
+    gate_.settle(gate_ticket);
+    metrics_.encode_input_in_use.store(gate_.in_use(),
+                                       std::memory_order_relaxed);
   }
 
   void record_drop() noexcept {
@@ -652,11 +656,13 @@ class MetalEncoder::Impl final
   }
 
   void mark_fatal(std::string message) noexcept {
-    bool expected = false;
-    if (fatal_.compare_exchange_strong(expected, true,
-                                       std::memory_order_acq_rel)) {
-      std::lock_guard lock(error_mutex_);
+    if (fatal_.load(std::memory_order_acquire)) {
+      return;
+    }
+    std::lock_guard lock(error_mutex_);
+    if (!fatal_.load(std::memory_order_relaxed)) {
       fatal_message_ = std::move(message);
+      fatal_.store(true, std::memory_order_release);
     }
   }
 
