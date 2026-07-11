@@ -401,7 +401,6 @@ class MetalBackend final : public swim::core::IBackend {
   }
 
   swim::core::BackendRuntimeSample sample_runtime() const noexcept override {
-    CVMetalTextureCacheFlush(context_->texture_cache, 0);
     return {static_cast<std::uint64_t>(context_->device.currentAllocatedSize)};
   }
 
