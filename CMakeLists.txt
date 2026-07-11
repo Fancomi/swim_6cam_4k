@@ -27,6 +27,7 @@ add_custom_target(runtime_asset DEPENDS ${RUNTIME_ASSET})
 add_library(swim_core
   cpp/core/src/asset.cpp
   cpp/core/src/backend.cpp
+  cpp/core/src/benchmark_stage.cpp
   cpp/core/src/camera_health.cpp
   cpp/core/src/config.cpp
   cpp/core/src/frame.cpp
@@ -48,6 +49,7 @@ add_executable(swim_core_tests
   cpp/tests/test_main.cpp
   cpp/tests/test_asset.cpp
   cpp/tests/test_backend.cpp
+  cpp/tests/test_benchmark_stage.cpp
   cpp/tests/test_camera_health.cpp
   cpp/tests/test_config.cpp
   cpp/tests/test_frame_mailbox.cpp
