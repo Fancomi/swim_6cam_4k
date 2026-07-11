@@ -538,15 +538,17 @@ class VideoToolboxDecoder::Impl final {
                                      CVImageBufferRef image_buffer,
                                      CMTime presentation_time,
                                      CMTime presentation_duration) noexcept {
-    static_cast<void>(refcon);
-    static_cast<void>(presentation_duration);
-    auto* ticket = static_cast<DecodeTicket*>(source_refcon);
-    if (ticket == nullptr || ticket->decoder == nullptr) {
-      return;
+    @autoreleasepool {
+      static_cast<void>(refcon);
+      static_cast<void>(presentation_duration);
+      auto* ticket = static_cast<DecodeTicket*>(source_refcon);
+      if (ticket == nullptr || ticket->decoder == nullptr) {
+        return;
+      }
+      auto* decoder = static_cast<Impl*>(ticket->decoder);
+      decoder->handle_callback(ticket, status, info_flags, image_buffer,
+                               presentation_time);
     }
-    auto* decoder = static_cast<Impl*>(ticket->decoder);
-    decoder->handle_callback(ticket, status, info_flags, image_buffer,
-                             presentation_time);
   }
 
   void release_ticket(DecodeTicket* ticket) noexcept {
