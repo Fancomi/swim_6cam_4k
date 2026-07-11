@@ -145,6 +145,19 @@ if(APPLE)
   swim_enable_warnings(swim_metal_preview)
   swim_enable_sanitizers(swim_metal_preview)
 
+  add_library(swim_metal_encode
+    cpp/backends/metal/src/metal_encoder.mm)
+  target_include_directories(swim_metal_encode PUBLIC
+    cpp/backends/metal/include)
+  target_compile_options(swim_metal_encode PRIVATE -fobjc-arc)
+  target_link_libraries(swim_metal_encode PUBLIC
+    swim_metal_renderer
+    ${SWIM_VIDEOTOOLBOX_FRAMEWORK}
+    ${SWIM_COREMEDIA_FRAMEWORK}
+    ${SWIM_COREVIDEO_FRAMEWORK})
+  swim_enable_warnings(swim_metal_encode)
+  swim_enable_sanitizers(swim_metal_encode)
+
   add_library(swim_metal_decode
     cpp/backends/metal/src/mp4_source.mm
     cpp/backends/metal/src/videotoolbox_decoder.mm)
@@ -198,7 +211,7 @@ if(APPLE)
     cpp/tests/test_main.cpp
     cpp/tests/metal_encoder_test.mm)
   target_compile_options(metal_encoder_test PRIVATE -fobjc-arc)
-  target_link_libraries(metal_encoder_test PRIVATE swim_metal_renderer)
+  target_link_libraries(metal_encoder_test PRIVATE swim_metal_encode)
   swim_enable_warnings(metal_encoder_test)
   swim_enable_sanitizers(metal_encoder_test)
   add_test(NAME metal_encoder_test COMMAND metal_encoder_test)
