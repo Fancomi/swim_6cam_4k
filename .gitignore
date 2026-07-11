@@ -18,3 +18,7 @@ outputs/data/*.fbx
 
 # Compiled runtime assets are reproducible build outputs
 assets/generated/*.swasset
+
+# Benchmark runs are local machine evidence; keep only the directory anchor.
+benchmarks/*
+!benchmarks/.gitkeep

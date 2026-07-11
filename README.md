@@ -6,6 +6,66 @@
 
 本文所有命令都假定当前目录是项目根目录 `swim_fbx_demo/`。
 
+## 实时 Metal 路径
+
+仓库同时包含独立的 macOS 实时实现：六路 H.264 由 VideoToolbox 解码为 GPU 可见表面，Metal 以固定六网格合成 `5002x2102` 输出，并可分流到 preview 与硬件 HEVC。该运行路径不依赖 OpenCV 或 FFmpeg，不把解码像素读回 CPU；各路输入采用容量有界的 latest-frame 交换，接收端只消费当下最新完整帧。
+
+代码按语言隔离：实时核心位于 `cpp/core/`，Apple 原生后端位于 `cpp/backends/metal/`，离线资产与验证工具位于 `python/`，运行入口位于 `scripts/`。默认现场数据集仍是：
+
+```text
+/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K
+```
+
+构建并运行一个六路、30 秒、无窗口 preview、硬件 HEVC 空 sink 的实时 cell：
+
+```bash
+BUILD_TYPE=Release ./scripts/build_macos.sh
+build/macos/swim_realtime --config configs/macos_20260629.conf \
+  --stage=full --stream-count=6 --mode=realtime \
+  --duration-seconds=30 --preview=true --preview-visible=false \
+  --encode=true --encode-sink=null --metrics=benchmarks/manual.jsonl
+```
+
+`--preview-visible=false` 不是跳过 preview：它会创建私有 Metal render target，对每个被接受的最新输出执行真实 shader copy/render command，并等待 GPU completion；`--preview-visible=true` 才创建 AppKit/CAMetalLayer 窗口。
+
+## Release 性能矩阵
+
+完整矩阵覆盖六个真实 stage、`1/2/4/6` 路输入以及 paced/unpaced 两种节奏，共 48 个 cell。脚本只构建一次 Release、只计算一次 asset/六源 SHA-256，每个 cell 写独立 JSONL 并立即校验；任一进程或校验失败都会停止，不会静默重试或拼入最终结果。
+
+一秒功能矩阵由主测试流程执行：
+
+```bash
+./scripts/run_metal_benchmarks.sh --quick
+```
+
+可发布矩阵每个 cell 至少 15 秒：
+
+```bash
+./scripts/run_metal_benchmarks.sh --duration 15
+```
+
+结果位于 `benchmarks/runs/<run_id>/`，成功后 `benchmarks/latest` 指向该目录：
+
+- `cells/*.jsonl`：带唯一 `(stage, stream_count, pacing)` 身份的原始 cell；
+- `results.jsonl`：48 个 cell 全部通过后才生成的合并记录；
+- `summary.csv`、`summary.md`：最终吞吐、区间 p50/p95、瓶颈排名及 preview/encode 增量成本；
+- `manifest.json`：run/build/hash 身份与 `publishable` 标志；不足 15 秒始终为 `false`。
+
+可单独复验已生成的矩阵：
+
+```bash
+.venv/bin/python -m python.validation.summarize_benchmarks \
+  benchmarks/latest/results.jsonl
+```
+
+默认十分钟的六路 paced full soak：
+
+```bash
+./scripts/run_metal_soak.sh
+```
+
+soak 会报告 RSS 与 Metal allocation 的每分钟线性斜率，并拒绝 host copy、容量 high-water 越界、编码 callback/drain 错误，以及 warm-up 后连续五个区间低于 29 FPS。可用 `--max-rss-slope` 和 `--max-gpu-slope` 增加显式增长阈值。
+
 ## 处理流程
 
 1. `python.assets.bake_uv` 可选地把中线 UV 延伸写入一个新的 FBX，原始模型不需要被覆盖。
