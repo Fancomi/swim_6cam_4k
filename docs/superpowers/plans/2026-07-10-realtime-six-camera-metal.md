@@ -19,12 +19,17 @@
 - OpenCV and FFmpeg/FFprobe are offline validation tools only and must not link into `swim_realtime`.
 - The runtime path uses latest-complete-frame semantics and never waits for matching camera timestamps.
 - No decoded-pixel GPU-to-CPU-to-GPU copy, `glReadPixels`, BGR/RGB CPU conversion, or unbounded queue is allowed.
+- Final compressed output is hardware-required HEVC at exact `5002x2102`;
+  startup fails unless VideoToolbox reports hardware acceleration, with no
+  software, resize, or split-stream fallback.
 - After warm-up, application-owned access units, descriptors, in-flight records, and output surfaces come from fixed pools.
 - Framework-required Metal/CoreVideo/VideoToolbox wrapper objects are permitted but must be measured separately.
 - Runtime feathering matches the current normalized distance-transform weights and target R'G'B' blend semantics.
 - Required local acceptance: six 4K streams and `5002x2102@30000/1001` preview for ten minutes, latest-frame-age p99 no more than two input periods, bounded memory/resources, and zero decoded-pixel host copies.
 - The Ubuntu `egl-cuda` backend is a later plan; this plan defines its interface slot but does not implement it.
 - Design source of truth: `docs/superpowers/specs/2026-07-10-realtime-six-camera-gpu-design.md`.
+- Exact output contract:
+  `docs/superpowers/specs/2026-07-11-hardware-hevc-output-design.md`.
 
 ---
 
@@ -1617,9 +1622,15 @@ git commit -m "feat: add non-blocking Metal preview"
 **Files:**
 - Create: `cpp/backends/metal/include/swim/metal/metal_encoder.hpp`
 - Create: `cpp/backends/metal/src/metal_encoder.mm`
-- Create: `cpp/tests/metal_encoder_test.mm`
-- Modify: `cpp/backends/metal/src/metal_renderer.mm`
+- Modify: `cpp/tests/metal_encoder_test.mm`
 - Modify: `cpp/backends/metal/src/metal_backend.mm`
+- Modify: `cpp/core/include/swim/core/metrics.hpp`
+- Modify: `cpp/core/src/metrics.cpp`
+- Modify: `cpp/app/main.cpp`
+- Modify: `cpp/tests/test_metrics.cpp`
+- Modify: `cpp/tests/test_config.cpp`
+- Modify: `cpp/tests/fixtures/valid.conf`
+- Modify: `cmake/AssertRuntimeFinalMetrics.cmake`
 - Modify: `configs/macos_20260629.conf`
 - Modify: `CMakeLists.txt`
 
@@ -1645,24 +1656,69 @@ TEST_CASE(encoder_input_saturation_drops_without_blocking_renderer) {
 }
 ```
 
-Also specify length-prefixed multi-NAL to Annex-B conversion, truncated and
-zero-length rejection, VPS/SPS/PPS insertion on keyframes, non-contiguous block
-input, and callback-owned output-lease lifetime. Use codec-neutral
-`write_length_prefixed_nals_as_annex_b`; the payload is not an AVCC structure.
+Rename the committed RED cases and API from AVCC-specific terminology to:
 
-`EncoderInputGate` is a thin backend-local wrapper around
-`FixedSlotPool<EncoderInputRecord>`. Each record contains one
-`MetalOutputLease`, CMTime PTS, and submission sequence. `try_acquire()` returns
-the pool's move-only lease; the VideoToolbox output callback resets the record
-and releases the slot.
+```cpp
+bool write_length_prefixed_nals_as_annex_b(
+    std::span<const std::uint8_t> access_unit,
+    std::uint8_t nal_length_bytes,
+    AnnexBWriter writer) noexcept;
+```
+
+Add RED cases for one-, two-, and four-byte NAL lengths, invalid length-field
+width, a NAL length crossing a chunk boundary, parameter-set ordering, and a
+callback-owned output lease remaining held until settlement. The payload is a
+length-prefixed access unit described by hvcC; it is not itself an AVCC/HVCC
+configuration box.
+
+`EncoderInputGate` wraps `FixedSlotPool<EncoderInputRecord>`. Each record owns
+one `MetalOutputLease`, CMTime PTS, and submission sequence. Preallocate one
+callback ticket per gate slot. A ticket holds the pool's move-only lease while
+VideoToolbox may access the pixel buffer, and its stable address is passed as
+`sourceFrameRefCon`; never allocate a callback context per frame.
 
 - [ ] **Step 2: Run and verify failure**
 
 Run: `cmake --build build/macos --target metal_encoder_test`
 
-Expected: FAIL because the encoder input abstraction is absent.
+Expected: FAIL because the encoder header and implementation are absent.
 
 - [ ] **Step 3: Implement the real-time hardware encoder**
+
+Expose this backend-local interface:
+
+```cpp
+struct AnnexBWriter {
+  void* context{};
+  bool (*append)(void*, std::span<const std::uint8_t>) noexcept{};
+};
+
+struct MetalEncoderStats {
+  std::uint64_t submissions{};
+  std::uint64_t completions{};
+  std::uint64_t bytes{};
+  std::uint64_t drops{};
+  std::uint64_t errors{};
+  std::uint32_t input_capacity{};
+  std::uint32_t input_high_water{};
+  std::uint32_t input_in_use{};
+  bool using_hardware{};
+  bool drain_timed_out{};
+};
+
+class MetalEncoder final {
+ public:
+  MetalEncoder(std::uint32_t width, std::uint32_t height,
+               const swim::core::AppConfig& config,
+               swim::core::RuntimeCounters& metrics);
+  ~MetalEncoder();
+  bool offer(MetalOutputLease output, CMTime pts) noexcept;
+  void close_and_drain();
+  MetalEncoderStats stats() const noexcept;
+  bool has_fatal_error() const noexcept;
+  std::string fatal_error_message() const;
+};
+```
 
 Create a hardware-required `VTCompressionSession` for exact `5002x2102`, HEVC,
 with both require-hardware and enable-hardware encoder-specification keys. It
@@ -1670,21 +1726,31 @@ must fail startup if session preparation fails or
 `UsingHardwareAcceleratedVideoEncoder` is not true; no software or resize
 fallback is allowed.
 
+The session specification sets both
+`kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder` and
+`kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder` to true.
 Configure:
 
 ```objective-c++
-VTCompressionSessionCreate(/* ... */, 5002, 2102, kCMVideoCodecType_HEVC,
-                           encoder_specification, /* ... */);
 VTSessionSetProperty(session, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
 VTSessionSetProperty(session, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
 VTSessionSetProperty(session, kVTCompressionPropertyKey_ProfileLevel,
                      kVTProfileLevel_HEVC_Main_AutoLevel);
-// Expected rate 30000/1001, average bitrate 60,000,000, keyframe interval 60.
+VTSessionSetProperty(session, kVTCompressionPropertyKey_ExpectedFrameRate,
+                     (__bridge CFTypeRef)@(30000.0 / 1001.0));
+VTSessionSetProperty(session, kVTCompressionPropertyKey_AverageBitRate,
+                     (__bridge CFTypeRef)@(60'000'000));
+VTSessionSetProperty(session, kVTCompressionPropertyKey_MaxKeyFrameInterval,
+                     (__bridge CFTypeRef)@(60));
 ```
+
+Call `VTCompressionSessionPrepareToEncodeFrames`, copy
+`kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder`, and throw
+unless it is true. No second session attempt is allowed.
 
 Use a fixed input-record pool. `offer()` returns false immediately if no record
 is available or `VTCompressionSessionEncodeFrame` rejects the frame. The output
-callback converts HVCC length-prefixed NAL units to Annex-B start codes. Every
+callback converts length-prefixed HEVC NAL units to Annex-B start codes. Every
 keyframe/IRAP emits VPS, SPS, and PPS before its coded slices. Conversion must
 support non-contiguous `CMBlockBuffer` data with fixed scratch storage and reject
 truncated or zero-length NAL units. It writes through one bounded writer owned
@@ -1701,7 +1767,123 @@ flushes the serial completion router, closes preview admission, completes all
 VideoToolbox frames, drains the callback gate, closes the writer, and only then
 invalidates the session. Callback state must remain alive after a drain timeout.
 
-- [ ] **Step 4: Encode and validate a five-second sample**
+For a file sink, create parent directories and open the `.h265` output once in
+the constructor, before frame admission. For a null sink, execute the complete
+hardware encode and Annex-B accounting path but skip the append call. A writer
+failure marks a fatal encoder error, counts the failed access unit, and still
+settles its callback ticket; it cannot unwind through the VideoToolbox callback.
+
+The callback first validates `status`, sample readiness, format description,
+NAL-length width, and each parameter-set pointer/length. It writes parameter
+sets and payload, then clears the output lease, releases the gate ticket, and
+records completion. A shared Impl owns the session, tickets, writer, and
+metrics. On timeout it records the timeout and keeps all callback-reachable
+state alive through session invalidation; it never frees a raw callback context
+while VideoToolbox can call it.
+
+- [ ] **Step 4: Run encoder primitive and hardware tests green**
+
+Run:
+
+```bash
+cmake --build build/macos --target metal_encoder_test
+build/macos/metal_encoder_test
+```
+
+Expected: all gate, conversion, exact-size hardware, callback lifetime, and
+bounded-drain cases pass; hardware test reports true.
+
+- [ ] **Step 5: Write failing metric/config integration tests**
+
+Extend the immutable snapshot and reset test with:
+
+```cpp
+CHECK_EQ(snapshot.encode_submissions, 21u);
+CHECK_EQ(snapshot.encode_completions, 20u);
+CHECK_EQ(snapshot.encode_bytes, 1'000'000u);
+CHECK_EQ(snapshot.encode_drops, 3u);
+CHECK_EQ(snapshot.encode_errors, 0u);
+CHECK_EQ(snapshot.encode_input_capacity, 2u);
+CHECK_EQ(snapshot.encode_input_high_water, 2u);
+CHECK_EQ(snapshot.encode_input_pool_misses, 3u);
+CHECK(snapshot.encode_using_hardware);
+CHECK(!snapshot.encode_drain_timed_out);
+CHECK_EQ(snapshot.encode_completion_fps(), 20.0);
+```
+
+The completion FPS interval is
+`encode_last_completion_ns - encode_first_submit_ns`, with zero returned for a
+zero or regressing interval. Update the config fixture and CLI override
+expectations from `.h264` to `.h265`. Extend
+`AssertRuntimeFinalMetrics.cmake` so the setup-failure JSON must contain every
+new encode field with zero values and `encode_using_hardware:false`.
+
+- [ ] **Step 6: Run core tests and verify RED**
+
+Run: `cmake --build build/macos --target swim_core_tests`
+
+Expected: FAIL because the new snapshot fields and FPS function do not exist.
+
+- [ ] **Step 7: Add encoder metrics and final JSON**
+
+Add cache-line-separated atomic counters and immutable snapshot fields for:
+`encode_submissions`, `encode_completions`, `encode_bytes`, `encode_drops`,
+`encode_errors`, `encode_first_submit_ns`, `encode_last_completion_ns`,
+`encode_input_capacity`, `encode_input_high_water`,
+`encode_input_pool_misses`, `encode_using_hardware`, and
+`encode_drain_timed_out`. `snapshot_and_reset()` exchanges every field exactly
+once. Final JSON emits these exact names plus `encode_fps`.
+
+- [ ] **Step 8: Integrate serial zero-copy fan-out and shutdown**
+
+When either preview or encode is enabled, create exactly one
+`MetalCompletedOutputRouter`. Construct `MetalEncoder` only when
+`config.encode` is true, register it as another router sink, and derive PTS on
+the serial router queue:
+
+```objective-c++
+const std::weak_ptr<MetalEncoder> weak_encoder = encoder_;
+const auto fps_num = config.fps_num;
+const auto fps_den = config.fps_den;
+router_->add_sink(
+    [weak_encoder, sequence = std::uint64_t{0}, fps_num, fps_den]
+    (MetalOutputLease output) mutable {
+      const CMTime pts = CMTimeMake(
+          static_cast<std::int64_t>(sequence++) * fps_den, fps_num);
+      if (auto encoder = weak_encoder.lock()) {
+        static_cast<void>(encoder->offer(std::move(output), pts));
+      }
+    });
+```
+
+Preview and encoder receive reference-counted leases to the same IOSurface; no
+texture or pixel copy is added. `MetalRendererAdapter::drain()` runs renderer
+drain, router flush, preview close/drain, then encoder close/drain, retaining
+the first exception while still executing later cleanup. Encoder fatal state
+participates in adapter `has_fatal_error()` and `last_error()`.
+
+Declare adapter members in lifetime order `context_`, `router_`, `preview_`,
+`encoder_`, then `renderer_`, so reverse destruction tears down the renderer
+before every asynchronous consumer and tears down the shared Metal context
+last.
+
+Add `metal_encoder.mm` as a focused `swim_metal_encode` library linked to
+VideoToolbox/CoreMedia/CoreVideo and link it into `swim_metal_backend` and
+`metal_encoder_test`. Change the production config file sink to
+`outputs/videos/pool_metal.h265`.
+
+- [ ] **Step 9: Run all automated tests green**
+
+Run:
+
+```bash
+cmake --build build/macos
+ctest --test-dir build/macos --output-on-failure
+```
+
+Expected: build succeeds and every CTest passes.
+
+- [ ] **Step 10: Encode and validate a five-second sample**
 
 ```bash
 build/macos/swim_realtime --config configs/macos_20260629.conf \
@@ -1715,16 +1897,24 @@ ffprobe -v error -f hevc -select_streams v:0 \
 Expected: `codec_name=hevc`, `width=5002`, `height=2102`, decodable stream,
 monotonic PTS, no decoded-pixel host copies, and no render-thread wait.
 
-- [ ] **Step 5: Run preview and encode together**
+- [ ] **Step 11: Run preview and encode together**
 
-Run for 30 seconds with both enabled. Expected: fixed output pool remains within
-its configured capacity; slow output causes counted preview/encode drops, not
-mailbox growth or render blocking.
-
-- [ ] **Step 6: Commit encoding**
+Run:
 
 ```bash
-git add CMakeLists.txt configs cpp/backends/metal
+build/macos/swim_realtime --config configs/macos_20260629.conf \
+  --preview=true --encode=true --duration-seconds=30
+```
+
+Expected: exact output remains `5002x2102`, render remains near 29.97 fps,
+hardware flag is true, fixed output and encoder pools stay within capacity,
+decoded-pixel host copies remain zero, and any output pressure becomes counted
+preview/encode drops rather than mailbox growth or render blocking.
+
+- [ ] **Step 12: Commit encoding**
+
+```bash
+git add CMakeLists.txt configs cpp/app cpp/core cpp/backends/metal cpp/tests
 git commit -m "feat: add bounded VideoToolbox HEVC output"
 ```
 
