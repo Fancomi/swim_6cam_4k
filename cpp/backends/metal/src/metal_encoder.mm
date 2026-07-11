@@ -3,6 +3,8 @@
 #import <Foundation/Foundation.h>
 #import <VideoToolbox/VideoToolbox.h>
 
+#include <dispatch/dispatch.h>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -632,6 +634,18 @@ class MetalEncoder::Impl final {
     std::atomic_bool invalidated_{};
   };
 
+  struct CompletionContext final {
+    std::shared_ptr<SessionHandle> session;
+    std::atomic_uint32_t references{};
+    std::atomic<OSStatus> status{noErr};
+
+    static void release(CompletionContext* context) noexcept {
+      if (context->references.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        delete context;
+      }
+    }
+  };
+
  public:
   Impl(std::uint32_t width, std::uint32_t height,
        const swim::core::AppConfig& config,
@@ -642,6 +656,7 @@ class MetalEncoder::Impl final {
     state_ = std::make_shared<State>(writer, nullptr, nullptr, nullptr);
     tickets_ = std::make_unique<CallbackTicket[]>(kEncoderInputCapacity);
     create_production_session(width, height);
+    initialize_completion_context();
   }
 
   Impl(std::uint32_t width, std::uint32_t height,
@@ -658,6 +673,7 @@ class MetalEncoder::Impl final {
                                  std::memory_order_relaxed);
     tickets_ = std::make_unique<CallbackTicket[]>(kEncoderInputCapacity);
     session_ = std::make_shared<SessionHandle>(dependencies.native);
+    initialize_completion_context();
   }
 
   ~Impl() { close_and_drain(); }
@@ -726,10 +742,17 @@ class MetalEncoder::Impl final {
     auto session = session_;
     state->gate.close();
     const auto deadline = std::chrono::steady_clock::now() + drain_timeout_;
-    const bool callbacks_settled = state->gate.wait_until_empty(deadline);
-    if (callbacks_settled) {
-      const auto status = session->complete_frames();
-      if (status != noErr) {
+    auto* const completion = completion_context_.release();
+    completion->references.store(2, std::memory_order_release);
+    dispatch_group_async_f(
+        completion_group_,
+        dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), completion,
+        &Impl::complete_frames_async);
+    const bool complete_returned = wait_for_completion(deadline);
+    const bool callbacks_settled =
+        complete_returned && state->gate.wait_until_empty(deadline);
+    if (complete_returned && callbacks_settled) {
+      if (completion->status.load(std::memory_order_acquire) != noErr) {
         state->mark_fatal("VTCompressionSessionCompleteFrames failed");
       }
       static_cast<void>(state->close_writer());
@@ -747,6 +770,7 @@ class MetalEncoder::Impl final {
       // no-op, while an already-entered callback owns State until settlement.
       static_cast<void>(tickets_.release());
     }
+    CompletionContext::release(completion);
     flush_metrics();
     session_.reset();
   }
@@ -792,6 +816,35 @@ class MetalEncoder::Impl final {
         dependencies.writer.close == nullptr) {
       throw std::invalid_argument("incomplete Metal encoder dependencies");
     }
+  }
+
+  void initialize_completion_context() {
+    completion_group_ = dispatch_group_create();
+    if (completion_group_ == nullptr) {
+      throw std::runtime_error("cannot create HEVC completion group");
+    }
+    completion_context_ = std::make_unique<CompletionContext>();
+    completion_context_->session = session_;
+  }
+
+  static void complete_frames_async(void* raw_context) noexcept {
+    auto* const context = static_cast<CompletionContext*>(raw_context);
+    context->status.store(context->session->complete_frames(),
+                          std::memory_order_release);
+    CompletionContext::release(context);
+  }
+
+  bool wait_for_completion(
+      std::chrono::steady_clock::time_point deadline) noexcept {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      return dispatch_group_wait(completion_group_, DISPATCH_TIME_NOW) == 0;
+    }
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(deadline - now);
+    const auto wait_time = dispatch_time(
+        DISPATCH_TIME_NOW, static_cast<std::int64_t>(remaining.count()));
+    return dispatch_group_wait(completion_group_, wait_time) == 0;
   }
 
   static bool file_append(
@@ -1027,6 +1080,8 @@ class MetalEncoder::Impl final {
   std::shared_ptr<State> state_;
   std::unique_ptr<CallbackTicket[]> tickets_;
   std::shared_ptr<SessionHandle> session_;
+  std::unique_ptr<CompletionContext> completion_context_;
+  dispatch_group_t completion_group_{};
   swim::core::RuntimeCounters* metrics_{};
   std::chrono::milliseconds drain_timeout_;
   std::atomic_bool closed_{};

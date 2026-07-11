@@ -174,6 +174,11 @@ struct FakeNativeSession {
     release_complete = true;
     condition.notify_all();
   }
+
+  void wait_until_released() {
+    std::unique_lock lock(mutex);
+    condition.wait(lock, [this] { return released; });
+  }
 };
 
 struct LifetimeSentinel {
@@ -577,6 +582,8 @@ TEST_CASE(total_drain_deadline_invalidates_and_late_callback_has_safe_lifetime) 
   CHECK(weak_sentinel.expired());
   CHECK(pool.try_acquire().has_value());
   native.callback_drop();
+  native.unblock_complete();
+  native.wait_until_released();
 }
 
 TEST_CASE(blocked_callback_writer_is_inside_the_total_drain_deadline) {
@@ -619,6 +626,8 @@ TEST_CASE(blocked_callback_writer_is_inside_the_total_drain_deadline) {
       writer.condition.notify_all();
     }
     callback.join();
+    native.unblock_complete();
+    native.wait_until_released();
   }
   {
     std::unique_lock lock(sentinel_mutex);
@@ -658,6 +667,7 @@ TEST_CASE(timeout_without_a_callback_retires_output_and_heavy_state) {
     CHECK(native.invalidated);
   }
   native.unblock_complete();
+  native.wait_until_released();
   bool destroyed = false;
   {
     std::unique_lock lock(sentinel_mutex);
@@ -690,4 +700,64 @@ TEST_CASE(close_and_drain_performs_no_application_heap_allocation) {
     encoder.close_and_drain();
   }
   CHECK_EQ(swim::core::hot_path_allocation_count(), before);
+}
+
+TEST_CASE(complete_frames_flushes_a_cached_tail_before_gate_drain) {
+  FakeNativeSession native;
+  native.output_during_complete = true;
+  native.release_complete = true;
+  FakeWriter writer;
+  FakeClock clock;
+  swim::core::RuntimeCounters metrics;
+  swim::metal::MetalEncoder encoder(
+      5002, 2102, null_encode_config(), metrics,
+      dependencies(native, writer, clock, std::chrono::milliseconds{50}));
+  auto context = test_metal_context();
+  swim::metal::MetalOutputPool pool{context, 1, 2, 2};
+  auto output = pool.try_acquire();
+  CHECK(output.has_value());
+  CHECK(encoder.offer(std::move(*output), CMTimeMake(0, 30000)));
+  encoder.close_and_drain();
+  CHECK(native.complete_entered);
+  CHECK(!encoder.stats().drain_timed_out);
+  CHECK_EQ(encoder.stats().submissions, 1u);
+  CHECK_EQ(encoder.stats().completions, 1u);
+  CHECK_EQ(encoder.stats().drops, 0u);
+  CHECK_EQ(encoder.stats().input_in_use, 0u);
+  CHECK(pool.try_acquire().has_value());
+}
+
+TEST_CASE(blocked_complete_frames_cannot_exceed_the_total_deadline) {
+  FakeNativeSession native;
+  FakeWriter writer;
+  FakeClock clock;
+  swim::core::RuntimeCounters metrics;
+  swim::metal::MetalEncoder encoder(
+      5002, 2102, null_encode_config(), metrics,
+      dependencies(native, writer, clock, std::chrono::milliseconds{0}));
+  std::mutex drain_mutex;
+  std::condition_variable drain_condition;
+  bool drain_returned = false;
+  std::thread drain([&] {
+    encoder.close_and_drain();
+    std::lock_guard lock(drain_mutex);
+    drain_returned = true;
+    drain_condition.notify_all();
+  });
+  {
+    std::unique_lock lock(native.mutex);
+    native.condition.wait(lock, [&native] { return native.complete_entered; });
+  }
+  bool returned_before_native_unblock = false;
+  {
+    std::unique_lock lock(drain_mutex);
+    returned_before_native_unblock = drain_condition.wait_for(
+        lock, std::chrono::milliseconds{50}, [&] { return drain_returned; });
+  }
+  native.unblock_complete();
+  drain.join();
+  native.wait_until_released();
+  CHECK(returned_before_native_unblock);
+  CHECK(encoder.stats().drain_timed_out);
+  CHECK(native.invalidated);
 }
