@@ -14,13 +14,23 @@ namespace swim::core {
 RenderCoordinator::RenderCoordinator(Mailboxes& mailboxes,
                                      IRenderer& renderer,
                                      const AppConfig& config,
+                                     BenchmarkGraph graph,
                                      RuntimeCounters& metrics,
-                                     RunLifecycle& lifecycle) noexcept
+                                     RunLifecycle& lifecycle)
     : mailboxes_(mailboxes),
       renderer_(renderer),
       config_(config),
+      graph_(graph),
       metrics_(metrics),
-      lifecycle_(lifecycle) {}
+      lifecycle_(lifecycle) {
+  for (std::size_t camera = 0; camera < kCameraCount; ++camera) {
+    if (graph_.synthetic_inputs || camera >= graph_.active_sources) {
+      fronts_[camera] =
+          renderer_.benchmark_frame(static_cast<std::uint32_t>(camera));
+      fixed_frames_[camera] = true;
+    }
+  }
+}
 
 std::chrono::nanoseconds RenderCoordinator::cadence_offset(
     std::uint64_t tick_index, std::uint32_t fps_num,
@@ -58,6 +68,9 @@ RenderSubmitResult RenderCoordinator::tick(Clock::time_point sampled_at) {
   }
 
   for (std::size_t camera = 0; camera < kCameraCount; ++camera) {
+    if (fixed_frames_[camera]) {
+      continue;
+    }
     FrameLease newest;
     if (mailboxes_[camera].consume_latest(newest)) {
       const auto& next = newest.metadata();

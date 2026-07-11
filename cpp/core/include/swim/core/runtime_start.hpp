@@ -10,17 +10,20 @@
 namespace swim::core {
 
 inline void start_sources_recorded(
-    std::array<std::unique_ptr<ISource>, 6>& sources,
-    std::array<LatestFrameMailbox, 6>& mailboxes,
-    RuntimeStartState& state) {
+    SourceArray& sources, MailboxArray& mailboxes, RuntimeStartState& state) {
   try {
     for (std::size_t camera = 0; camera < sources.size(); ++camera) {
+      if (!sources[camera]) {
+        continue;
+      }
       sources[camera]->start(mailboxes[camera]);
       state.mark_started(camera);
     }
   } catch (...) {
     for (auto& source : sources) {
-      source->stop();
+      if (source) {
+        source->stop();
+      }
     }
     throw;
   }

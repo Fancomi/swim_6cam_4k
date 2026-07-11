@@ -19,6 +19,8 @@
 
 namespace swim::core {
 
+struct BenchmarkGraph;
+
 class ISource {
  public:
   virtual ~ISource() = default;
@@ -47,6 +49,8 @@ class IRenderer {
   virtual RenderSubmitResult submit(const RenderSnapshot& snapshot) = 0;
   virtual FrameLease replacement_frame(
       std::uint32_t camera_index) const = 0;
+  virtual FrameLease benchmark_frame(
+      std::uint32_t camera_index) const = 0;
   virtual void drain() = 0;
   virtual bool has_fatal_error() const noexcept { return false; }
   virtual std::string last_error() const { return {}; }
@@ -58,12 +62,16 @@ class IBackend {
   virtual std::unique_ptr<ISource> make_source(const SourceConfig& config,
                                                std::uint32_t camera_index) = 0;
   virtual std::unique_ptr<IRenderer> make_renderer(
-      const RuntimeAsset& asset, const AppConfig& config) = 0;
+      const RuntimeAsset& asset, const AppConfig& config,
+      const BenchmarkGraph& graph) = 0;
   virtual void bind_metrics(RuntimeCounters&) noexcept {}
   virtual void bind_lifecycle(RunLifecycle&) noexcept {}
   virtual void run_main_loop(std::stop_token token) = 0;
   virtual void stop_main_loop() noexcept = 0;
 };
+
+using SourceArray = std::array<std::unique_ptr<ISource>, 6>;
+using MailboxArray = std::array<LatestFrameMailbox, 6>;
 
 using BackendFactory = std::unique_ptr<IBackend> (*)();
 

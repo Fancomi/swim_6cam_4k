@@ -1,6 +1,7 @@
 #include "test_support.hpp"
 
 #include <swim/core/backend.hpp>
+#include <swim/core/benchmark_stage.hpp>
 #include <swim/core/runtime_start.hpp>
 
 #include <atomic>
@@ -55,6 +56,11 @@ class NullRenderer final : public swim::core::IRenderer {
     return {};
   }
 
+  swim::core::FrameLease benchmark_frame(
+      std::uint32_t) const override {
+    return {};
+  }
+
   void drain() override {}
 };
 
@@ -67,7 +73,10 @@ class NullBackend final : public swim::core::IBackend {
 
   std::unique_ptr<swim::core::IRenderer> make_renderer(
       const swim::core::RuntimeAsset&,
-      const swim::core::AppConfig&) override {
+      const swim::core::AppConfig&,
+      const swim::core::BenchmarkGraph& graph) override {
+    observed_preview = graph.preview;
+    observed_encode = graph.encode;
     return std::make_unique<NullRenderer>();
   }
 
@@ -83,6 +92,9 @@ class NullBackend final : public swim::core::IBackend {
     }
     condition_.notify_all();
   }
+
+  bool observed_preview{};
+  bool observed_encode{};
 
  private:
   std::mutex mutex_;
@@ -108,12 +120,21 @@ TEST_CASE(registry_creates_a_backend_that_implements_every_contract) {
   source->stop();
 
   swim::core::RuntimeAsset asset{};
-  auto renderer = backend->make_renderer(asset, config);
+  config.preview = true;
+  config.encode = true;
+  config.stage = swim::core::BenchmarkStage::decode_render;
+  const auto graph = swim::core::resolve_benchmark_graph(config);
+  auto renderer = backend->make_renderer(asset, config, graph);
   swim::core::RenderSnapshot snapshot{};
   CHECK_EQ(renderer->submit(snapshot),
            swim::core::RenderSubmitResult::accepted);
   CHECK(!renderer->replacement_frame(0));
   renderer->drain();
+
+  auto* null_backend = dynamic_cast<NullBackend*>(backend.get());
+  CHECK(null_backend != nullptr);
+  CHECK(!null_backend->observed_preview);
+  CHECK(!null_backend->observed_encode);
 
   std::atomic<bool> exited{};
   std::jthread loop([&](std::stop_token token) {

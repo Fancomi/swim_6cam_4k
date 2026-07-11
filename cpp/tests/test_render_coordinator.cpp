@@ -1,6 +1,7 @@
 #include "test_support.hpp"
 
 #include <swim/core/backend.hpp>
+#include <swim/core/benchmark_stage.hpp>
 #include <swim/core/render_coordinator.hpp>
 #include <swim/core/run_lifecycle.hpp>
 
@@ -50,9 +51,12 @@ class FakeRenderer final : public swim::core::IRenderer {
  public:
   swim::core::RenderSubmitResult submit(
       const swim::core::RenderSnapshot& snapshot) override {
-    snapshots.push_back(snapshot);
+    if (capture_snapshots) {
+      snapshots.push_back(snapshot);
+    }
     submit_count.fetch_add(1, std::memory_order_relaxed);
-    if (!accept_submissions || snapshots.size() <= reject_first) {
+    if (!accept_submissions ||
+        submit_count.load(std::memory_order_relaxed) <= reject_first) {
       return result == swim::core::RenderSubmitResult::accepted
                  ? swim::core::RenderSubmitResult::backpressure
                  : result;
@@ -65,9 +69,15 @@ class FakeRenderer final : public swim::core::IRenderer {
     return mock_frame(camera_index, 10'000 + camera_index, {});
   }
 
+  swim::core::FrameLease benchmark_frame(
+      std::uint32_t camera_index) const override {
+    return mock_frame(camera_index, 20'000 + camera_index, {});
+  }
+
   void drain() override {}
 
   bool accept_submissions{true};
+  bool capture_snapshots{true};
   std::size_t reject_first{};
   swim::core::RenderSubmitResult result{
       swim::core::RenderSubmitResult::accepted};
@@ -77,10 +87,13 @@ class FakeRenderer final : public swim::core::IRenderer {
 
 struct CoordinatorFixture {
   explicit CoordinatorFixture(FakeRenderer& renderer,
-                              swim::core::AppConfig initial_config = {})
+                              swim::core::AppConfig initial_config = {},
+                              swim::core::BenchmarkGraph initial_graph =
+                                  {6, true, false, false, false})
       : config(std::move(initial_config)),
+        graph(initial_graph),
         lifecycle(config.duration),
-        coordinator(mailboxes, renderer, config, metrics, lifecycle) {}
+        coordinator(mailboxes, renderer, config, graph, metrics, lifecycle) {}
 
   void publish(std::uint32_t camera, std::uint64_t sequence,
                std::chrono::steady_clock::time_point arrived_at) {
@@ -96,6 +109,7 @@ struct CoordinatorFixture {
 
   std::array<swim::core::LatestFrameMailbox, 6> mailboxes;
   swim::core::AppConfig config;
+  swim::core::BenchmarkGraph graph;
   swim::core::RuntimeCounters metrics;
   swim::core::RunLifecycle lifecycle;
   swim::core::RenderCoordinator coordinator;
@@ -248,4 +262,67 @@ TEST_CASE(coordinator_first_accepted_submit_activates_global_lifecycle) {
   CHECK(fixture.lifecycle.active_started_at() >= t0);
   CHECK_EQ(fixture.lifecycle.deadline(),
            fixture.lifecycle.active_started_at() + fixture.config.duration);
+}
+
+TEST_CASE(coordinator_render_only_seeds_all_six_resident_frames) {
+  FakeRenderer renderer;
+  swim::core::AppConfig config;
+  config.stage = swim::core::BenchmarkStage::render_only;
+  const auto graph = swim::core::resolve_benchmark_graph(config);
+  CoordinatorFixture fixture{renderer, std::move(config), graph};
+
+  CHECK_EQ(fixture.coordinator.tick(std::chrono::steady_clock::now()),
+           swim::core::RenderSubmitResult::accepted);
+  CHECK_EQ(renderer.snapshots.size(), 1u);
+  for (std::size_t camera = 0; camera < 6; ++camera) {
+    CHECK_EQ(renderer.snapshots[0].frames[camera].metadata().sequence,
+             20'000u + camera);
+  }
+}
+
+TEST_CASE(coordinator_inactive_lanes_ignore_mailboxes_and_remain_resident) {
+  const auto now = std::chrono::steady_clock::now();
+  FakeRenderer renderer;
+  swim::core::AppConfig config;
+  config.stream_count = 1;
+  config.stage = swim::core::BenchmarkStage::decode_render;
+  const auto graph = swim::core::resolve_benchmark_graph(config);
+  CoordinatorFixture fixture{renderer, std::move(config), graph};
+  fixture.publish(0, 7, now);
+  fixture.publish(3, 99, now);
+
+  CHECK_EQ(fixture.coordinator.tick(now),
+           swim::core::RenderSubmitResult::accepted);
+  CHECK_EQ(renderer.snapshots[0].frames[0].metadata().sequence, 7u);
+  CHECK_EQ(renderer.snapshots[0].frames[3].metadata().sequence, 20'003u);
+  swim::core::FrameLease ignored;
+  CHECK(fixture.mailboxes[3].consume_latest(ignored));
+  CHECK_EQ(ignored.metadata().sequence, 99u);
+}
+
+TEST_CASE(coordinator_benchmark_mode_is_not_cadence_limited) {
+  FakeRenderer renderer;
+  renderer.capture_snapshots = false;
+  swim::core::AppConfig config;
+  config.mode = swim::core::RunMode::benchmark;
+  config.stage = swim::core::BenchmarkStage::render_only;
+  config.fps_num = 1;
+  config.fps_den = 1;
+  config.duration = 0s;
+  const auto graph = swim::core::resolve_benchmark_graph(config);
+  CoordinatorFixture fixture{renderer, std::move(config), graph};
+
+  std::jthread worker(
+      [&](std::stop_token token) { fixture.coordinator.run(token); });
+  const auto timeout = std::chrono::steady_clock::now() + 200ms;
+  while (renderer.submit_count.load(std::memory_order_relaxed) <= 10u &&
+         std::chrono::steady_clock::now() < timeout) {
+    std::this_thread::yield();
+  }
+  worker.request_stop();
+  worker.join();
+
+  CHECK(renderer.submit_count.load(std::memory_order_relaxed) > 10u);
+  CHECK(fixture.metrics.render_submissions.load(std::memory_order_relaxed) >
+        10u);
 }
