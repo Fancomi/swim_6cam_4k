@@ -14,10 +14,13 @@ inline constexpr std::size_t kMetricsCacheLineBytes = 128;
 
 class FixedLatencyHistogramSnapshot {
  public:
+  FixedLatencyHistogramSnapshot() = default;
   // Finite quantiles are clamped to [0, 1]. Non-finite values throw
   // std::invalid_argument.
   std::chrono::milliseconds percentile(double quantile) const;
   std::uint64_t count() const noexcept;
+  FixedLatencyHistogramSnapshot delta_from(
+      const FixedLatencyHistogramSnapshot& previous) const noexcept;
 
  private:
   friend class FixedLatencyHistogram;
@@ -113,6 +116,9 @@ struct MetricsSnapshot final {
   const std::array<std::uint64_t, 6> decode_ticket_in_use;
   const std::array<std::uint64_t, 6> decode_ticket_high_water;
   const std::array<std::uint64_t, 6> decode_ticket_pool_misses;
+  const std::array<FixedLatencyHistogramSnapshot, 6> frame_age_histograms;
+  const FixedLatencyHistogramSnapshot snapshot_age_spread_histogram;
+  const FixedLatencyHistogramSnapshot gpu_render_duration_histogram;
 
   std::uint64_t render_completion_interval_ns() const noexcept;
   double render_completion_fps() const noexcept;

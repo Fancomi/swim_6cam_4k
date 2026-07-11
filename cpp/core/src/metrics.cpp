@@ -102,6 +102,17 @@ std::uint64_t FixedLatencyHistogramSnapshot::count() const noexcept {
   return count_;
 }
 
+FixedLatencyHistogramSnapshot FixedLatencyHistogramSnapshot::delta_from(
+    const FixedLatencyHistogramSnapshot& previous) const noexcept {
+  std::array<std::uint64_t, 1001> delta{};
+  std::uint64_t count = 0;
+  for (std::size_t index = 0; index < delta.size(); ++index) {
+    delta[index] = monotonic_delta(buckets_[index], previous.buckets_[index]);
+    count += delta[index];
+  }
+  return FixedLatencyHistogramSnapshot{delta, count};
+}
+
 void FixedLatencyHistogram::observe(
     std::chrono::milliseconds latency) noexcept {
   const auto bucket = std::clamp<std::chrono::milliseconds::rep>(
@@ -146,8 +157,10 @@ MetricsSnapshot RuntimeCounters::sample_totals() const noexcept {
   std::array<std::uint64_t, 6> frame_age_p50{};
   std::array<std::uint64_t, 6> frame_age_p95{};
   std::array<std::uint64_t, 6> frame_age_p99{};
+  std::array<FixedLatencyHistogramSnapshot, 6> frame_age_histograms{};
   for (std::size_t camera = 0; camera < frame_age.size(); ++camera) {
     const auto snapshot = frame_age[camera].sample();
+    frame_age_histograms[camera] = snapshot;
     frame_age_p50[camera] = static_cast<std::uint64_t>(
         snapshot.percentile(0.50).count());
     frame_age_p95[camera] = static_cast<std::uint64_t>(
@@ -227,6 +240,9 @@ MetricsSnapshot RuntimeCounters::sample_totals() const noexcept {
       sample_atomic_array(decode_ticket_in_use),
       sample_atomic_array(decode_ticket_high_water),
       sample_atomic_array(decode_ticket_pool_misses),
+      frame_age_histograms,
+      age_spread,
+      gpu_duration,
   };
 }
 
