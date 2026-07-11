@@ -492,7 +492,7 @@ class MetalStitchRenderer::Impl final
         in_flight_(std::make_unique<InFlightRecord[]>(inflight_count_)),
         output_pool_(context_, config.output_pool, encoded_width_,
                      encoded_height_),
-        metrics_(metrics),
+        publication_(metrics),
         completed_output_sink_(std::move(completed_output_sink)) {
     if (context_ == nullptr || context_->device == nil ||
         context_->command_queue == nil || context_->texture_cache == nullptr) {
@@ -505,12 +505,13 @@ class MetalStitchRenderer::Impl final
     if (asset.cameras.size() != cameras_.size()) {
       throw std::invalid_argument("Metal renderer requires six cameras");
     }
-    if (metrics_ != nullptr) {
-      metrics_->render_inflight_capacity.store(inflight_count_,
-                                               std::memory_order_relaxed);
-      metrics_->render_output_capacity.store(config.output_pool,
+    publication_.publish([this, output_capacity = config.output_pool]
+                         (auto& metrics) noexcept {
+      metrics.render_inflight_capacity.store(inflight_count_,
                                              std::memory_order_relaxed);
-    }
+      metrics.render_output_capacity.store(output_capacity,
+                                           std::memory_order_relaxed);
+    });
     for (std::size_t index = 0; index < cameras_.size(); ++index) {
       if (asset.cameras[index].camera_id != kCameraOrder[index]) {
         throw std::invalid_argument(
@@ -570,14 +571,14 @@ class MetalStitchRenderer::Impl final
     }
     const auto in_use =
         inflight_in_use_.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (metrics_ != nullptr) {
-      metrics_->render_inflight_in_use.store(in_use,
-                                             std::memory_order_relaxed);
-    }
-    update_high_water(inflight_high_water_, in_use,
-                      metrics_ == nullptr
-                          ? nullptr
-                          : &metrics_->render_inflight_high_water);
+    update_high_water(inflight_high_water_, in_use);
+    publication_.publish([this, in_use](auto& metrics) noexcept {
+      metrics.render_inflight_in_use.store(in_use,
+                                           std::memory_order_relaxed);
+      metrics.render_inflight_high_water.store(
+          inflight_high_water_.load(std::memory_order_relaxed),
+          std::memory_order_relaxed);
+    });
 
     auto output = output_pool_.try_acquire();
     if (!output) {
@@ -587,12 +588,12 @@ class MetalStitchRenderer::Impl final
       completion_gate_.complete();
       return false;
     }
-    if (metrics_ != nullptr) {
-      metrics_->render_output_high_water.store(output_pool_.high_water(),
-                                               std::memory_order_relaxed);
-      metrics_->render_output_in_use.store(output_pool_.in_use(),
-                                           std::memory_order_relaxed);
-    }
+    publication_.publish([this](auto& metrics) noexcept {
+      metrics.render_output_high_water.store(output_pool_.high_water(),
+                                             std::memory_order_relaxed);
+      metrics.render_output_in_use.store(output_pool_.in_use(),
+                                         std::memory_order_relaxed);
+    });
 
     try {
       record->frame_views = frames;
@@ -609,10 +610,11 @@ class MetalStitchRenderer::Impl final
       if (command == nil) {
         throw std::runtime_error("cannot create Metal command buffer");
       }
-      if (metrics_ != nullptr) {
-        metrics_->native_command_buffers.fetch_add(1,
-                                                    std::memory_order_relaxed);
-      }
+      native_command_buffers_.fetch_add(1, std::memory_order_relaxed);
+      publication_.publish([](auto& metrics) noexcept {
+        metrics.native_command_buffers.fetch_add(1,
+                                                 std::memory_order_relaxed);
+      });
       encode_stitch(command, frames, *record, result.output.texture());
       result.diagnostic_command_buffer = command;
 
@@ -632,12 +634,13 @@ class MetalStitchRenderer::Impl final
         completed_record->output = {};
         const auto remaining = owner->inflight_in_use_.fetch_sub(
                                    1, std::memory_order_relaxed) - 1;
-        if (owner->metrics_ != nullptr) {
-          owner->metrics_->render_inflight_in_use.store(
-              remaining, std::memory_order_relaxed);
-          owner->metrics_->render_output_in_use.store(
-              owner->output_pool_.in_use(), std::memory_order_relaxed);
-        }
+        owner->publication_.publish([owner, remaining]
+                                    (auto& metrics) noexcept {
+          metrics.render_inflight_in_use.store(remaining,
+                                               std::memory_order_relaxed);
+          metrics.render_output_in_use.store(owner->output_pool_.in_use(),
+                                             std::memory_order_relaxed);
+        });
         completed_record->busy.store(false, std::memory_order_release);
         if (completed_output && owner->completed_output_sink_) {
           try {
@@ -749,28 +752,24 @@ class MetalStitchRenderer::Impl final
   }
 
   static void update_high_water(
-      std::atomic_uint32_t& local, std::uint32_t usage,
-      std::atomic_uint64_t* external) noexcept {
+      std::atomic_uint32_t& local, std::uint32_t usage) noexcept {
     auto high = local.load(std::memory_order_relaxed);
     while (usage > high &&
            !local.compare_exchange_weak(high, usage,
                                         std::memory_order_relaxed,
                                         std::memory_order_relaxed)) {
     }
-    if (external != nullptr) {
-      external->store(local.load(std::memory_order_relaxed),
-                      std::memory_order_relaxed);
-    }
   }
 
   void record_pool_miss(bool inflight) noexcept {
-    if (metrics_ == nullptr) {
-      return;
-    }
-    metrics_->pool_exhaustion.fetch_add(1, std::memory_order_relaxed);
-    auto& counter = inflight ? metrics_->render_inflight_pool_misses
-                             : metrics_->render_output_pool_misses;
-    counter.fetch_add(1, std::memory_order_relaxed);
+    auto& local = inflight ? inflight_pool_misses_ : output_pool_misses_;
+    local.fetch_add(1, std::memory_order_relaxed);
+    publication_.publish([inflight](auto& metrics) noexcept {
+      metrics.pool_exhaustion.fetch_add(1, std::memory_order_relaxed);
+      auto& counter = inflight ? metrics.render_inflight_pool_misses
+                               : metrics.render_output_pool_misses;
+      counter.fetch_add(1, std::memory_order_relaxed);
+    });
   }
 
   void record_first_submit() noexcept {
@@ -778,11 +777,13 @@ class MetalStitchRenderer::Impl final
     const auto submitted_at = steady_nanoseconds();
     if (first_submit_ns_.compare_exchange_strong(
             expected, submitted_at, std::memory_order_relaxed,
-            std::memory_order_relaxed) && metrics_ != nullptr) {
-      auto metrics_zero = std::uint64_t{0};
-      metrics_->render_first_submit_ns.compare_exchange_strong(
-          metrics_zero, submitted_at, std::memory_order_relaxed,
-          std::memory_order_relaxed);
+            std::memory_order_relaxed)) {
+      publication_.publish([submitted_at](auto& metrics) noexcept {
+        auto metrics_zero = std::uint64_t{0};
+        metrics.render_first_submit_ns.compare_exchange_strong(
+            metrics_zero, submitted_at, std::memory_order_relaxed,
+            std::memory_order_relaxed);
+      });
     }
   }
 
@@ -790,40 +791,45 @@ class MetalStitchRenderer::Impl final
     completed_count_.fetch_add(1, std::memory_order_relaxed);
     const auto completed_at = steady_nanoseconds();
     swim::core::record_atomic_max(last_completion_ns_, completed_at);
-    if (metrics_ != nullptr) {
-      metrics_->render_completions.fetch_add(1,
-                                             std::memory_order_relaxed);
-      swim::core::record_atomic_max(metrics_->render_last_completion_ns,
-                                    completed_at);
-    }
-    if (metrics_ != nullptr && command.GPUEndTime >= command.GPUStartTime) {
+    const bool has_gpu_duration = command.GPUEndTime >= command.GPUStartTime;
+    std::chrono::milliseconds gpu_duration{};
+    if (has_gpu_duration) {
       const auto duration = command.GPUEndTime - command.GPUStartTime;
-      metrics_->gpu_render_duration.observe(std::chrono::milliseconds{
-          static_cast<std::chrono::milliseconds::rep>(duration * 1000.0)});
+      gpu_duration = std::chrono::milliseconds{
+          static_cast<std::chrono::milliseconds::rep>(duration * 1000.0)};
+      local_gpu_render_duration_.observe(gpu_duration);
     }
+    publication_.publish([completed_at, has_gpu_duration, gpu_duration]
+                         (auto& metrics) noexcept {
+      metrics.render_completions.fetch_add(1, std::memory_order_relaxed);
+      swim::core::record_atomic_max(metrics.render_last_completion_ns,
+                                    completed_at);
+      if (has_gpu_duration) {
+        metrics.gpu_render_duration.observe(gpu_duration);
+      }
+    });
   }
 
   void flush_completion_metrics() noexcept {
-    if (completion_metrics_flushed_.exchange(true,
-                                             std::memory_order_acq_rel)) {
-      return;
-    }
-    auto* metrics = std::exchange(metrics_, nullptr);
-    if (metrics == nullptr) {
-      return;
-    }
-    auto expected = std::uint64_t{0};
-    metrics->render_first_submit_ns.compare_exchange_strong(
-        expected, first_submit_ns_.load(std::memory_order_relaxed),
-        std::memory_order_relaxed, std::memory_order_relaxed);
-    swim::core::record_atomic_max(
-        metrics->render_last_completion_ns,
-        last_completion_ns_.load(std::memory_order_relaxed));
-    metrics->render_inflight_in_use.store(
-        inflight_in_use_.load(std::memory_order_relaxed),
-        std::memory_order_relaxed);
-    metrics->render_output_in_use.store(output_pool_.in_use(),
-                                        std::memory_order_relaxed);
+    publication_.finalize([this](auto& metrics) noexcept {
+      auto expected = std::uint64_t{0};
+      metrics.render_first_submit_ns.compare_exchange_strong(
+          expected, first_submit_ns_.load(std::memory_order_relaxed),
+          std::memory_order_relaxed, std::memory_order_relaxed);
+      swim::core::record_atomic_max(
+          metrics.render_last_completion_ns,
+          last_completion_ns_.load(std::memory_order_relaxed));
+      metrics.render_inflight_in_use.store(
+          inflight_in_use_.load(std::memory_order_relaxed),
+          std::memory_order_relaxed);
+      metrics.render_inflight_high_water.store(
+          inflight_high_water_.load(std::memory_order_relaxed),
+          std::memory_order_relaxed);
+      metrics.render_output_in_use.store(output_pool_.in_use(),
+                                         std::memory_order_relaxed);
+      metrics.render_output_high_water.store(output_pool_.high_water(),
+                                             std::memory_order_relaxed);
+    });
   }
 
   void drain_noexcept() noexcept {
@@ -1064,15 +1070,18 @@ class MetalStitchRenderer::Impl final
   std::uint32_t inflight_count_;
   std::unique_ptr<InFlightRecord[]> in_flight_;
   MetalOutputPool output_pool_;
-  swim::core::RuntimeCounters* metrics_;
+  swim::core::RuntimeCounterPublication publication_;
   MetalCompletedOutputSink completed_output_sink_;
   std::atomic_uint32_t inflight_in_use_{0};
   std::atomic_uint32_t inflight_high_water_{0};
+  std::atomic_uint64_t inflight_pool_misses_{0};
+  std::atomic_uint64_t output_pool_misses_{0};
+  std::atomic_uint64_t native_command_buffers_{0};
   swim::core::RenderCompletionGate completion_gate_;
   std::atomic_uint64_t completed_count_{0};
   std::atomic_uint64_t first_submit_ns_{0};
   std::atomic_uint64_t last_completion_ns_{0};
-  std::atomic_bool completion_metrics_flushed_{false};
+  swim::core::FixedLatencyHistogram local_gpu_render_duration_;
   std::atomic_bool drain_timed_out_{false};
   std::atomic_bool fatal_error_{false};
   mutable std::mutex fatal_error_mutex_;

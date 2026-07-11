@@ -638,6 +638,46 @@ TEST_CASE(blocked_callback_writer_is_inside_the_total_drain_deadline) {
   CHECK(pool.try_acquire().has_value());
 }
 
+TEST_CASE(timeout_detaches_external_metrics_before_blocked_callback_returns) {
+  FakeNativeSession native;
+  FakeWriter writer;
+  writer.block_append = true;
+  FakeClock clock;
+  swim::core::RuntimeCounters metrics;
+  swim::metal::MetalEncoder encoder(
+      5002, 2102, null_encode_config(), metrics,
+      dependencies(native, writer, clock, std::chrono::milliseconds{0}));
+  auto context = test_metal_context();
+  swim::metal::MetalOutputPool pool{context, 1, 2, 2};
+  auto output = pool.try_acquire();
+  CHECK(output.has_value());
+  CHECK(encoder.offer(std::move(*output), CMTimeMake(0, 30000)));
+
+  std::thread callback([&native] { native.callback_output(); });
+  {
+    std::unique_lock lock(writer.mutex);
+    writer.condition.wait(lock, [&writer] { return writer.append_entered; });
+  }
+  encoder.close_and_drain();
+  const auto at_timeout = metrics.sample_totals();
+  {
+    std::lock_guard lock(writer.mutex);
+    writer.release_append = true;
+    writer.condition.notify_all();
+  }
+  callback.join();
+  const auto after_late_callback = metrics.sample_totals();
+
+  native.unblock_complete();
+  native.wait_until_released();
+
+  CHECK_EQ(after_late_callback.encode_bytes, at_timeout.encode_bytes);
+  CHECK_EQ(after_late_callback.encode_completions,
+           at_timeout.encode_completions);
+  CHECK_EQ(after_late_callback.encode_callback_errors,
+           at_timeout.encode_callback_errors);
+}
+
 TEST_CASE(timeout_without_a_callback_retires_output_and_heavy_state) {
   FakeNativeSession native;
   FakeWriter writer;

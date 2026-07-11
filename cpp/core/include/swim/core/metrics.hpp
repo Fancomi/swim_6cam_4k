@@ -5,6 +5,8 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
+#include <utility>
 
 namespace swim::core {
 
@@ -206,6 +208,50 @@ struct RuntimeCounters final {
 
   MetricsSnapshot sample_totals() const noexcept;
   MetricsSnapshot snapshot_and_reset() noexcept;
+};
+
+// Serializes native callback publication against terminal detachment. Once
+// finalize() returns, no operation already inside publish() remains and all
+// future callbacks are prevented from touching the external counters.
+class RuntimeCounterPublication final {
+ public:
+  explicit RuntimeCounterPublication(RuntimeCounters& external) noexcept
+      : external_(&external) {}
+  explicit RuntimeCounterPublication(RuntimeCounters* external) noexcept
+      : external_(external) {}
+
+  RuntimeCounterPublication(const RuntimeCounterPublication&) = delete;
+  RuntimeCounterPublication& operator=(const RuntimeCounterPublication&) =
+      delete;
+
+  template <class Operation>
+  bool publish(Operation&& operation) noexcept {
+    std::lock_guard lock(mutex_);
+    if (external_ == nullptr) {
+      return false;
+    }
+    std::forward<Operation>(operation)(*external_);
+    return true;
+  }
+
+  template <class Operation>
+  bool finalize(Operation&& operation) noexcept {
+    std::lock_guard lock(mutex_);
+    if (finalized_) {
+      return false;
+    }
+    finalized_ = true;
+    if (external_ != nullptr) {
+      std::forward<Operation>(operation)(*external_);
+      external_ = nullptr;
+    }
+    return true;
+  }
+
+ private:
+  std::mutex mutex_;
+  RuntimeCounters* external_{};
+  bool finalized_{};
 };
 
 std::uint64_t monotonic_delta(std::uint64_t current,

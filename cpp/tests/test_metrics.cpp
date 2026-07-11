@@ -416,6 +416,74 @@ TEST_CASE(runtime_total_samples_preserve_cumulative_events_and_camera_identity) 
   CHECK_EQ(final.camera_received[2], 5u);
 }
 
+TEST_CASE(runtime_counter_publication_detaches_once_and_blocks_late_callbacks) {
+  swim::core::RuntimeCounters counters;
+  swim::core::RuntimeCounterPublication publication{counters};
+  std::atomic_bool entered{};
+  std::atomic_bool release{};
+
+  std::jthread callback([&] {
+    publication.publish([&](swim::core::RuntimeCounters& external) noexcept {
+      entered.store(true, std::memory_order_release);
+      while (!release.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      external.render_completions.fetch_add(1, std::memory_order_relaxed);
+    });
+  });
+  while (!entered.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+
+  std::atomic_bool detached{};
+  std::jthread finalizer([&] {
+    CHECK(publication.finalize(
+        [](swim::core::RuntimeCounters& external) noexcept {
+          external.render_inflight_in_use.store(0, std::memory_order_relaxed);
+        }));
+    detached.store(true, std::memory_order_release);
+  });
+  std::this_thread::yield();
+  CHECK(!detached.load(std::memory_order_acquire));
+  release.store(true, std::memory_order_release);
+  callback.join();
+  finalizer.join();
+
+  CHECK(detached.load(std::memory_order_acquire));
+  CHECK(!publication.finalize(
+      [](swim::core::RuntimeCounters&) noexcept {}));
+  CHECK(!publication.publish(
+      [](swim::core::RuntimeCounters& external) noexcept {
+        external.render_completions.fetch_add(100, std::memory_order_relaxed);
+      }));
+  CHECK_EQ(counters.render_completions.load(std::memory_order_relaxed), 1u);
+}
+
+TEST_CASE(decoder_retained_surface_release_cannot_reach_destroyed_counters) {
+  std::shared_ptr<swim::core::RuntimeCounterPublication> retained_by_lease;
+  {
+    swim::core::RuntimeCounters counters;
+    retained_by_lease =
+        std::make_shared<swim::core::RuntimeCounterPublication>(counters);
+    CHECK(retained_by_lease->publish(
+        [](swim::core::RuntimeCounters& external) noexcept {
+          external.decode_surface_in_use[0].store(
+              1, std::memory_order_relaxed);
+        }));
+    CHECK(retained_by_lease->finalize(
+        [](swim::core::RuntimeCounters& external) noexcept {
+          external.decode_surface_in_use[0].store(
+              1, std::memory_order_relaxed);
+        }));
+  }
+
+  CHECK(!retained_by_lease->publish(
+      [](swim::core::RuntimeCounters& external) noexcept {
+        external.decode_surface_in_use[0].fetch_sub(
+            1, std::memory_order_relaxed);
+      }));
+}
+
 TEST_CASE(fixed_pool_rejects_capacities_outside_one_to_sixty_four) {
   CHECK_THROWS_WITH((swim::core::FixedSlotPool<std::uint64_t>{0}),
                     "fixed pool capacity must be between 1 and 64");

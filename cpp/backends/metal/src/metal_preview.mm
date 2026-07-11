@@ -137,7 +137,7 @@ class MetalPreview::Impl final
       : context_(std::move(context)),
         source_width_(width),
         source_height_(height),
-        metrics_(&metrics),
+        publication_(metrics),
         close_callback_(std::move(close_callback)),
         visible_(visible) {
     if (context_ == nullptr || context_->device == nil ||
@@ -257,10 +257,10 @@ class MetalPreview::Impl final
     if (!output) {
       return false;
     }
-    if (metrics_ != nullptr) {
-      metrics_->preview_submissions.fetch_add(1,
-                                              std::memory_order_relaxed);
-    }
+    preview_submissions_.fetch_add(1, std::memory_order_relaxed);
+    publication_.publish([](auto& metrics) noexcept {
+      metrics.preview_submissions.fetch_add(1, std::memory_order_relaxed);
+    });
     const auto accepted = mailbox_.offer(std::move(output));
     if (!accepted) {
       record_preview_drop();
@@ -361,20 +361,22 @@ class MetalPreview::Impl final
  private:
   void record_preview_drop() noexcept {
     preview_drops_.fetch_add(1, std::memory_order_relaxed);
-    if (metrics_ != nullptr) {
-      metrics_->preview_drops.fetch_add(1, std::memory_order_relaxed);
-    }
+    publication_.publish([](auto& metrics) noexcept {
+      metrics.preview_drops.fetch_add(1, std::memory_order_relaxed);
+    });
   }
 
   void record_preview_completion(bool presented) noexcept {
-    if (metrics_ == nullptr) {
-      return;
-    }
-    metrics_->preview_completions.fetch_add(1,
-                                            std::memory_order_relaxed);
+    preview_completions_.fetch_add(1, std::memory_order_relaxed);
     if (presented) {
-      metrics_->preview_presents.fetch_add(1, std::memory_order_relaxed);
+      preview_presents_.fetch_add(1, std::memory_order_relaxed);
     }
+    publication_.publish([presented](auto& metrics) noexcept {
+      metrics.preview_completions.fetch_add(1, std::memory_order_relaxed);
+      if (presented) {
+        metrics.preview_presents.fetch_add(1, std::memory_order_relaxed);
+      }
+    });
   }
 
   void window_closed() noexcept {
@@ -450,6 +452,10 @@ class MetalPreview::Impl final
       return;
     }
     native_command_buffers_.fetch_add(1, std::memory_order_relaxed);
+    publication_.publish([](auto& metrics) noexcept {
+      metrics.native_command_buffers.fetch_add(1,
+                                               std::memory_order_relaxed);
+    });
     auto* pass = [MTLRenderPassDescriptor renderPassDescriptor];
     pass.colorAttachments[0].texture = target;
     pass.colorAttachments[0].loadAction = MTLLoadActionClear;
@@ -492,6 +498,10 @@ class MetalPreview::Impl final
     auto owner = shared_from_this();
     MetalOutputLease retained_output = std::move(output);
     native_callback_wrappers_.fetch_add(1, std::memory_order_relaxed);
+    publication_.publish([](auto& metrics) noexcept {
+      metrics.native_callback_wrappers.fetch_add(
+          1, std::memory_order_relaxed);
+    });
     [command addCompletedHandler:^(id<MTLCommandBuffer> completed) {
       static_cast<void>(retained_output.texture());
       if (completed.status == MTLCommandBufferStatusCompleted) {
@@ -514,19 +524,7 @@ class MetalPreview::Impl final
   }
 
   void flush_metrics() noexcept {
-    if (metrics_flushed_.exchange(true, std::memory_order_acq_rel)) {
-      return;
-    }
-    auto* metrics = std::exchange(metrics_, nullptr);
-    if (metrics == nullptr) {
-      return;
-    }
-    metrics->native_command_buffers.fetch_add(
-        native_command_buffers_.load(std::memory_order_relaxed),
-        std::memory_order_relaxed);
-    metrics->native_callback_wrappers.fetch_add(
-        native_callback_wrappers_.load(std::memory_order_relaxed),
-        std::memory_order_relaxed);
+    publication_.finalize([](auto&) noexcept {});
   }
 
   void destroy_ui() noexcept {
@@ -549,19 +547,21 @@ class MetalPreview::Impl final
   std::shared_ptr<MetalContext> context_;
   const std::uint32_t source_width_;
   const std::uint32_t source_height_;
-  swim::core::RuntimeCounters* metrics_;
+  swim::core::RuntimeCounterPublication publication_;
   CloseCallback close_callback_;
   const bool visible_;
   PreviewMailbox<MetalOutputLease> mailbox_;
   swim::core::RenderCompletionGate present_gate_;
+  std::atomic_uint64_t preview_submissions_{0};
+  std::atomic_uint64_t preview_completions_{0};
   std::atomic_uint64_t preview_drops_{0};
+  std::atomic_uint64_t preview_presents_{0};
   std::atomic_uint64_t native_command_buffers_{0};
   std::atomic_uint64_t native_callback_wrappers_{0};
   PreviewPresentationAccounting present_accounting_;
   std::atomic_bool present_in_flight_{false};
   std::atomic_bool stop_requested_{false};
   std::atomic_bool closed_{false};
-  std::atomic_bool metrics_flushed_{false};
   std::mutex offscreen_loop_mutex_;
   std::condition_variable_any offscreen_loop_condition_;
   std::uint32_t offscreen_width_{};

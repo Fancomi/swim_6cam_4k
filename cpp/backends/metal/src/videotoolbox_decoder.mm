@@ -88,15 +88,18 @@ class MetalDecodedSurfacePool final
   MetalDecodedSurfacePool(std::shared_ptr<MetalContext> context,
                           std::uint32_t capacity,
                           std::uint32_t camera_index,
-                          swim::core::RuntimeCounters& metrics)
+                          std::shared_ptr<swim::core::RuntimeCounterPublication>
+                              publication)
       : context_(std::move(context)),
         capacity_(capacity),
         camera_index_(camera_index),
-        metrics_(metrics),
+        publication_(std::move(publication)),
         slots_(std::make_unique<MetalDecodedSurface[]>(capacity)),
         free_mask_(surface_initial_mask(capacity)) {
-    metrics_.decode_surface_capacity[camera_index_].store(
-        capacity_, std::memory_order_relaxed);
+    publication_->publish([this](auto& metrics) noexcept {
+      metrics.decode_surface_capacity[camera_index_].store(
+          capacity_, std::memory_order_relaxed);
+    });
     for (std::uint32_t index = 0; index < capacity_; ++index) {
       slots_[index].pool_index = index;
       slots_[index].owner = this;
@@ -122,15 +125,23 @@ class MetalDecodedSurfacePool final
         slot.lifetime_anchor = shared_from_this();
         slot.references.store(1, std::memory_order_release);
         const auto in_use =
-            metrics_.decode_surface_in_use[camera_index_].fetch_add(
-                1, std::memory_order_relaxed) + 1;
-        swim::core::record_atomic_max(
-            metrics_.decode_surface_high_water[camera_index_], in_use);
+            in_use_.fetch_add(1, std::memory_order_relaxed) + 1;
+        swim::core::record_atomic_max(high_water_, in_use);
+        publication_->publish([this, in_use](auto& metrics) noexcept {
+          metrics.decode_surface_in_use[camera_index_].store(
+              in_use, std::memory_order_relaxed);
+          metrics.decode_surface_high_water[camera_index_].store(
+              high_water_.load(std::memory_order_relaxed),
+              std::memory_order_relaxed);
+        });
         return &slot;
       }
     }
-    metrics_.decode_surface_pool_misses[camera_index_].fetch_add(
-        1, std::memory_order_relaxed);
+    misses_.fetch_add(1, std::memory_order_relaxed);
+    publication_->publish([this](auto& metrics) noexcept {
+      metrics.decode_surface_pool_misses[camera_index_].fetch_add(
+          1, std::memory_order_relaxed);
+    });
     return nullptr;
   }
 
@@ -153,8 +164,21 @@ class MetalDecodedSurfacePool final
       surface->pixel_buffer = nullptr;
     }
     free_mask_.fetch_or(std::uint64_t{1} << index, std::memory_order_release);
-    metrics_.decode_surface_in_use[camera_index_].fetch_sub(
-        1, std::memory_order_relaxed);
+    const auto remaining = in_use_.fetch_sub(1, std::memory_order_relaxed) - 1;
+    publication_->publish([this, remaining](auto& metrics) noexcept {
+      metrics.decode_surface_in_use[camera_index_].store(
+          remaining, std::memory_order_relaxed);
+    });
+  }
+
+  std::uint64_t in_use() const noexcept {
+    return in_use_.load(std::memory_order_relaxed);
+  }
+  std::uint64_t high_water() const noexcept {
+    return high_water_.load(std::memory_order_relaxed);
+  }
+  std::uint64_t misses() const noexcept {
+    return misses_.load(std::memory_order_relaxed);
   }
 
  private:
@@ -162,9 +186,12 @@ class MetalDecodedSurfacePool final
   std::shared_ptr<MetalContext> context_;
   const std::uint32_t capacity_;
   const std::uint32_t camera_index_;
-  swim::core::RuntimeCounters& metrics_;
+  std::shared_ptr<swim::core::RuntimeCounterPublication> publication_;
   std::unique_ptr<MetalDecodedSurface[]> slots_;
   std::atomic_uint64_t free_mask_;
+  std::atomic_uint64_t in_use_{};
+  std::atomic_uint64_t high_water_{};
+  std::atomic_uint64_t misses_{};
 };
 
 namespace {
@@ -264,23 +291,51 @@ class VideoToolboxDecoder::Impl final {
       : context_(std::move(context)),
         camera_index_(camera_index),
         mailbox_(mailbox),
-        metrics_(metrics),
+        publication_(
+            std::make_shared<swim::core::RuntimeCounterPublication>(metrics)),
         tickets_(ticket_capacity),
         surfaces_(std::make_shared<MetalDecodedSurfacePool>(context_,
                                                             surface_capacity,
                                                             camera_index_,
-                                                            metrics_)) {
+                                                            publication_)),
+        ticket_capacity_(ticket_capacity),
+        surface_capacity_(surface_capacity) {
     if (context_ == nullptr || context_->device == nil ||
         context_->texture_cache == nullptr) {
       throw std::invalid_argument("VideoToolbox decoder requires a valid Metal context");
     }
-    metrics_.native_decode_tickets.fetch_add(ticket_capacity,
-                                             std::memory_order_relaxed);
-    metrics_.decode_ticket_capacity[camera_index_].store(
-        ticket_capacity, std::memory_order_relaxed);
+    publication_->publish([this, ticket_capacity](auto& external) noexcept {
+      external.native_decode_tickets.fetch_add(ticket_capacity,
+                                               std::memory_order_relaxed);
+      external.decode_ticket_capacity[camera_index_].store(
+          ticket_capacity, std::memory_order_relaxed);
+    });
   }
 
-  ~Impl() { invalidate(); }
+  ~Impl() {
+    invalidate();
+    publication_->finalize([this](auto& external) noexcept {
+      external.decode_ticket_capacity[camera_index_].store(
+          ticket_capacity_, std::memory_order_relaxed);
+      external.decode_ticket_in_use[camera_index_].store(
+          ticket_in_use_.load(std::memory_order_relaxed),
+          std::memory_order_relaxed);
+      external.decode_ticket_high_water[camera_index_].store(
+          ticket_high_water_.load(std::memory_order_relaxed),
+          std::memory_order_relaxed);
+      external.decode_ticket_pool_misses[camera_index_].store(
+          ticket_misses_.load(std::memory_order_relaxed),
+          std::memory_order_relaxed);
+      external.decode_surface_capacity[camera_index_].store(
+          surface_capacity_, std::memory_order_relaxed);
+      external.decode_surface_in_use[camera_index_].store(
+          surfaces_->in_use(), std::memory_order_relaxed);
+      external.decode_surface_high_water[camera_index_].store(
+          surfaces_->high_water(), std::memory_order_relaxed);
+      external.decode_surface_pool_misses[camera_index_].store(
+          surfaces_->misses(), std::memory_order_relaxed);
+    });
+  }
 
   void configure(CMVideoFormatDescriptionRef format_description) {
     if (format_description == nullptr ||
@@ -325,7 +380,10 @@ class VideoToolboxDecoder::Impl final {
           "VTDecompressionSessionCreate failed (OSStatus " +
               std::to_string(status) + ")"};
     }
-    metrics_.native_callback_wrappers.fetch_add(1, std::memory_order_relaxed);
+    publication_->publish([](auto& external) noexcept {
+      external.native_callback_wrappers.fetch_add(1,
+                                                  std::memory_order_relaxed);
+    });
 
     CFTypeRef hardware_value = nullptr;
     status = VTSessionCopyProperty(
@@ -359,10 +417,15 @@ class VideoToolboxDecoder::Impl final {
       ticket = tickets_.try_acquire();
       if (ticket != nullptr) {
         const auto in_use =
-            metrics_.decode_ticket_in_use[camera_index_].fetch_add(
-                1, std::memory_order_relaxed) + 1;
-        swim::core::record_atomic_max(
-            metrics_.decode_ticket_high_water[camera_index_], in_use);
+            ticket_in_use_.fetch_add(1, std::memory_order_relaxed) + 1;
+        swim::core::record_atomic_max(ticket_high_water_, in_use);
+        publication_->publish([this, in_use](auto& external) noexcept {
+          external.decode_ticket_in_use[camera_index_].store(
+              in_use, std::memory_order_relaxed);
+          external.decode_ticket_high_water[camera_index_].store(
+              ticket_high_water_.load(std::memory_order_relaxed),
+              std::memory_order_relaxed);
+        });
         ticket->camera_index = camera_index_;
         ticket->decoder_generation = decoder_generation;
         ticket->arrived_at = std::chrono::steady_clock::now();
@@ -371,9 +434,12 @@ class VideoToolboxDecoder::Impl final {
       }
     }
     if (ticket == nullptr) {
-      metrics_.pool_exhaustion.fetch_add(1, std::memory_order_relaxed);
-      metrics_.decode_ticket_pool_misses[camera_index_].fetch_add(
-          1, std::memory_order_relaxed);
+      ticket_misses_.fetch_add(1, std::memory_order_relaxed);
+      publication_->publish([this](auto& external) noexcept {
+        external.pool_exhaustion.fetch_add(1, std::memory_order_relaxed);
+        external.decode_ticket_pool_misses[camera_index_].fetch_add(
+            1, std::memory_order_relaxed);
+      });
       stats_.dropped.fetch_add(1, std::memory_order_relaxed);
       return DecodeSubmitResult::dropped_pool;
     }
@@ -394,8 +460,12 @@ class VideoToolboxDecoder::Impl final {
       swim::core::HotPathAllocationScope hot_path;
       if (status != noErr) {
         tickets_.release(ticket);
-        metrics_.decode_ticket_in_use[camera_index_].fetch_sub(
-            1, std::memory_order_relaxed);
+        const auto remaining =
+            ticket_in_use_.fetch_sub(1, std::memory_order_relaxed) - 1;
+        publication_->publish([this, remaining](auto& external) noexcept {
+          external.decode_ticket_in_use[camera_index_].store(
+              remaining, std::memory_order_relaxed);
+        });
         stats_.errors.fetch_add(1, std::memory_order_relaxed);
         set_recoverable_error_for_generation(status, decoder_generation);
         return DecodeSubmitResult::recoverable_error;
@@ -479,14 +549,41 @@ class VideoToolboxDecoder::Impl final {
                              presentation_time);
   }
 
+  void release_ticket(DecodeTicket* ticket) noexcept {
+    tickets_.release(ticket);
+    const auto remaining =
+        ticket_in_use_.fetch_sub(1, std::memory_order_relaxed) - 1;
+    publication_->publish([this, remaining](auto& external) noexcept {
+      external.decode_ticket_in_use[camera_index_].store(
+          remaining, std::memory_order_relaxed);
+    });
+  }
+
+  void record_malformed() noexcept {
+    publication_->publish([](auto& external) noexcept {
+      external.malformed.fetch_add(1, std::memory_order_relaxed);
+    });
+  }
+
+  void record_pool_exhaustion() noexcept {
+    publication_->publish([](auto& external) noexcept {
+      external.pool_exhaustion.fetch_add(1, std::memory_order_relaxed);
+    });
+  }
+
+  void record_texture_wrapper() noexcept {
+    publication_->publish([](auto& external) noexcept {
+      external.native_texture_wrappers.fetch_add(1,
+                                                 std::memory_order_relaxed);
+    });
+  }
+
   void handle_callback(DecodeTicket* ticket, OSStatus status,
                        VTDecodeInfoFlags info_flags,
                        CVImageBufferRef image_buffer,
                        CMTime presentation_time) noexcept {
-    const auto release_ticket = [this, ticket] {
-      tickets_.release(ticket);
-      metrics_.decode_ticket_in_use[camera_index_].fetch_sub(
-          1, std::memory_order_relaxed);
+    const auto release_current_ticket = [this, ticket] {
+      release_ticket(ticket);
     };
     std::lock_guard publish_lock(publish_mutex_);
     CVPixelBufferRef pixel_buffer = nullptr;
@@ -499,20 +596,20 @@ class VideoToolboxDecoder::Impl final {
           generation_.load(std::memory_order_acquire)) {
         stats_.late.fetch_add(1, std::memory_order_relaxed);
         stats_.dropped.fetch_add(1, std::memory_order_relaxed);
-        release_ticket();
+        release_current_ticket();
         return;
       }
       if (status != noErr) {
         stats_.errors.fetch_add(1, std::memory_order_relaxed);
         stats_.dropped.fetch_add(1, std::memory_order_relaxed);
         set_recoverable_error_locked(status);
-        release_ticket();
+        release_current_ticket();
         return;
       }
       if (image_buffer == nullptr ||
           (info_flags & kVTDecodeInfo_FrameDropped) != 0) {
         stats_.dropped.fetch_add(1, std::memory_order_relaxed);
-        release_ticket();
+        release_current_ticket();
         return;
       }
       pixel_buffer = static_cast<CVPixelBufferRef>(image_buffer);
@@ -521,44 +618,44 @@ class VideoToolboxDecoder::Impl final {
           CVPixelBufferGetPixelFormatType(pixel_buffer) !=
               kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
           CVPixelBufferGetPlaneCount(pixel_buffer) != 2) {
-        metrics_.malformed.fetch_add(1, std::memory_order_relaxed);
+        record_malformed();
         stats_.dropped.fetch_add(1, std::memory_order_relaxed);
         stats_.errors.fetch_add(1, std::memory_order_relaxed);
         set_recoverable_error_locked(kVTVideoDecoderMalfunctionErr);
-        release_ticket();
+        release_current_ticket();
         return;
       }
       matrix = color_matrix(pixel_buffer);
       if (!matrix.has_value()) {
-        metrics_.malformed.fetch_add(1, std::memory_order_relaxed);
+        record_malformed();
         stats_.dropped.fetch_add(1, std::memory_order_relaxed);
         stats_.errors.fetch_add(1, std::memory_order_relaxed);
         set_recoverable_error_locked(kVTVideoDecoderMalfunctionErr);
-        release_ticket();
+        release_current_ticket();
         return;
       }
       if (!CMTIME_IS_VALID(presentation_time) ||
           !CMTIME_IS_NUMERIC(presentation_time) ||
           presentation_time.timescale <= 0) {
-        metrics_.malformed.fetch_add(1, std::memory_order_relaxed);
+        record_malformed();
         stats_.dropped.fetch_add(1, std::memory_order_relaxed);
         stats_.errors.fetch_add(1, std::memory_order_relaxed);
         set_recoverable_error_locked(kVTVideoDecoderMalfunctionErr);
-        release_ticket();
+        release_current_ticket();
         return;
       }
       if (CMTIME_IS_VALID(last_published_pts_) &&
           CMTimeCompare(presentation_time, last_published_pts_) <= 0) {
         stats_.late.fetch_add(1, std::memory_order_relaxed);
         stats_.dropped.fetch_add(1, std::memory_order_relaxed);
-        release_ticket();
+        release_current_ticket();
         return;
       }
       surface = surfaces_->try_acquire();
       if (surface == nullptr) {
-        metrics_.pool_exhaustion.fetch_add(1, std::memory_order_relaxed);
+        record_pool_exhaustion();
         stats_.dropped.fetch_add(1, std::memory_order_relaxed);
-        release_ticket();
+        release_current_ticket();
         return;
       }
     }
@@ -572,7 +669,7 @@ class VideoToolboxDecoder::Impl final {
         &surface->luma_texture_ref);
     if (texture_status == kCVReturnSuccess &&
         surface->luma_texture_ref != nullptr) {
-      metrics_.native_texture_wrappers.fetch_add(1, std::memory_order_relaxed);
+      record_texture_wrapper();
       surface->luma = CVMetalTextureGetTexture(surface->luma_texture_ref);
     }
     if (texture_status == kCVReturnSuccess && surface->luma != nil) {
@@ -582,7 +679,7 @@ class VideoToolboxDecoder::Impl final {
           kRequiredHeight / 2, 1, &surface->chroma_texture_ref);
       if (texture_status == kCVReturnSuccess &&
           surface->chroma_texture_ref != nullptr) {
-        metrics_.native_texture_wrappers.fetch_add(1, std::memory_order_relaxed);
+        record_texture_wrapper();
         surface->chroma = CVMetalTextureGetTexture(surface->chroma_texture_ref);
       }
     }
@@ -595,7 +692,7 @@ class VideoToolboxDecoder::Impl final {
               ? kVTVideoDecoderMalfunctionErr
               : static_cast<OSStatus>(texture_status));
       release_surface(surface);
-      release_ticket();
+      release_current_ticket();
       return;
     }
 
@@ -627,13 +724,15 @@ class VideoToolboxDecoder::Impl final {
     }
     last_published_pts_ = presentation_time;
     first_frame_of_generation_ = false;
-    metrics_.decoded.fetch_add(1, std::memory_order_relaxed);
-    metrics_.published.fetch_add(1, std::memory_order_relaxed);
-    metrics_.camera_decoded[camera_index_].fetch_add(
-        1, std::memory_order_relaxed);
-    metrics_.camera_published[camera_index_].fetch_add(
-        1, std::memory_order_relaxed);
-    release_ticket();
+    publication_->publish([this](auto& external) noexcept {
+      external.decoded.fetch_add(1, std::memory_order_relaxed);
+      external.published.fetch_add(1, std::memory_order_relaxed);
+      external.camera_decoded[camera_index_].fetch_add(
+          1, std::memory_order_relaxed);
+      external.camera_published[camera_index_].fetch_add(
+          1, std::memory_order_relaxed);
+    });
+    release_current_ticket();
   }
 
   void destroy_session_locked() noexcept {
@@ -677,9 +776,14 @@ class VideoToolboxDecoder::Impl final {
   std::shared_ptr<MetalContext> context_;
   const std::uint32_t camera_index_;
   swim::core::LatestFrameMailbox& mailbox_;
-  swim::core::RuntimeCounters& metrics_;
+  std::shared_ptr<swim::core::RuntimeCounterPublication> publication_;
   DecodeTicketPool tickets_;
   std::shared_ptr<MetalDecodedSurfacePool> surfaces_;
+  const std::uint32_t ticket_capacity_;
+  const std::uint32_t surface_capacity_;
+  std::atomic_uint64_t ticket_in_use_{};
+  std::atomic_uint64_t ticket_high_water_{};
+  std::atomic_uint64_t ticket_misses_{};
   mutable std::mutex session_mutex_;
   std::mutex publish_mutex_;
   VTDecompressionSessionRef session_ = nullptr;
