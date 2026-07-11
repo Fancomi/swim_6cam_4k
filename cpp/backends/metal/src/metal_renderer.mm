@@ -1110,46 +1110,50 @@ MetalStitchRenderer::~MetalStitchRenderer() {
 bool MetalStitchRenderer::submit(
     const std::array<MetalFrameView, 6>& frames,
     MetalRenderResult& result) noexcept {
-  return impl_->submit(frames, nullptr, result);
+  @autoreleasepool {
+    return impl_->submit(frames, nullptr, result);
+  }
 }
 
 bool MetalStitchRenderer::submit(
     const swim::core::RenderSnapshot& snapshot,
     MetalRenderResult& result) noexcept {
-  try {
-    std::array<MetalFrameView, 6> frames;
-    for (std::size_t index = 0; index < frames.size(); ++index) {
-      if (snapshot.frames[index].metadata().camera_index != index) {
-        return false;
-      }
-      const auto& lease = snapshot.frames[index];
-      switch (lease.backend_tag()) {
-        case kMetalFrameBackendTag: {
-          auto* native = static_cast<MetalFrameView*>(
-              lease.native(kMetalFrameBackendTag));
-          if (native == nullptr) {
-            return false;
-          }
-          frames[index] = *native;
-          break;
-        }
-        case kMetalDecodedSurfaceTag: {
-          auto* decoded = static_cast<MetalDecodedSurface*>(
-              lease.native(kMetalDecodedSurfaceTag));
-          if (decoded == nullptr) {
-            return false;
-          }
-          frames[index] = decoded->view;
-          break;
-        }
-        default:
+  @autoreleasepool {
+    try {
+      std::array<MetalFrameView, 6> frames;
+      for (std::size_t index = 0; index < frames.size(); ++index) {
+        if (snapshot.frames[index].metadata().camera_index != index) {
           return false;
+        }
+        const auto& lease = snapshot.frames[index];
+        switch (lease.backend_tag()) {
+          case kMetalFrameBackendTag: {
+            auto* native = static_cast<MetalFrameView*>(
+                lease.native(kMetalFrameBackendTag));
+            if (native == nullptr) {
+              return false;
+            }
+            frames[index] = *native;
+            break;
+          }
+          case kMetalDecodedSurfaceTag: {
+            auto* decoded = static_cast<MetalDecodedSurface*>(
+                lease.native(kMetalDecodedSurfaceTag));
+            if (decoded == nullptr) {
+              return false;
+            }
+            frames[index] = decoded->view;
+            break;
+          }
+          default:
+            return false;
+        }
+        frames[index].metadata = snapshot.frames[index].metadata();
       }
-      frames[index].metadata = snapshot.frames[index].metadata();
+      return impl_->submit(frames, &snapshot.frames, result);
+    } catch (...) {
+      return false;
     }
-    return impl_->submit(frames, &snapshot.frames, result);
-  } catch (...) {
-    return false;
   }
 }
 
