@@ -111,6 +111,15 @@ class SummaryRow:
     incremental_gpu_ms_p95: float | None = None
 
 
+@dataclass(frozen=True)
+class SoakSummary:
+    interval_count: int
+    post_warmup_interval_count: int
+    minimum_post_warmup_fps: float
+    rss_slope_bytes_per_minute: float
+    gpu_slope_bytes_per_minute: float
+
+
 def load_records(path: Path) -> list[dict]:
     records: list[dict] = []
     try:
@@ -347,6 +356,62 @@ def validate_matrix(records: list[dict], publishable: bool) -> None:
                 raise MatrixValidationError(f"publishable cell {cell} has no interval telemetry")
 
 
+def _linear_slope_per_minute(values: Sequence[float]) -> float:
+    if len(values) < 2:
+        return 0.0
+    mean_x = (len(values) - 1) / 2.0
+    mean_y = sum(values) / len(values)
+    numerator = sum((index - mean_x) * (value - mean_y) for index, value in enumerate(values))
+    denominator = sum((index - mean_x) ** 2 for index in range(len(values)))
+    return 0.0 if denominator == 0 else numerator / denominator * 60.0
+
+
+def validate_soak_records(
+    records: list[dict],
+    *,
+    warmup_seconds: int,
+    min_fps: float,
+    max_rss_slope_bytes_per_minute: float | None = None,
+    max_gpu_slope_bytes_per_minute: float | None = None,
+) -> SoakSummary:
+    if warmup_seconds < 0:
+        raise MatrixValidationError("warmup_seconds must be nonnegative")
+    if not math.isfinite(min_fps) or min_fps <= 0:
+        raise MatrixValidationError("min_fps must be positive")
+    validate_cell_records(records, ("full", 6, "paced"))
+    intervals = [record for record in records if not record["final"]]
+    if len(intervals) <= warmup_seconds:
+        raise MatrixValidationError("soak has no post-warmup interval telemetry")
+    post_warmup = intervals[warmup_seconds:]
+    post_warmup_fps = [_throughput(record) for record in post_warmup]
+    low_streak = 0
+    for fps in post_warmup_fps:
+        low_streak = low_streak + 1 if fps < min_fps else 0
+        if low_streak >= 5:
+            raise MatrixValidationError(
+                f"sustained FPS below {min_fps:.3f} for five consecutive intervals"
+            )
+    rss_slope = _linear_slope_per_minute([float(record["rss_bytes"]) for record in post_warmup])
+    gpu_slope = _linear_slope_per_minute(
+        [float(record["gpu_allocated_bytes"]) for record in post_warmup]
+    )
+    if max_rss_slope_bytes_per_minute is not None and rss_slope > max_rss_slope_bytes_per_minute:
+        raise MatrixValidationError(
+            f"RSS slope {rss_slope:.3f} exceeds {max_rss_slope_bytes_per_minute:.3f} bytes/minute"
+        )
+    if max_gpu_slope_bytes_per_minute is not None and gpu_slope > max_gpu_slope_bytes_per_minute:
+        raise MatrixValidationError(
+            f"GPU allocation slope {gpu_slope:.3f} exceeds {max_gpu_slope_bytes_per_minute:.3f} bytes/minute"
+        )
+    return SoakSummary(
+        interval_count=len(intervals),
+        post_warmup_interval_count=len(post_warmup),
+        minimum_post_warmup_fps=min(post_warmup_fps),
+        rss_slope_bytes_per_minute=rss_slope,
+        gpu_slope_bytes_per_minute=gpu_slope,
+    )
+
+
 def _percentile(values: Sequence[float], percentile: float) -> float:
     if not values:
         return 0.0
@@ -474,6 +539,11 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--markdown", type=Path)
     parser.add_argument("--publishable", action="store_true")
     parser.add_argument("--cell-only", action="store_true")
+    parser.add_argument("--soak-only", action="store_true")
+    parser.add_argument("--warmup-seconds", type=int, default=30)
+    parser.add_argument("--min-fps", type=float, default=29.0)
+    parser.add_argument("--max-rss-slope-bytes-per-minute", type=float)
+    parser.add_argument("--max-gpu-slope-bytes-per-minute", type=float)
     parser.add_argument("--expected-stage", choices=STAGES)
     parser.add_argument("--expected-stream-count", type=int, choices=STREAM_COUNTS)
     parser.add_argument("--expected-pacing", choices=PACINGS)
@@ -484,6 +554,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
     try:
         records = load_records(args.results)
+        if args.soak_only:
+            summary = validate_soak_records(
+                records,
+                warmup_seconds=args.warmup_seconds,
+                min_fps=args.min_fps,
+                max_rss_slope_bytes_per_minute=args.max_rss_slope_bytes_per_minute,
+                max_gpu_slope_bytes_per_minute=args.max_gpu_slope_bytes_per_minute,
+            )
+            print(json.dumps(summary.__dict__, sort_keys=True))
+            return 0
         if args.cell_only:
             expected_parts = (args.expected_stage, args.expected_stream_count, args.expected_pacing)
             if any(value is None for value in expected_parts):

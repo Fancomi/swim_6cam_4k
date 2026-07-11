@@ -7,6 +7,7 @@ from python.validation.summarize_benchmarks import (
     MatrixValidationError,
     load_records,
     summarize_records,
+    validate_soak_records,
     validate_matrix,
 )
 
@@ -237,6 +238,34 @@ class SummarizeRecordsTest(unittest.TestCase):
         self.assertEqual(encode.incremental_fps_cost, 6.0)
         self.assertEqual(encode.incremental_gpu_ms_p95, 4.0)
         self.assertEqual(full.bottleneck_rank, 1)
+
+
+class ValidateSoakTest(unittest.TestCase):
+    def test_reports_resource_slopes_and_accepts_healthy_full_soak(self):
+        records = [
+            record_for("full", 6, "paced", final=False, elapsed_s=1.0)
+            for _ in range(40)
+        ]
+        for index, record in enumerate(records):
+            record["rss_bytes"] += index * 1024
+            record["gpu_allocated_bytes"] += index * 2048
+        records.append(record_for("full", 6, "paced", final=True, elapsed_s=600.0))
+        summary = validate_soak_records(records, warmup_seconds=30, min_fps=29.0)
+        self.assertGreater(summary.rss_slope_bytes_per_minute, 0)
+        self.assertGreater(summary.gpu_slope_bytes_per_minute, 0)
+
+    def test_rejects_five_consecutive_post_warmup_low_fps_intervals(self):
+        records = [
+            record_for("full", 6, "paced", final=False, elapsed_s=1.0)
+            for _ in range(35)
+        ]
+        for record in records[-5:]:
+            record["render_fps"] = 28.0
+            record["preview_fps"] = 28.0
+            record["encode_fps"] = 28.0
+        records.append(record_for("full", 6, "paced", final=True, elapsed_s=600.0))
+        with self.assertRaisesRegex(MatrixValidationError, "sustained FPS"):
+            validate_soak_records(records, warmup_seconds=30, min_fps=29.0)
 
 
 if __name__ == "__main__":
