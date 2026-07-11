@@ -332,6 +332,90 @@ TEST_CASE(render_completion_capacity_and_frame_age_metrics_snapshot_exactly) {
   CHECK_EQ(empty.render_completion_fps(), 0.0);
 }
 
+TEST_CASE(concurrent_histogram_samples_are_non_destructive) {
+  swim::core::FixedLatencyHistogram histogram;
+  for (std::uint64_t value = 1; value <= 100; ++value) {
+    histogram.observe(std::chrono::milliseconds{value});
+  }
+
+  const auto first = histogram.sample();
+  const auto second = histogram.sample();
+  CHECK_EQ(first.count(), 100u);
+  CHECK_EQ(second.count(), 100u);
+  CHECK_EQ(second.percentile(0.50), 50ms);
+  CHECK_EQ(second.percentile(0.95), 95ms);
+  CHECK_EQ(second.percentile(0.99), 99ms);
+
+  std::atomic_bool start{};
+  std::jthread producer([&] {
+    while (!start.load(std::memory_order_acquire)) {
+    }
+    for (std::uint64_t value = 0; value < 10'000; ++value) {
+      histogram.observe(std::chrono::milliseconds{value % 101});
+    }
+  });
+  start.store(true, std::memory_order_release);
+  while (producer.joinable()) {
+    const auto concurrent = histogram.sample();
+    CHECK(concurrent.count() >= 100u);
+    if (concurrent.count() == 10'100u) {
+      producer.join();
+    } else {
+      std::this_thread::yield();
+    }
+  }
+  CHECK_EQ(histogram.sample().count(), 10'100u);
+}
+
+TEST_CASE(runtime_total_samples_preserve_cumulative_events_and_camera_identity) {
+  swim::core::RuntimeCounters counters;
+  counters.received.store(9);
+  counters.decoded.store(8);
+  counters.camera_received[2].store(3);
+  counters.camera_decoded[2].store(4);
+  counters.camera_published[2].store(5);
+  counters.camera_overwritten[2].store(6);
+  counters.camera_reused[2].store(7);
+  counters.frame_age[2].observe(10ms);
+  counters.frame_age[2].observe(20ms);
+  counters.frame_age[2].observe(30ms);
+  counters.snapshot_age_spread.observe(12ms);
+
+  const auto first = counters.sample_totals();
+  const auto second = counters.sample_totals();
+  CHECK_EQ(first.received, 9u);
+  CHECK_EQ(second.received, 9u);
+  CHECK_EQ(second.decoded, 8u);
+  CHECK_EQ(second.camera_received[2], 3u);
+  CHECK_EQ(second.camera_decoded[2], 4u);
+  CHECK_EQ(second.camera_published[2], 5u);
+  CHECK_EQ(second.camera_overwritten[2], 6u);
+  CHECK_EQ(second.camera_reused[2], 7u);
+  CHECK_EQ(second.camera_received[1], 0u);
+  CHECK_EQ(second.frame_age_ms_p50[2], 20u);
+  CHECK_EQ(second.frame_age_ms_p95[2], 30u);
+  CHECK_EQ(second.frame_age_ms_p99[2], 30u);
+  CHECK_EQ(second.snapshot_age_spread_ms_p99, 12u);
+
+  counters.received.fetch_add(4);
+  counters.camera_received[2].fetch_add(2);
+  counters.render_completions.fetch_add(3);
+  counters.encode_bytes.fetch_add(1'024);
+  const auto final = counters.sample_totals();
+  CHECK_EQ(swim::core::monotonic_delta(final.received, second.received), 4u);
+  CHECK_EQ(swim::core::monotonic_delta(final.camera_received[2],
+                                       second.camera_received[2]),
+           2u);
+  CHECK_EQ(swim::core::monotonic_delta(final.render_completions,
+                                       second.render_completions),
+           3u);
+  CHECK_EQ(swim::core::monotonic_delta(final.encode_bytes,
+                                       second.encode_bytes),
+           1'024u);
+  CHECK_EQ(final.received, 13u);
+  CHECK_EQ(final.camera_received[2], 5u);
+}
+
 TEST_CASE(fixed_pool_rejects_capacities_outside_one_to_sixty_four) {
   CHECK_THROWS_WITH((swim::core::FixedSlotPool<std::uint64_t>{0}),
                     "fixed pool capacity must be between 1 and 64");

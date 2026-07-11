@@ -39,12 +39,12 @@ class FixedLatencyHistogram {
   // Finite quantiles are clamped to [0, 1]. Non-finite values throw
   // std::invalid_argument.
   std::chrono::milliseconds percentile(double quantile) const;
+  FixedLatencyHistogramSnapshot sample() const noexcept;
   FixedLatencyHistogramSnapshot snapshot_and_reset() noexcept;
   std::uint64_t count() const noexcept;
 
  private:
-  std::array<std::uint64_t, kBucketCount> buckets_{};
-  std::uint64_t count_{};
+  std::array<std::atomic_uint64_t, kBucketCount> buckets_{};
 };
 
 struct MetricsSnapshot final {
@@ -62,12 +62,26 @@ struct MetricsSnapshot final {
   const std::uint64_t render_first_submit_ns;
   const std::uint64_t render_last_completion_ns;
   const std::uint64_t render_inflight_capacity;
+  const std::uint64_t render_inflight_in_use;
   const std::uint64_t render_inflight_high_water;
   const std::uint64_t render_inflight_pool_misses;
   const std::uint64_t render_output_capacity;
+  const std::uint64_t render_output_in_use;
   const std::uint64_t render_output_high_water;
   const std::uint64_t render_output_pool_misses;
+  const std::array<std::uint64_t, 6> camera_received;
+  const std::array<std::uint64_t, 6> camera_decoded;
+  const std::array<std::uint64_t, 6> camera_published;
+  const std::array<std::uint64_t, 6> camera_overwritten;
+  const std::array<std::uint64_t, 6> camera_reused;
+  const std::array<std::uint64_t, 6> frame_age_ms_p50;
+  const std::array<std::uint64_t, 6> frame_age_ms_p95;
   const std::array<std::uint64_t, 6> frame_age_ms_p99;
+  const std::uint64_t snapshot_age_spread_ms_p99;
+  const std::uint64_t gpu_render_duration_ms_p50;
+  const std::uint64_t gpu_render_duration_ms_p95;
+  const std::uint64_t preview_submissions;
+  const std::uint64_t preview_completions;
   const std::uint64_t preview_drops;
   const std::uint64_t preview_presents;
   const std::uint64_t encode_submissions;
@@ -90,6 +104,15 @@ struct MetricsSnapshot final {
   const std::uint64_t native_command_buffers;
   const std::uint64_t native_decode_tickets;
   const std::uint64_t native_callback_wrappers;
+  const std::uint64_t application_hot_path_allocations;
+  const std::array<std::uint64_t, 6> decode_surface_capacity;
+  const std::array<std::uint64_t, 6> decode_surface_in_use;
+  const std::array<std::uint64_t, 6> decode_surface_high_water;
+  const std::array<std::uint64_t, 6> decode_surface_pool_misses;
+  const std::array<std::uint64_t, 6> decode_ticket_capacity;
+  const std::array<std::uint64_t, 6> decode_ticket_in_use;
+  const std::array<std::uint64_t, 6> decode_ticket_high_water;
+  const std::array<std::uint64_t, 6> decode_ticket_pool_misses;
 
   std::uint64_t render_completion_interval_ns() const noexcept;
   double render_completion_fps() const noexcept;
@@ -114,11 +137,15 @@ struct RuntimeCounters final {
   // One runtime renderer writes these startup/final gauges. They are exchanged
   // only by the single final snapshot after renderer drain.
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_inflight_capacity{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_inflight_in_use{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_inflight_high_water{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_inflight_pool_misses{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_output_capacity{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_output_in_use{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_output_high_water{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t render_output_pool_misses{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t preview_submissions{};
+  alignas(kMetricsCacheLineBytes) std::atomic_uint64_t preview_completions{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t preview_drops{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t preview_presents{};
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t encode_submissions{};
@@ -151,11 +178,32 @@ struct RuntimeCounters final {
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t
       native_callback_wrappers{};
 
-  // Written only by the render thread and snapshotted after that thread joins.
-  std::array<FixedLatencyHistogram, 6> frame_age;
+  std::array<std::atomic_uint64_t, 6> camera_received{};
+  std::array<std::atomic_uint64_t, 6> camera_decoded{};
+  std::array<std::atomic_uint64_t, 6> camera_published{};
+  std::array<std::atomic_uint64_t, 6> camera_overwritten{};
+  std::array<std::atomic_uint64_t, 6> camera_reused{};
+  std::array<std::atomic_uint64_t, 6> decode_surface_capacity{};
+  std::array<std::atomic_uint64_t, 6> decode_surface_in_use{};
+  std::array<std::atomic_uint64_t, 6> decode_surface_high_water{};
+  std::array<std::atomic_uint64_t, 6> decode_surface_pool_misses{};
+  std::array<std::atomic_uint64_t, 6> decode_ticket_capacity{};
+  std::array<std::atomic_uint64_t, 6> decode_ticket_in_use{};
+  std::array<std::atomic_uint64_t, 6> decode_ticket_high_water{};
+  std::array<std::atomic_uint64_t, 6> decode_ticket_pool_misses{};
 
+  // Fixed atomic buckets make reporter snapshots race-safe without handoff
+  // allocation or destructive reset.
+  std::array<FixedLatencyHistogram, 6> frame_age;
+  FixedLatencyHistogram snapshot_age_spread;
+  FixedLatencyHistogram gpu_render_duration;
+
+  MetricsSnapshot sample_totals() const noexcept;
   MetricsSnapshot snapshot_and_reset() noexcept;
 };
+
+std::uint64_t monotonic_delta(std::uint64_t current,
+                              std::uint64_t previous) noexcept;
 
 static_assert(sizeof(std::atomic_uint64_t) <= kMetricsCacheLineBytes);
 
