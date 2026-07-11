@@ -324,6 +324,9 @@ class MetalPreview::Impl final
       return;
     }
     stop_requested_.store(true, std::memory_order_release);
+    if (!visible_) {
+      offscreen_loop_condition_.notify_all();
+    }
     if (mailbox_.close_and_clear()) {
       record_preview_drop();
     }

@@ -107,6 +107,40 @@ TEST_CASE(offscreen_preview_executes_real_gpu_copy_without_appkit_window) {
   CHECK_EQ(pool->in_use(), 0u);
 }
 
+TEST_CASE(offscreen_terminal_close_wakes_a_concurrent_main_loop_waiter) {
+  auto context = std::make_shared<swim::metal::MetalContext>();
+  context->device = MTLCreateSystemDefaultDevice();
+  CHECK(context->device != nil);
+  context->command_queue = [context->device newCommandQueue];
+  CHECK(context->command_queue != nil);
+  swim::core::RuntimeCounters counters;
+  swim::metal::MetalPreview preview{context, 64, 32, counters, [] {}, false};
+  std::atomic_bool entered{false};
+  std::atomic_bool exited{false};
+  std::jthread loop([&](std::stop_token token) {
+    entered.store(true, std::memory_order_release);
+    preview.run_main_loop(token);
+    exited.store(true, std::memory_order_release);
+  });
+  while (!entered.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  std::this_thread::sleep_for(20ms);
+
+  preview.close_and_drain();
+  const auto deadline = std::chrono::steady_clock::now() + 100ms;
+  while (!exited.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  const bool close_woke_loop = exited.load(std::memory_order_acquire);
+  if (!close_woke_loop) {
+    preview.request_stop();
+  }
+  loop.join();
+  CHECK(close_woke_loop);
+}
+
 TEST_CASE(preview_offer_never_blocks_when_capacity_one_is_full) {
   swim::metal::PreviewMailbox<std::uint64_t> mailbox;
   CHECK(mailbox.offer(1));
