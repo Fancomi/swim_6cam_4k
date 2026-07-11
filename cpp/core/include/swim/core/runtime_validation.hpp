@@ -6,6 +6,7 @@
 namespace swim::core {
 
 void validate_runtime_compatibility(const AppConfig& config,
-                                    const RuntimeAsset& asset);
+                                    const RuntimeAsset& asset,
+                                    bool resolved_encode);
 
 }  // namespace swim::core

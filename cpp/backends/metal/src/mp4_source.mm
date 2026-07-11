@@ -476,7 +476,6 @@ class Mp4VideoToolboxSource::Impl final {
                   swim::core::SourceEofDisposition::normal_after_deadline) {
             return ReaderOutcome::stopped_or_duration_reached;
           }
-          lifecycle_->request_stop();
           throw LaneFailure{
               LaneFailureKind::fatal,
               swim::core::source_eof_failure_message(disposition)};

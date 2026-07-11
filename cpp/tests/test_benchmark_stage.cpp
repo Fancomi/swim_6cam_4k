@@ -238,3 +238,30 @@ TEST_CASE(decode_only_exits_early_when_every_active_source_fails) {
   CHECK(lifecycle.stop_requested());
   CHECK(std::chrono::steady_clock::now() - started < 500ms);
 }
+
+TEST_CASE(decode_only_partial_failure_waits_for_healthy_lane_publication) {
+  CountingBackend backend;
+  swim::core::AppConfig config;
+  auto sources = swim::core::make_sources(backend, config, 2);
+  backend.views[0]->failure = true;
+  std::array<swim::core::LatestFrameMailbox, 6> mailboxes;
+  swim::core::RunLifecycle lifecycle{15ms};
+  swim::core::DecodeOnlyExit result{
+      swim::core::DecodeOnlyExit::stop_requested};
+
+  const auto started = std::chrono::steady_clock::now();
+  std::jthread runner([&] {
+    result = swim::core::run_decode_only(
+        sources, mailboxes, 2, lifecycle, {}, 1ms);
+  });
+  std::this_thread::sleep_for(5ms);
+  mailboxes[1].publish(static_frame(1));
+  runner.join();
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+
+  CHECK_EQ(result, swim::core::DecodeOnlyExit::deadline_reached);
+  CHECK(lifecycle.active());
+  CHECK(!lifecycle.stop_requested());
+  CHECK(elapsed >= 10ms);
+  CHECK(elapsed < 500ms);
+}

@@ -94,7 +94,7 @@ swim::core::RuntimeAsset validate_inputs(
     require_regular_file(source.path, "source " + source.camera_id);
   }
   auto asset = swim::core::load_asset(config.asset_path);
-  swim::core::validate_runtime_compatibility(config, asset);
+  swim::core::validate_runtime_compatibility(config, asset, graph.encode);
   return asset;
 }
 

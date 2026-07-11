@@ -1,6 +1,7 @@
 #include "test_support.hpp"
 
 #include <swim/core/config.hpp>
+#include <swim/core/benchmark_stage.hpp>
 #include <swim/core/runtime_validation.hpp>
 
 #include <array>
@@ -49,14 +50,15 @@ std::string fixture_error(std::string_view name, std::size_t line,
 
 TEST_CASE(accepts_exact_runtime_asset_compatibility) {
   swim::core::validate_runtime_compatibility(AppConfig{},
-                                              compatible_runtime_asset());
+                                              compatible_runtime_asset(),
+                                              false);
 }
 
 TEST_CASE(rejects_wrong_runtime_asset_logical_width) {
   auto asset = compatible_runtime_asset();
   asset.logical_width = 5000;
   CHECK_THROWS_WITH(swim::core::validate_runtime_compatibility(AppConfig{},
-                                                               asset),
+                                                               asset, false),
                     "runtime asset dimensions must be 5001x2101 -> 5002x2102");
 }
 
@@ -64,7 +66,7 @@ TEST_CASE(rejects_wrong_runtime_asset_logical_height) {
   auto asset = compatible_runtime_asset();
   asset.logical_height = 2100;
   CHECK_THROWS_WITH(swim::core::validate_runtime_compatibility(AppConfig{},
-                                                               asset),
+                                                               asset, false),
                     "runtime asset dimensions must be 5001x2101 -> 5002x2102");
 }
 
@@ -72,7 +74,7 @@ TEST_CASE(rejects_wrong_runtime_asset_encoded_width) {
   auto asset = compatible_runtime_asset();
   asset.encoded_width = 5001;
   CHECK_THROWS_WITH(swim::core::validate_runtime_compatibility(AppConfig{},
-                                                               asset),
+                                                               asset, false),
                     "runtime asset dimensions must be 5001x2101 -> 5002x2102");
 }
 
@@ -80,7 +82,7 @@ TEST_CASE(rejects_wrong_runtime_asset_encoded_height) {
   auto asset = compatible_runtime_asset();
   asset.encoded_height = 2101;
   CHECK_THROWS_WITH(swim::core::validate_runtime_compatibility(AppConfig{},
-                                                               asset),
+                                                               asset, false),
                     "runtime asset dimensions must be 5001x2101 -> 5002x2102");
 }
 
@@ -178,33 +180,81 @@ TEST_CASE(validates_hevc_encode_sink_path_and_fixed_frame_rate) {
   config.encode_path.clear();
   CHECK_THROWS_WITH(
       swim::core::validate_runtime_compatibility(config,
-                                                 compatible_runtime_asset()),
+                                                 compatible_runtime_asset(),
+                                                 true),
       "file HEVC encoding requires --encode-path");
 
   config.encode_path = "outputs/video.h264";
   CHECK_THROWS_WITH(
       swim::core::validate_runtime_compatibility(config,
-                                                 compatible_runtime_asset()),
+                                                 compatible_runtime_asset(),
+                                                 true),
       "HEVC encode path extension must be .h265 or .hevc");
 
   config.encode_path = "outputs/video.h265";
   swim::core::validate_runtime_compatibility(config,
-                                              compatible_runtime_asset());
+                                              compatible_runtime_asset(), true);
   config.encode_path = "outputs/video.hevc";
   swim::core::validate_runtime_compatibility(config,
-                                              compatible_runtime_asset());
+                                              compatible_runtime_asset(), true);
 
   config.fps_num = 30;
   CHECK_THROWS_WITH(
       swim::core::validate_runtime_compatibility(config,
-                                                 compatible_runtime_asset()),
+                                                 compatible_runtime_asset(),
+                                                 true),
       "HEVC encoding requires fps_num/fps_den=30000/1001");
 
   config.encode_sink = EncodeSink::null_sink;
   config.encode_path.clear();
   config.fps_num = 30000;
   swim::core::validate_runtime_compatibility(config,
-                                              compatible_runtime_asset());
+                                              compatible_runtime_asset(), true);
+}
+
+TEST_CASE(runtime_validation_rejects_invalid_forced_encode_settings) {
+  auto config = AppConfig{};
+  config.stage = BenchmarkStage::decode_render_encode;
+  config.encode = false;
+  config.encode_sink = EncodeSink::null_sink;
+  config.fps_num = 25;
+  config.fps_den = 1;
+  const auto graph = swim::core::resolve_benchmark_graph(config);
+
+  CHECK(graph.encode);
+  CHECK_THROWS_WITH(
+      swim::core::validate_runtime_compatibility(
+          config, compatible_runtime_asset(), graph.encode),
+      "HEVC encoding requires fps_num/fps_den=30000/1001");
+  CHECK(!config.encode);
+
+  config.fps_num = 30000;
+  config.fps_den = 1001;
+  config.encode_sink = EncodeSink::file;
+  config.encode_path = "outputs/video.h264";
+  CHECK_THROWS_WITH(
+      swim::core::validate_runtime_compatibility(
+          config, compatible_runtime_asset(), graph.encode),
+      "HEVC encode path extension must be .h265 or .hevc");
+  CHECK(!config.encode);
+}
+
+TEST_CASE(runtime_validation_ignores_raw_encode_when_graph_forces_it_off) {
+  auto config = AppConfig{};
+  config.stage = BenchmarkStage::render_only;
+  config.encode = true;
+  config.encode_sink = EncodeSink::file;
+  config.encode_path = "outputs/video.h264";
+  config.fps_num = 25;
+  config.fps_den = 1;
+  const auto graph = swim::core::resolve_benchmark_graph(config);
+
+  CHECK(!graph.encode);
+  swim::core::validate_runtime_compatibility(
+      config, compatible_runtime_asset(), graph.encode);
+  CHECK(config.encode);
+  CHECK_EQ(config.fps_num, 25u);
+  CHECK_EQ(config.encode_path, std::filesystem::path{"outputs/video.h264"});
 }
 
 TEST_CASE(accepts_every_exact_stage_and_stream_count_value) {

@@ -18,7 +18,8 @@ constexpr std::array<std::string_view, 6> kCameraIds{
 }  // namespace
 
 void validate_runtime_compatibility(const AppConfig& config,
-                                    const RuntimeAsset& asset) {
+                                    const RuntimeAsset& asset,
+                                    bool resolved_encode) {
   if (asset.logical_width != kLogicalWidth ||
       asset.logical_height != kLogicalHeight ||
       asset.encoded_width != kEncodedWidth ||
@@ -36,7 +37,7 @@ void validate_runtime_compatibility(const AppConfig& config,
           "camera order must be cam3,cam2,cam1,cam4,cam5,cam6");
     }
   }
-  if (!config.encode) {
+  if (!resolved_encode) {
     return;
   }
   if (config.fps_num != 30000 || config.fps_den != 1001) {
