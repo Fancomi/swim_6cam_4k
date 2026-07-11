@@ -1,0 +1,12 @@
+#pragma once
+
+#include <string_view>
+
+namespace swim::core::build_info {
+
+inline constexpr std::string_view git_sha{"@SWIM_GIT_SHA@"};
+inline constexpr std::string_view build_type{"@CMAKE_BUILD_TYPE@"};
+inline constexpr std::string_view compiler{
+    "@CMAKE_CXX_COMPILER_ID@ @CMAKE_CXX_COMPILER_VERSION@"};
+
+}  // namespace swim::core::build_info

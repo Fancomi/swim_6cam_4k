@@ -8,6 +8,17 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
 
+execute_process(
+  COMMAND git rev-parse HEAD
+  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  OUTPUT_VARIABLE SWIM_GIT_SHA
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  COMMAND_ERROR_IS_FATAL ANY)
+configure_file(
+  cpp/core/include/swim/core/build_info.hpp.in
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/swim/core/build_info.hpp"
+  @ONLY)
+
 include(cmake/CompilerWarnings.cmake)
 include(cmake/Sanitizers.cmake)
 
@@ -35,7 +46,9 @@ add_library(swim_core
   cpp/core/src/metrics.cpp
   cpp/core/src/render_coordinator.cpp
   cpp/core/src/runtime_validation.cpp)
-target_include_directories(swim_core PUBLIC cpp/core/include)
+target_include_directories(swim_core PUBLIC
+  cpp/core/include
+  "${CMAKE_CURRENT_BINARY_DIR}/generated")
 swim_enable_warnings(swim_core)
 swim_enable_sanitizers(swim_core)
 

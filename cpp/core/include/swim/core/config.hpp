@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <span>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -34,6 +35,12 @@ struct SourceConfig {
   std::filesystem::path path;
 };
 
+struct BenchmarkManifest final {
+  std::string run_id;
+  std::string asset_sha256;
+  std::array<std::string, 6> source_sha256;
+};
+
 struct AppConfig {
   std::string backend{"metal"};
   RunMode mode{RunMode::realtime};
@@ -61,6 +68,7 @@ struct AppConfig {
   std::uint32_t output_pool{4};
   std::chrono::seconds duration{10};
   std::filesystem::path metrics_path;
+  std::filesystem::path benchmark_manifest_path;
   bool validate_only{false};
   std::uint32_t stream_count{6};
   EncodeSink encode_sink{EncodeSink::file};
@@ -69,5 +77,8 @@ struct AppConfig {
 AppConfig load_config(const std::filesystem::path& path);
 AppConfig apply_cli_overrides(AppConfig config,
                               std::span<const std::string_view> arguments);
+BenchmarkManifest load_benchmark_manifest(const std::filesystem::path& path);
+std::optional<BenchmarkManifest> resolve_benchmark_manifest(
+    const AppConfig& config);
 
 }  // namespace swim::core

@@ -1,6 +1,7 @@
 #include "test_support.hpp"
 
 #include <swim/core/config.hpp>
+#include <swim/core/build_info.hpp>
 #include <swim/core/benchmark_stage.hpp>
 #include <swim/core/runtime_validation.hpp>
 
@@ -47,6 +48,12 @@ std::string fixture_error(std::string_view name, std::size_t line,
 }
 
 }  // namespace
+
+TEST_CASE(generated_build_identity_is_complete) {
+  CHECK(!swim::core::build_info::git_sha.empty());
+  CHECK(!swim::core::build_info::build_type.empty());
+  CHECK(!swim::core::build_info::compiler.empty());
+}
 
 TEST_CASE(accepts_exact_runtime_asset_compatibility) {
   swim::core::validate_runtime_compatibility(AppConfig{},
@@ -170,6 +177,47 @@ TEST_CASE(applies_every_supported_cli_override) {
   CHECK_EQ(config.stage, BenchmarkStage::decode_render_encode);
   CHECK_EQ(config.stream_count, 4u);
   CHECK_EQ(config.metrics_path, std::filesystem::path{"bench/run.jsonl"});
+}
+
+TEST_CASE(loads_strict_benchmark_fingerprint_manifest) {
+  auto config = AppConfig{};
+  const std::array arguments{
+      "--benchmark-manifest=cpp/tests/fixtures/benchmark.manifest"sv};
+  config = swim::core::apply_cli_overrides(std::move(config), arguments);
+  CHECK_EQ(config.benchmark_manifest_path,
+           std::filesystem::path{"cpp/tests/fixtures/benchmark.manifest"});
+
+  const auto manifest = swim::core::load_benchmark_manifest(
+      fixture("benchmark.manifest"));
+  CHECK_EQ(manifest.run_id, "run-20260711");
+  CHECK_EQ(manifest.asset_sha256,
+           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+  CHECK_EQ(manifest.source_sha256[0],
+           "0000000000000000000000000000000000000000000000000000000000000000");
+  CHECK_EQ(manifest.source_sha256[5],
+           "5555555555555555555555555555555555555555555555555555555555555555");
+}
+
+TEST_CASE(strict_benchmark_manifest_rejects_missing_duplicate_and_bad_hashes) {
+  auto benchmark = AppConfig{};
+  benchmark.mode = RunMode::benchmark;
+  CHECK_THROWS_WITH(swim::core::resolve_benchmark_manifest(benchmark),
+                    "benchmark mode requires --benchmark-manifest=PATH");
+
+  benchmark.benchmark_manifest_path = fixture("benchmark-duplicate.manifest");
+  CHECK_THROWS_WITH(
+      swim::core::resolve_benchmark_manifest(benchmark),
+      fixture_error("benchmark-duplicate.manifest", 3,
+                    "duplicate key 'asset_sha256'"));
+
+  benchmark.benchmark_manifest_path = fixture("benchmark-invalid.manifest");
+  CHECK_THROWS_WITH(
+      swim::core::resolve_benchmark_manifest(benchmark),
+      fixture_error("benchmark-invalid.manifest", 2,
+                    "asset_sha256 must be exactly 64 hexadecimal digits"));
+
+  auto realtime = AppConfig{};
+  CHECK(!swim::core::resolve_benchmark_manifest(realtime).has_value());
 }
 
 TEST_CASE(validates_hevc_encode_sink_path_and_fixed_frame_rate) {

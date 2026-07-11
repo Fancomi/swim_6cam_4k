@@ -476,6 +476,7 @@ int run(int argc, char* argv[]) {
   auto config = swim::core::load_config(command_line.config_path);
   config = swim::core::apply_cli_overrides(std::move(config),
                                            command_line.overrides);
+  static_cast<void>(swim::core::resolve_benchmark_manifest(config));
   const auto graph = swim::core::resolve_benchmark_graph(config);
   auto asset = validate_inputs(config, graph);
 

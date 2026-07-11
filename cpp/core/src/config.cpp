@@ -130,6 +130,30 @@ std::size_t source_index(std::string_view key) {
   return kCameraIds.size();
 }
 
+std::size_t manifest_source_index(std::string_view key) {
+  for (std::size_t index = 0; index < kCameraIds.size(); ++index) {
+    if (key == "source." + std::string(kCameraIds[index]) + "_sha256") {
+      return index;
+    }
+  }
+  return kCameraIds.size();
+}
+
+bool valid_sha256(std::string_view value) noexcept {
+  if (value.size() != 64) {
+    return false;
+  }
+  for (const auto character : value) {
+    const bool decimal = character >= '0' && character <= '9';
+    const bool lower = character >= 'a' && character <= 'f';
+    const bool upper = character >= 'A' && character <= 'F';
+    if (!decimal && !lower && !upper) {
+      return false;
+    }
+  }
+  return true;
+}
+
 std::string_view option_name(std::string_view argument) {
   const auto equals = argument.find('=');
   return argument.substr(0, equals);
@@ -296,12 +320,101 @@ AppConfig apply_cli_overrides(
       config.stream_count = count;
     } else if (name == "--metrics") {
       config.metrics_path = parse_cli_path(value, name);
+    } else if (name == "--benchmark-manifest") {
+      config.benchmark_manifest_path = parse_cli_path(value, name);
     } else {
       throw std::runtime_error("unknown command-line option '" +
                                std::string(argument) + "'");
     }
   }
   return config;
+}
+
+BenchmarkManifest load_benchmark_manifest(const std::filesystem::path& path) {
+  std::ifstream input(path);
+  if (!input) {
+    config_error(path, 0, "cannot open benchmark manifest");
+  }
+
+  BenchmarkManifest manifest;
+  std::unordered_set<std::string> seen_keys;
+  std::array<bool, kCameraIds.size()> seen_sources{};
+  bool seen_run_id = false;
+  bool seen_asset = false;
+  std::string storage;
+  std::size_t line_number = 0;
+  while (std::getline(input, storage)) {
+    ++line_number;
+    const auto line = trim_ascii(storage);
+    if (line.empty() || line.front() == '#') {
+      continue;
+    }
+    const auto equals = line.find('=');
+    if (equals == std::string_view::npos) {
+      config_error(path, line_number, "expected key=value");
+    }
+    const auto key = trim_ascii(line.substr(0, equals));
+    const auto value = trim_ascii(line.substr(equals + 1));
+    if (!seen_keys.emplace(key).second) {
+      config_error(path, line_number,
+                   "duplicate key '" + std::string(key) + "'");
+    }
+    if (key == "run_id") {
+      if (value.empty()) {
+        config_error(path, line_number, "run_id must not be empty");
+      }
+      manifest.run_id = value;
+      seen_run_id = true;
+      continue;
+    }
+    if (key == "asset_sha256") {
+      if (!valid_sha256(value)) {
+        config_error(path, line_number,
+                     "asset_sha256 must be exactly 64 hexadecimal digits");
+      }
+      manifest.asset_sha256 = value;
+      seen_asset = true;
+      continue;
+    }
+    const auto camera = manifest_source_index(key);
+    if (camera == kCameraIds.size()) {
+      config_error(path, line_number,
+                   "unknown key '" + std::string(key) + "'");
+    }
+    if (!valid_sha256(value)) {
+      config_error(path, line_number, std::string(key) +
+                                          " must be exactly 64 hexadecimal digits");
+    }
+    manifest.source_sha256[camera] = value;
+    seen_sources[camera] = true;
+  }
+
+  if (!seen_run_id) {
+    config_error(path, line_number + 1, "missing key 'run_id'");
+  }
+  if (!seen_asset) {
+    config_error(path, line_number + 1, "missing key 'asset_sha256'");
+  }
+  for (std::size_t camera = 0; camera < seen_sources.size(); ++camera) {
+    if (!seen_sources[camera]) {
+      config_error(path, line_number + 1,
+                   "missing key 'source." + std::string(kCameraIds[camera]) +
+                       "_sha256'");
+    }
+  }
+  return manifest;
+}
+
+std::optional<BenchmarkManifest> resolve_benchmark_manifest(
+    const AppConfig& config) {
+  if (config.benchmark_manifest_path.empty()) {
+    if (config.mode == RunMode::benchmark) {
+      throw std::runtime_error(
+          "benchmark mode requires --benchmark-manifest=PATH");
+    }
+    return std::nullopt;
+  }
+  return load_benchmark_manifest(config.benchmark_manifest_path);
 }
 
 }  // namespace swim::core
