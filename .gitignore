@@ -14,3 +14,4 @@ outputs/videos/*
 outputs/logs/*
 !outputs/logs/.gitkeep
 outputs/data/*.fbx
+outputs/keypoint_preview/

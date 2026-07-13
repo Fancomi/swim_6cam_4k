@@ -214,6 +214,33 @@ SWIMMING_DATASET_DIR="/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K" \
 - `outputs/videos/pool_4k_full.mp4`：历史全长拼接视频。
 - `outputs/logs/pool_4k_full.log`：历史全长渲染日志；脚本本身不会自动把标准输出重定向到该文件。
 
+## 检查 2D 关键点裁剪标注
+
+`src/keypoint_preview.py` 从外部标注数据集解析 COCO-17 关键点，按人物裁剪出正方形预览图并叠加骨架、关键点和精准关键点框；`src/build_keypoint_preview.py` 是它的命令行入口。默认命令：
+
+```bash
+.venv/bin/python src/build_keypoint_preview.py
+```
+
+生成结果写入 `outputs/keypoint_preview/`，直接在浏览器打开 `outputs/keypoint_preview/index.html` 即可查看，无需额外的静态服务器。页面在桌面宽度下用四列网格展示裁剪卡片，每张卡片下方显示 `图 x/54 · 人 y/554` 形式的图片与人物计数元数据；卡片图片使用 `loading="lazy"` 和 `IntersectionObserver` 懒加载,只在滚动到附近时才请求对应裁剪图。图上红框（红框：精准关键点框）标出该人物可见关键点的精确外接框，黄色骨架线和关键点是叠加的 COCO-17 标注,红框之外的留白来自按 `--padding-ratio` 和 `--minimum-side` 计算的正方形裁剪范围。
+
+可覆盖的参数：
+
+- `--dataset-root PATH`：外部标注数据集根目录，默认是本机路径 `/Users/penghaotian/Downloads/DATAS/SWIMMING/游泳6拼接1080P-2D关键点标注`；
+- `--output-dir PATH`：预览页与裁剪图的输出目录，默认 `outputs/keypoint_preview/`；
+- `--padding-ratio FLOAT`：在精准关键点框基础上按比例扩展正方形裁剪边长，默认 `0.60`；
+- `--minimum-side INT`：正方形裁剪边长的最小像素值，默认 `160`。
+
+例如指向另一台机器上的数据集并放宽裁剪边距：
+
+```bash
+.venv/bin/python src/build_keypoint_preview.py \
+  --dataset-root "/path/to/游泳6拼接1080P-2D关键点标注" \
+  --output-dir outputs/keypoint_preview \
+  --padding-ratio 0.8 \
+  --minimum-side 200
+```
+
 ## 已知限制
 
 - 视频渲染会读取各路源 FPS，以最低源 FPS 作为输出帧率，并对较高帧率输入按最近目标帧位置抽帧。这只对齐帧率，不会同步各路视频的采集起始时间。
