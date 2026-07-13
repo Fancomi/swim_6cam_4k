@@ -13,9 +13,9 @@ import sys
 from pathlib import Path
 
 import fbx
-import fbx_common
+from . import fbx_common
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 INPUTS_DIR = PROJECT_ROOT / "inputs"
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 

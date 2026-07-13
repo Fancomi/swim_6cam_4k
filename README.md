@@ -6,11 +6,71 @@
 
 本文所有命令都假定当前目录是项目根目录 `swim_fbx_demo/`。
 
+## 实时 Metal 路径
+
+仓库同时包含独立的 macOS 实时实现：六路 H.264 由 VideoToolbox 解码为 GPU 可见表面，Metal 以固定六网格合成 `5002x2102` 输出，并可分流到 preview 与硬件 HEVC。该运行路径不依赖 OpenCV 或 FFmpeg，不把解码像素读回 CPU；各路输入采用容量有界的 latest-frame 交换，接收端只消费当下最新完整帧。
+
+代码按语言隔离：实时核心位于 `cpp/core/`，Apple 原生后端位于 `cpp/backends/metal/`，离线资产与验证工具位于 `python/`，运行入口位于 `scripts/`。默认现场数据集仍是：
+
+```text
+/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K
+```
+
+构建并运行一个六路、30 秒、无窗口 preview、硬件 HEVC 空 sink 的实时 cell：
+
+```bash
+BUILD_TYPE=Release ./scripts/build_macos.sh
+build/macos/swim_realtime --config configs/macos_20260629.conf \
+  --stage=full --stream-count=6 --mode=realtime \
+  --duration-seconds=30 --preview=true --preview-visible=false \
+  --encode=true --encode-sink=null --metrics=benchmarks/manual.jsonl
+```
+
+`--preview-visible=false` 不是跳过 preview：它会创建私有 Metal render target，对每个被接受的最新输出执行真实 shader copy/render command，并等待 GPU completion；`--preview-visible=true` 才创建 AppKit/CAMetalLayer 窗口。
+
+## Release 性能矩阵
+
+完整矩阵覆盖六个真实 stage、`1/2/4/6` 路输入以及 paced/unpaced 两种节奏，共 48 个 cell。脚本只构建一次 Release、只计算一次 asset/六源 SHA-256，每个 cell 写独立 JSONL 并立即校验；任一进程或校验失败都会停止，不会静默重试或拼入最终结果。
+
+一秒功能矩阵由主测试流程执行：
+
+```bash
+./scripts/run_metal_benchmarks.sh --quick
+```
+
+可发布矩阵每个 cell 至少 15 秒：
+
+```bash
+./scripts/run_metal_benchmarks.sh --duration 15
+```
+
+结果位于 `benchmarks/runs/<run_id>/`，成功后 `benchmarks/latest` 指向该目录：
+
+- `cells/*.jsonl`：带唯一 `(stage, stream_count, pacing)` 身份的原始 cell；
+- `results.jsonl`：48 个 cell 全部通过后才生成的合并记录；
+- `summary.csv`、`summary.md`：最终吞吐、区间 p50/p95、瓶颈排名及 preview/encode 增量成本；
+- `manifest.json`：run/build/hash 身份与 `publishable` 标志；不足 15 秒始终为 `false`。
+
+可单独复验已生成的矩阵：
+
+```bash
+.venv/bin/python -m python.validation.summarize_benchmarks \
+  benchmarks/latest/results.jsonl
+```
+
+默认十分钟的六路 paced full soak：
+
+```bash
+./scripts/run_metal_soak.sh
+```
+
+soak 按每条 interval 的真实 `elapsed_s` 累加时间轴，报告 RSS 与 Metal allocation 的每分钟线性斜率，并拒绝 host copy、容量 high-water 越界、编码 callback/drain 错误，以及 warm-up 后连续五个区间低于 29 FPS。默认 RSS 增长上限为 64 MiB/min，Metal allocation 上限为 32 MiB/min；可用 `--max-rss-slope` 和 `--max-gpu-slope` 显式覆盖。
+
 ## 处理流程
 
-1. `src/bake_uv.py` 可选地把中线 UV 延伸写入一个新的 FBX，原始模型不需要被覆盖。
-2. `src/extract_fbx.py` 读取 `inputs/models/pool.fbx`，提取三角形、二维位置和 UV，默认写入 `outputs/data/pool_mesh.json`。
-3. `src/render_pool.py` 使用网格 JSON 和 `inputs/textures/` 生成静态拼接图、网格叠加图，或使用六路视频生成拼接视频。
+1. `python.assets.bake_uv` 可选地把中线 UV 延伸写入一个新的 FBX，原始模型不需要被覆盖。
+2. `python.assets.extract_fbx` 读取 `inputs/models/pool.fbx`，提取三角形、二维位置和 UV，默认写入 `outputs/data/pool_mesh.json`。
+3. `python.validation.reference_renderer` 使用网格 JSON 和 `inputs/textures/` 生成静态拼接图、网格叠加图，或使用六路视频生成拼接视频。
 4. `scripts/run_4k.sh` 固定外部 4K 数据集的会话名、六路相机顺序和常用输出参数，作为短片及全长渲染入口。
 
 ## 目录结构
@@ -43,11 +103,22 @@ swim_fbx_demo/
 │   │   └── pool_4k_full.mp4
 │   └── logs/
 │       └── pool_4k_full.log
-├── src/
-│   ├── bake_uv.py
-│   ├── extract_fbx.py
-│   ├── fbx_common.py
-│   └── render_pool.py
+├── python/
+│   ├── __init__.py
+│   ├── assets/
+│   │   ├── __init__.py
+│   │   ├── bake_uv.py
+│   │   ├── build_keypoint_preview.py
+│   │   ├── extract_fbx.py
+│   │   ├── fbx_common.py
+│   │   └── keypoint_preview.py
+│   ├── validation/
+│   │   ├── __init__.py
+│   │   └── reference_renderer.py
+│   └── tests/
+│       ├── __init__.py
+│       ├── test_keypoint_preview.py
+│       └── test_layout.py
 ├── scripts/
 │   └── run_4k.sh
 └── docs/
@@ -81,9 +152,9 @@ Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统�
 三个 Python 入口的实际参数可用以下命令查看：
 
 ```bash
-.venv/bin/python src/bake_uv.py --help
-.venv/bin/python src/extract_fbx.py --help
-.venv/bin/python src/render_pool.py --help
+.venv/bin/python -m python.assets.bake_uv --help
+.venv/bin/python -m python.assets.extract_fbx --help
+.venv/bin/python -m python.validation.reference_renderer --help
 ```
 
 ## 快速开始
@@ -91,7 +162,7 @@ Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统�
 项目已经包含网格 JSON 和合成纹理。无需重新读取 FBX 即可生成静态拼接图：
 
 ```bash
-.venv/bin/python src/render_pool.py \
+.venv/bin/python -m python.validation.reference_renderer \
   --data outputs/data/pool_mesh.json \
   --tex-dir inputs/textures \
   --still outputs/images/pool.png
@@ -114,13 +185,13 @@ Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统�
 从默认模型重新生成默认网格 JSON：
 
 ```bash
-.venv/bin/python src/extract_fbx.py
+.venv/bin/python -m python.assets.extract_fbx
 ```
 
 等价的显式调用如下；它会重写 `outputs/data/pool_mesh.json`：
 
 ```bash
-.venv/bin/python src/extract_fbx.py \
+.venv/bin/python -m python.assets.extract_fbx \
   inputs/models/pool.fbx \
   outputs/data/pool_mesh.json \
   --tex-dir inputs/textures
@@ -129,13 +200,13 @@ Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统�
 如需把中线 UV 延伸先烘焙到一个新模型，再提取该模型，可运行：
 
 ```bash
-.venv/bin/python src/bake_uv.py \
+.venv/bin/python -m python.assets.bake_uv \
   inputs/models/pool.fbx \
   outputs/data/pool_uv_baked.fbx \
   --ext-px 5 \
   --tex-dir inputs/textures
 
-.venv/bin/python src/extract_fbx.py \
+.venv/bin/python -m python.assets.extract_fbx \
   outputs/data/pool_uv_baked.fbx \
   outputs/data/pool_mesh.json \
   --tex-dir inputs/textures
@@ -148,7 +219,7 @@ Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统�
 生成完整分辨率的静态拼接图和网格叠加图：
 
 ```bash
-.venv/bin/python src/render_pool.py \
+.venv/bin/python -m python.validation.reference_renderer \
   --data outputs/data/pool_mesh.json \
   --tex-dir inputs/textures \
   --still outputs/images/pool.png \
@@ -158,7 +229,7 @@ Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统�
 降低每米像素数可更快生成网格预览：
 
 ```bash
-.venv/bin/python src/render_pool.py \
+.venv/bin/python -m python.validation.reference_renderer \
   --data outputs/data/pool_mesh.json \
   --tex-dir inputs/textures \
   --ppm 28 \
@@ -203,7 +274,7 @@ SWIMMING_DATASET_DIR="/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K" \
 | 5 | `Plane004` | `inputs/textures/camera_5_composite.png` | `20260629_172532_cam5.mp4` |
 | 6 | `Plane007` | `inputs/textures/camera_6_composite.png` | `20260629_172532_cam6.mp4` |
 
-也就是固定相机顺序：`cam3 cam2 cam1 cam4 cam5 cam6`。`scripts/run_4k.sh` 已按此顺序组装参数；直接调用 `src/render_pool.py --videos` 时也必须保持相同顺序。
+也就是固定相机顺序：`cam3 cam2 cam1 cam4 cam5 cam6`。`scripts/run_4k.sh` 已按此顺序组装参数；直接调用 `python -m python.validation.reference_renderer --videos` 时也必须保持相同顺序。
 
 主要输出如下：
 
@@ -216,10 +287,10 @@ SWIMMING_DATASET_DIR="/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K" \
 
 ## 检查 2D 关键点裁剪标注
 
-`src/keypoint_preview.py` 从外部标注数据集解析 COCO-17 关键点，按人物裁剪出正方形预览图并叠加骨架、关键点和精准关键点框；`src/build_keypoint_preview.py` 是它的命令行入口。默认命令：
+`python.assets.keypoint_preview` 从外部标注数据集解析 COCO-17 关键点，按人物裁剪出正方形预览图并叠加骨架、关键点和精准关键点框；`python.assets.build_keypoint_preview` 是它的命令行入口。默认命令：
 
 ```bash
-.venv/bin/python src/build_keypoint_preview.py
+.venv/bin/python -m python.assets.build_keypoint_preview
 ```
 
 生成结果写入 `outputs/keypoint_preview/`，直接在浏览器打开 `outputs/keypoint_preview/index.html` 即可查看，无需额外的静态服务器。页面在桌面宽度下用四列网格展示裁剪卡片，每张卡片下方显示 `图 x/54 · 人 y/554` 形式的图片与人物计数元数据；卡片图片使用 `loading="lazy"` 和 `IntersectionObserver` 懒加载,只在滚动到附近时才请求对应裁剪图。图上红框（红框：精准关键点框）标出该人物可见关键点的精确外接框，黄色骨架线和关键点是叠加的 COCO-17 标注,红框之外的留白来自按 `--padding-ratio` 和 `--minimum-side` 计算的正方形裁剪范围。
@@ -234,7 +305,7 @@ SWIMMING_DATASET_DIR="/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K" \
 例如指向另一台机器上的数据集并放宽裁剪边距：
 
 ```bash
-.venv/bin/python src/build_keypoint_preview.py \
+.venv/bin/python -m python.assets.build_keypoint_preview \
   --dataset-root "/path/to/游泳6拼接1080P-2D关键点标注" \
   --output-dir outputs/keypoint_preview \
   --padding-ratio 0.8 \

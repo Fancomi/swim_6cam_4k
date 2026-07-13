@@ -3,9 +3,9 @@
 import argparse
 from pathlib import Path
 
-from keypoint_preview import DatasetFormatError, generate_preview
+from python.assets.keypoint_preview import DatasetFormatError, generate_preview
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATASET_ROOT = Path("/Users/penghaotian/Downloads/DATAS/SWIMMING/游泳6拼接1080P-2D关键点标注")
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "keypoint_preview"
 

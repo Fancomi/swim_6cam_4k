@@ -2,7 +2,7 @@
 # 复现 4K 泳池拼接合成。
 #
 # 沿用 swim_fbx_demo 的对齐（pool_mesh.json，烘焙 UV），对新一批 4K 同步视频做拼接。
-# 本脚本调用 src/render_pool.py，并固化可复现的参数。
+# 本脚本调用 python.validation.reference_renderer，并固化可复现的参数。
 #
 # 素材： ${SWIMMING_DATASET_DIR:-/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K}
 #   6 路 20260629_172532_camN.mp4，3840x2160 @ 29.97fps，约 602s。
@@ -47,7 +47,7 @@ done
 
 mkdir -p "$(dirname "$OUT")"
 
-"$PY" "$PROJECT_ROOT/src/render_pool.py" \
+"$PY" -m python.validation.reference_renderer \
   --data "$PROJECT_ROOT/outputs/data/pool_mesh.json" \
   --videos "${VIDEOS[@]}" \
   --video "$OUT" \

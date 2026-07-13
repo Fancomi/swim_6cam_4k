@@ -1,8 +1,9 @@
 # Local environment and OS metadata
 .DS_Store
-.venv/
+.venv
 .worktrees/
 .superpowers/
+/build/
 
 # Python caches
 __pycache__/
@@ -15,3 +16,10 @@ outputs/logs/*
 !outputs/logs/.gitkeep
 outputs/data/*.fbx
 outputs/keypoint_preview/
+
+# Compiled runtime assets are reproducible build outputs
+assets/generated/*.swasset
+
+# Benchmark runs are local machine evidence; keep only the directory anchor.
+benchmarks/*
+!benchmarks/.gitkeep

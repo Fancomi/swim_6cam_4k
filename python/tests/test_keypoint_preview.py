@@ -9,12 +9,18 @@ from unittest.mock import patch
 import cv2
 import numpy as np
 
-SRC_DIR = Path(__file__).resolve().parents[1] / "src"
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
-
-from keypoint_preview import DatasetFormatError, Rect, discover_dataset, exact_box, generate_preview, natural_sort_key, render_person_crop, square_crop_box, visible_keypoints
-from build_keypoint_preview import main
+from python.assets.build_keypoint_preview import main
+from python.assets.keypoint_preview import (
+    DatasetFormatError,
+    Rect,
+    discover_dataset,
+    exact_box,
+    generate_preview,
+    natural_sort_key,
+    render_person_crop,
+    square_crop_box,
+    visible_keypoints,
+)
 
 
 def write_single_frame_dataset(root: Path, persons: list[dict[str, object]]) -> Path:
@@ -218,7 +224,7 @@ class GeneratorTests(unittest.TestCase):
             payload = {"images": [{"file_name": "frame.png", "width": 200, "height": 200}], "annotations": [{"image_idx": 0, "persons": [{"id": 1, "keypoints": [[80, 80, 2]]}, {"id": 2, "keypoints": [[120, 120, 2]]}]}]}
             (session / "session.json").write_text(json.dumps(payload), encoding="utf-8")
 
-            with patch("keypoint_preview.cv2.imread", wraps=cv2.imread) as imread:
+            with patch("python.assets.keypoint_preview.cv2.imread", wraps=cv2.imread) as imread:
                 summary = generate_preview(root, output)
 
             self.assertEqual(summary.generated_count, 2)
@@ -254,7 +260,7 @@ class GeneratorTests(unittest.TestCase):
             write_single_frame_dataset(root, [{"id": 1, "keypoints": [[100, 100, 2]]}])
             output = Path(temporary_directory) / "preview"
 
-            with patch("keypoint_preview.cv2.imread", side_effect=cv2.error("decode failed")):
+            with patch("python.assets.keypoint_preview.cv2.imread", side_effect=cv2.error("decode failed")):
                 summary = generate_preview(root, output)
 
             report = json.loads((output / "report.json").read_text(encoding="utf-8"))
@@ -279,7 +285,7 @@ class GeneratorTests(unittest.TestCase):
                 Path(destination).write_bytes(b"new partial crop")
                 return False
 
-            with patch("keypoint_preview.cv2.imwrite", side_effect=partially_write_then_fail):
+            with patch("python.assets.keypoint_preview.cv2.imwrite", side_effect=partially_write_then_fail):
                 with self.assertRaisesRegex(OSError, "cannot write preview crop"):
                     generate_preview(root, output)
 
