@@ -54,6 +54,10 @@ target_include_directories(swim_core PUBLIC
 # in through a generator expression so build evidence carries the real type.
 target_compile_definitions(swim_core PUBLIC
   SWIM_BUILD_TYPE="$<CONFIG>")
+if(WIN32)
+  # GetProcessMemoryInfo for RSS reporting on Windows.
+  target_link_libraries(swim_core PUBLIC psapi)
+endif()
 swim_enable_warnings(swim_core)
 swim_enable_sanitizers(swim_core)
 
@@ -241,4 +245,37 @@ endif()
 
 if(NOT APPLE)
   target_link_libraries(swim_realtime PRIVATE swim_core)
+endif()
+
+if(WIN32)
+  # Native Windows backend: Media Foundation hardware H.264 decode + Direct3D 11
+  # stitch + DXGI swap-chain preview. Mirrors the Metal backend's structure.
+  add_library(swim_d3d11_backend
+    cpp/backends/d3d11/src/d3d11_frame.cpp
+    cpp/backends/d3d11/src/d3d11_renderer.cpp
+    cpp/backends/d3d11/src/d3d11_preview.cpp
+    cpp/backends/d3d11/src/mf_source.cpp
+    cpp/backends/d3d11/src/d3d11_backend.cpp)
+  target_include_directories(swim_d3d11_backend PUBLIC
+    cpp/backends/d3d11/include)
+  target_compile_definitions(swim_d3d11_backend PRIVATE
+    SWIM_D3D11_SHADER_SOURCE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/cpp/backends/d3d11/shaders/stitch.hlsl"
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+    UNICODE
+    _UNICODE)
+  target_link_libraries(swim_d3d11_backend PUBLIC
+    swim_core
+    d3d11
+    dxgi
+    d3dcompiler
+    mf
+    mfplat
+    mfreadwrite
+    mfuuid
+    dxva2)
+  swim_enable_warnings(swim_d3d11_backend)
+
+  target_compile_definitions(swim_realtime PRIVATE SWIM_HAS_D3D11_BACKEND=1)
+  target_link_libraries(swim_realtime PRIVATE swim_d3d11_backend winmm)
 endif()
