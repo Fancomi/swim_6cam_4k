@@ -13,6 +13,21 @@
 #include <swim/metal/metal_backend.hpp>
 #endif
 
+#if defined(SWIM_HAS_D3D11_BACKEND)
+#include <swim/d3d11/d3d11_backend.hpp>
+#endif
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <timeapi.h>
+#endif
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -256,6 +271,9 @@ int run_runtime(const swim::core::AppConfig& config,
 #if defined(SWIM_HAS_METAL_BACKEND)
     swim::metal::register_metal_backend();
 #endif
+#if defined(SWIM_HAS_D3D11_BACKEND)
+    swim::d3d11::register_d3d11_backend();
+#endif
     backend = swim::core::BackendRegistry::instance().create(config.backend);
     reporter.bind_backend(*backend);
     reporter.start();
@@ -349,6 +367,15 @@ int run(int argc, char* argv[]) {
 int main(int argc, char* argv[]) {
   std::signal(SIGINT, request_shutdown_from_signal);
   std::signal(SIGTERM, request_shutdown_from_signal);
+#if defined(_WIN32)
+  // The render coordinator paces on condition-variable timed waits. The default
+  // Windows timer granularity (~15.6 ms) would quantize a 33 ms cadence badly;
+  // request 1 ms resolution for the run and restore it on exit.
+  timeBeginPeriod(1);
+  struct TimePeriodGuard {
+    ~TimePeriodGuard() { timeEndPeriod(1); }
+  } time_period_guard;
+#endif
   try {
     return run(argc, argv);
   } catch (const std::exception& error) {

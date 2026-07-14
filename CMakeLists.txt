@@ -50,6 +50,10 @@ add_library(swim_core
 target_include_directories(swim_core PUBLIC
   cpp/core/include
   "${CMAKE_CURRENT_BINARY_DIR}/generated")
+# Multi-config generators leave CMAKE_BUILD_TYPE empty; feed the per-config name
+# in through a generator expression so build evidence carries the real type.
+target_compile_definitions(swim_core PUBLIC
+  SWIM_BUILD_TYPE="$<CONFIG>")
 swim_enable_warnings(swim_core)
 swim_enable_sanitizers(swim_core)
 
