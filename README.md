@@ -16,17 +16,22 @@
 /Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K
 ```
 
-构建并运行一个六路、30 秒、无窗口 preview、硬件 HEVC 空 sink 的实时 cell：
+统一入口是 `scripts/run_metal.sh`：
 
 ```bash
-BUILD_TYPE=Release ./scripts/build_macos.sh
-build/macos/swim_realtime --config configs/macos_20260629.conf \
-  --stage=full --stream-count=6 --mode=realtime \
-  --duration-seconds=30 --preview=true --preview-visible=false \
-  --encode=true --encode-sink=null --metrics=benchmarks/manual.jsonl
+# 可视化 demo：AppKit 窗口 + 写出 HEVC（默认 30 秒）
+./scripts/run_metal.sh demo
+
+# 无窗口、不写文件（只跑 GPU preview/encode 空 sink）
+./scripts/run_metal.sh demo --no-window --no-encode
+
+# 性能矩阵 / soak
+./scripts/run_metal.sh benchmarks --quick
+./scripts/run_metal.sh benchmarks --duration 15
+./scripts/run_metal.sh soak
 ```
 
-`--preview-visible=false` 不是跳过 preview：它会创建私有 Metal render target，对每个被接受的最新输出执行真实 shader copy/render command，并等待 GPU completion；`--preview-visible=true` 才创建 AppKit/CAMetalLayer 窗口。
+`demo` 默认 `--preview-visible=true`，会创建 AppKit/CAMetalLayer 窗口显示实时拼接画面，并把硬件 HEVC 写到 `outputs/videos/pool_metal.h265`，指标写到 `benchmarks/manual.jsonl`。`--no-window` 不是跳过 preview：它仍创建私有 Metal render target，对每个被接受的最新输出执行真实 shader copy/render command，并等待 GPU completion。benchmarks/soak 默认无窗口；需要窗口时加 `--visible`。
 
 ## Release 性能矩阵
 
@@ -35,13 +40,13 @@ build/macos/swim_realtime --config configs/macos_20260629.conf \
 一秒功能矩阵由主测试流程执行：
 
 ```bash
-./scripts/run_metal_benchmarks.sh --quick
+./scripts/run_metal.sh benchmarks --quick
 ```
 
 可发布矩阵每个 cell 至少 15 秒：
 
 ```bash
-./scripts/run_metal_benchmarks.sh --duration 15
+./scripts/run_metal.sh benchmarks --duration 15
 ```
 
 结果位于 `benchmarks/runs/<run_id>/`，成功后 `benchmarks/latest` 指向该目录：
@@ -61,17 +66,18 @@ build/macos/swim_realtime --config configs/macos_20260629.conf \
 默认十分钟的六路 paced full soak：
 
 ```bash
-./scripts/run_metal_soak.sh
+./scripts/run_metal.sh soak
 ```
 
 soak 按每条 interval 的真实 `elapsed_s` 累加时间轴，报告 RSS 与 Metal allocation 的每分钟线性斜率，并拒绝 host copy、容量 high-water 越界、编码 callback/drain 错误，以及 warm-up 后连续五个区间低于 29 FPS。默认 RSS 增长上限为 64 MiB/min，Metal allocation 上限为 32 MiB/min；可用 `--max-rss-slope` 和 `--max-gpu-slope` 显式覆盖。
 
 ## 处理流程
 
-1. `python.assets.bake_uv` 可选地把中线 UV 延伸写入一个新的 FBX，原始模型不需要被覆盖。
-2. `python.assets.extract_fbx` 读取 `inputs/models/pool.fbx`，提取三角形、二维位置和 UV，默认写入 `outputs/data/pool_mesh.json`。
-3. `python.validation.reference_renderer` 使用网格 JSON 和 `inputs/textures/` 生成静态拼接图、网格叠加图，或使用六路视频生成拼接视频。
-4. `scripts/run_4k.sh` 固定外部 4K 数据集的会话名、六路相机顺序和常用输出参数，作为短片及全长渲染入口。
+1. `./scripts/run_python.sh bake ...` 可选地把中线 UV 延伸写入一个新的 FBX，原始模型不需要被覆盖。
+2. `./scripts/run_python.sh extract` 读取 `inputs/models/pool.fbx`，提取三角形、二维位置和 UV，默认写入 `outputs/data/pool_mesh.json`。
+3. `./scripts/run_python.sh still` / `4k` 使用网格 JSON 与纹理或六路视频生成静态拼接图或 H.264 视频。
+4. `./scripts/run_python.sh asset` 把网格 JSON 编译为 Metal 运行时 `.swasset`。
+5. `./scripts/run_python.sh keypoint` 生成 2D 关键点裁剪复核页。
 
 ## 目录结构
 
@@ -120,7 +126,8 @@ swim_fbx_demo/
 │       ├── test_keypoint_preview.py
 │       └── test_layout.py
 ├── scripts/
-│   └── run_4k.sh
+│   ├── run_metal.sh              # demo / benchmarks / soak
+│   └── run_python.sh             # still / 4k / keypoint / extract / bake / asset
 └── docs/
     └── superpowers/
         ├── plans/
@@ -162,10 +169,7 @@ Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统�
 项目已经包含网格 JSON 和合成纹理。无需重新读取 FBX 即可生成静态拼接图：
 
 ```bash
-.venv/bin/python -m python.validation.reference_renderer \
-  --data outputs/data/pool_mesh.json \
-  --tex-dir inputs/textures \
-  --still outputs/images/pool.png
+./scripts/run_python.sh still
 ```
 
 默认外部 4K 数据集目录是：
@@ -177,7 +181,7 @@ Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统�
 该目录应包含会话 `20260629_172532` 的六个 `camN.mp4` 文件。默认生成 10 秒测试片：
 
 ```bash
-./scripts/run_4k.sh
+./scripts/run_python.sh 4k
 ```
 
 ## 重新提取 FBX 网格
@@ -185,7 +189,7 @@ Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统�
 从默认模型重新生成默认网格 JSON：
 
 ```bash
-.venv/bin/python -m python.assets.extract_fbx
+./scripts/run_python.sh extract
 ```
 
 等价的显式调用如下；它会重写 `outputs/data/pool_mesh.json`：
@@ -243,20 +247,20 @@ Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统�
 显式指定 10 秒测试片及输出路径：
 
 ```bash
-./scripts/run_4k.sh 10 outputs/videos/pool_4k_test10s.mp4
+./scripts/run_python.sh 4k 10 outputs/videos/pool_4k_test10s.mp4
 ```
 
 用 `SWIMMING_DATASET_DIR` 覆盖默认数据集目录：
 
 ```bash
 SWIMMING_DATASET_DIR="/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K" \
-  ./scripts/run_4k.sh 10 outputs/videos/pool_4k_test10s.mp4
+  ./scripts/run_python.sh 4k 10 outputs/videos/pool_4k_test10s.mp4
 ```
 
 请求覆盖整段约 602 秒的素材并写入全长输出：
 
 ```bash
-./scripts/run_4k.sh 602 outputs/videos/pool_4k_full.mp4
+./scripts/run_python.sh 4k 602 outputs/videos/pool_4k_full.mp4
 ```
 
 渲染器在任一路输入先结束时停止，因此最终时长由最短输入决定；当前历史全长输出约为 601.87 秒。4K 全长渲染计算量较大，运行前应确认磁盘空间和可接受的耗时。
@@ -274,7 +278,7 @@ SWIMMING_DATASET_DIR="/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K" \
 | 5 | `Plane004` | `inputs/textures/camera_5_composite.png` | `20260629_172532_cam5.mp4` |
 | 6 | `Plane007` | `inputs/textures/camera_6_composite.png` | `20260629_172532_cam6.mp4` |
 
-也就是固定相机顺序：`cam3 cam2 cam1 cam4 cam5 cam6`。`scripts/run_4k.sh` 已按此顺序组装参数；直接调用 `python -m python.validation.reference_renderer --videos` 时也必须保持相同顺序。
+也就是固定相机顺序：`cam3 cam2 cam1 cam4 cam5 cam6`。`scripts/run_python.sh 4k` 已按此顺序组装参数；直接调用 `python -m python.validation.reference_renderer --videos` 时也必须保持相同顺序。
 
 主要输出如下：
 
@@ -283,14 +287,16 @@ SWIMMING_DATASET_DIR="/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K" \
 - `outputs/images/pool_grid.png` 和 `outputs/images/pool_grid_preview.png`：网格及分区边界叠加图。
 - `outputs/videos/pool_4k_test10s.mp4`：默认 4K 测试片。
 - `outputs/videos/pool_4k_full.mp4`：历史全长拼接视频。
+- `outputs/videos/pool_metal.h265`：实时 Metal demo 默认 HEVC 产物。
 - `outputs/logs/pool_4k_full.log`：历史全长渲染日志；脚本本身不会自动把标准输出重定向到该文件。
+- `outputs/keypoint_preview/`：关键点裁剪复核页（`index.html`、`crops/`、`report.json`）。
 
 ## 检查 2D 关键点裁剪标注
 
-`python.assets.keypoint_preview` 从外部标注数据集解析 COCO-17 关键点，按人物裁剪出正方形预览图并叠加骨架、关键点和精准关键点框；`python.assets.build_keypoint_preview` 是它的命令行入口。默认命令：
+`python.assets.keypoint_preview` 从外部标注数据集解析 COCO-17 关键点，按人物裁剪出正方形预览图并叠加骨架、关键点和精准关键点框。脚本入口：
 
 ```bash
-.venv/bin/python -m python.assets.build_keypoint_preview
+./scripts/run_python.sh keypoint
 ```
 
 生成结果写入 `outputs/keypoint_preview/`，直接在浏览器打开 `outputs/keypoint_preview/index.html` 即可查看，无需额外的静态服务器。页面在桌面宽度下用四列网格展示裁剪卡片，每张卡片下方显示 `图 x/54 · 人 y/554` 形式的图片与人物计数元数据；卡片图片使用 `loading="lazy"` 和 `IntersectionObserver` 懒加载,只在滚动到附近时才请求对应裁剪图。图上红框（红框：精准关键点框）标出该人物可见关键点的精确外接框，黄色骨架线和关键点是叠加的 COCO-17 标注,红框之外的留白来自按 `--padding-ratio` 和 `--minimum-side` 计算的正方形裁剪范围。
@@ -305,7 +311,7 @@ SWIMMING_DATASET_DIR="/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K" \
 例如指向另一台机器上的数据集并放宽裁剪边距：
 
 ```bash
-.venv/bin/python -m python.assets.build_keypoint_preview \
+./scripts/run_python.sh keypoint \
   --dataset-root "/path/to/游泳6拼接1080P-2D关键点标注" \
   --output-dir outputs/keypoint_preview \
   --padding-ratio 0.8 \

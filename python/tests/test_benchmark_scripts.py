@@ -58,9 +58,9 @@ class BenchmarkScriptsTest(unittest.TestCase):
         return config, executable, log
 
     def test_matrix_runner_lists_each_required_cell_once(self):
-        script = ROOT / "scripts" / "run_metal_benchmarks.sh"
+        script = ROOT / "scripts" / "run_metal.sh"
         result = subprocess.run(
-            [str(script), "--list-cells"],
+            [str(script), "benchmarks", "--list-cells"],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -74,9 +74,9 @@ class BenchmarkScriptsTest(unittest.TestCase):
         self.assertTrue(os.access(script, os.X_OK))
 
     def test_soak_help_exposes_safety_defaults(self):
-        script = ROOT / "scripts" / "run_metal_soak.sh"
+        script = ROOT / "scripts" / "run_metal.sh"
         result = subprocess.run(
-            [str(script), "--help"],
+            [str(script), "soak", "--help"],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -96,7 +96,8 @@ class BenchmarkScriptsTest(unittest.TestCase):
             environment = dict(os.environ, FAKE_EXEC_LOG=str(log))
             subprocess.run(
                 [
-                    str(ROOT / "scripts" / "run_metal_benchmarks.sh"),
+                    str(ROOT / "scripts" / "run_metal.sh"),
+                    "benchmarks",
                     "--quick", "--config", str(config), "--executable", str(executable),
                     "--output-dir", str(output),
                 ],
@@ -121,7 +122,8 @@ class BenchmarkScriptsTest(unittest.TestCase):
             environment = dict(os.environ, FAKE_EXEC_LOG=str(log), FAKE_GIT_SHA="c" * 40)
             result = subprocess.run(
                 [
-                    str(ROOT / "scripts" / "run_metal_benchmarks.sh"),
+                    str(ROOT / "scripts" / "run_metal.sh"),
+                    "benchmarks",
                     "--quick", "--config", str(config), "--executable", str(executable),
                     "--output-dir", str(directory / "mismatch"),
                 ],
