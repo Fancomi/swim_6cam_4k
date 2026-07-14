@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -608,20 +609,20 @@ class D3D11StitchRenderer::Impl
       float texel_y = 0.0F;
       const bool is_rgba = frame.rgba != nullptr;
       D3D11_TEXTURE2D_DESC tex_desc{};
-      if (is_rgba) {
+      {
         ComPtr<ID3D11Resource> resource;
-        frame.rgba->GetResource(resource.GetAddressOf());
-        ComPtr<ID3D11Texture2D> tex;
-        resource.As(&tex);
-        tex->GetDesc(&tex_desc);
-      } else {
-        if (frame.luma == nullptr || frame.chroma == nullptr) {
-          throw std::invalid_argument("D3D11 NV12 planes are unavailable");
+        if (is_rgba) {
+          frame.rgba->GetResource(resource.GetAddressOf());
+        } else {
+          if (frame.luma == nullptr || frame.chroma == nullptr) {
+            throw std::invalid_argument("D3D11 NV12 planes are unavailable");
+          }
+          frame.luma->GetResource(resource.GetAddressOf());
         }
-        ComPtr<ID3D11Resource> resource;
-        frame.luma->GetResource(resource.GetAddressOf());
         ComPtr<ID3D11Texture2D> tex;
-        resource.As(&tex);
+        if (resource == nullptr || FAILED(resource.As(&tex)) || tex == nullptr) {
+          throw std::invalid_argument("D3D11 input texture is unavailable");
+        }
         tex->GetDesc(&tex_desc);
       }
       if (tex_desc.Width == 0 || tex_desc.Height == 0) {

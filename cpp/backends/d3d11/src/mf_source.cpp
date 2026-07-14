@@ -99,13 +99,20 @@ class DecodedSurfacePool final
     : public std::enable_shared_from_this<DecodedSurfacePool> {
  public:
   struct Surface final {
+    // view MUST be the first member: the published FrameLease carries a
+    // Surface* as its native pointer, and the renderer reinterprets it as a
+    // D3D11FrameView*. Keeping view first makes those two addresses identical.
+    D3D11FrameView view;
     ComPtr<ID3D11Texture2D> texture;
     ComPtr<ID3D11ShaderResourceView> luma_srv;
     ComPtr<ID3D11ShaderResourceView> chroma_srv;
-    D3D11FrameView view;
     std::atomic_uint32_t references{0};
     std::uint32_t pool_index = 0;
     DecodedSurfacePool* owner = nullptr;
+    // Keeps the pool alive while this slot is leased, so the pool can outlive
+    // its owning MfSource::Impl if the mailbox still holds published frames at
+    // shutdown. Mirrors MetalDecodedSurface::lifetime_anchor.
+    std::shared_ptr<DecodedSurfacePool> lifetime_anchor;
   };
 
   DecodedSurfacePool(std::shared_ptr<D3D11Context> context,
@@ -173,6 +180,9 @@ class DecodedSurfacePool final
               expected, 1, std::memory_order_acquire,
               std::memory_order_relaxed)) {
         in_use_.fetch_add(1, std::memory_order_relaxed);
+        // Anchor the pool alive for as long as any slot is leased. Published
+        // frames may outlive this pool's owner during shutdown.
+        slot.lifetime_anchor = shared_from_this();
         return &slot;
       }
     }
@@ -187,6 +197,9 @@ class DecodedSurfacePool final
     }
     if (previous == 1) {
       in_use_.fetch_sub(1, std::memory_order_relaxed);
+      // Drop the anchor last; this may destroy the pool if it was the final
+      // outstanding lease and the owner has already released its reference.
+      slot->lifetime_anchor.reset();
     }
   }
 
@@ -432,11 +445,12 @@ class MfSource::Impl final {
 
   void publish_sample(IMFSample* sample, std::uint64_t sequence) {
     ComPtr<IMFMediaBuffer> buffer;
-    if (FAILED(sample->ConvertToContiguousBuffer(buffer.GetAddressOf()))) {
-      if (FAILED(sample->GetBufferByIndex(0, buffer.GetAddressOf()))) {
-        throw LaneFailure{LaneFailureKind::recoverable,
-                          "cannot obtain MF sample buffer"};
-      }
+    // Do NOT use ConvertToContiguousBuffer: that would copy the GPU surface
+    // into a system-memory buffer and lose the IMFDXGIBuffer interface. The
+    // hardware decode path exposes the D3D11 texture through buffer index 0.
+    if (FAILED(sample->GetBufferByIndex(0, buffer.GetAddressOf()))) {
+      throw LaneFailure{LaneFailureKind::recoverable,
+                        "cannot obtain MF sample buffer"};
     }
     ComPtr<IMFDXGIBuffer> dxgi_buffer;
     if (FAILED(buffer.As(&dxgi_buffer))) {
@@ -491,8 +505,9 @@ class MfSource::Impl final {
         {retain_decoded_surface, release_decoded_surface,
          kD3D11DecodedSurfaceTag},
         slot->view.metadata};
-    // Balance the +1 from try_acquire so the lease owns the only reference.
-    release_decoded_surface(slot);
+    // try_acquire already left the slot at refcount 1; FrameLease adopts that
+    // single reference (its constructor does not retain). Do not balance it
+    // here or the lease's destructor would drive the count negative.
     counters_.decoded.fetch_add(1, std::memory_order_relaxed);
     counters_.camera_decoded[camera_index_].fetch_add(
         1, std::memory_order_relaxed);

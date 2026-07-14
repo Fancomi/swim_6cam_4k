@@ -6,11 +6,27 @@
 
 本文所有命令都假定当前目录是项目根目录 `swim_fbx_demo/`。
 
+## Windows 实时路径（Direct3D 11 + Media Foundation）
+
+仓库也包含与 Metal 平级的 Windows 原生后端 `cpp/backends/d3d11/`：六路 H.264 由 Media Foundation（`IMFSourceReader` + `IMFDXGIDeviceManager`）做 D3D11 硬件解码为 GPU 常驻 NV12 纹理，Direct3D 11 以同一套固定六网格 + FP16 加性累加 shader（`cpp/backends/d3d11/shaders/stitch.hlsl`，从 `stitch.metal` 逐字段移植）合成 `5002x2102`，再经 DXGI 交换链窗口实时预览。与 Metal 路径一致：不依赖 OpenCV/FFmpeg，不把解码像素读回 CPU，各路输入走容量有界的 latest-frame 交换。第一阶段覆盖 `解码 → GPU 拼接 → 预览` 端到端实时；硬件 HEVC 编码与 benchmark 矩阵为后续阶段。
+
+构建前置：需要一个装有 `numpy` 与 `opencv-python` 的 Python 3.10+（用于把 `outputs/data/pool_mesh.json` 编译成 `assets/generated/pool_4k.swasset`），以及 Visual Studio 2022（MSVC，C++20）和 Windows 10 SDK。统一入口是 `scripts/run_win.ps1`：
+
+```powershell
+# 可视化 demo：DXGI 预览窗口 + 六路实时拼接（默认 30 秒）
+pwsh scripts/run_win.ps1 demo
+
+# 无窗口（仍执行真实 GPU 拼接与 present 计量）
+pwsh scripts/run_win.ps1 demo -NoWindow
+```
+
+该脚本在缺少 `.swasset` 时自动编译，随后用 `-G "Visual Studio 17 2022"` 配置并构建 Release，再运行 `swim_realtime --backend d3d11`。六路真实输入路径写在 `configs/windows_20260629.conf`。
+
 ## 实时 Metal 路径
 
 仓库同时包含独立的 macOS 实时实现：六路 H.264 由 VideoToolbox 解码为 GPU 可见表面，Metal 以固定六网格合成 `5002x2102` 输出，并可分流到 preview 与硬件 HEVC。该运行路径不依赖 OpenCV 或 FFmpeg，不把解码像素读回 CPU；各路输入采用容量有界的 latest-frame 交换，接收端只消费当下最新完整帧。
 
-代码按语言隔离：实时核心位于 `cpp/core/`，Apple 原生后端位于 `cpp/backends/metal/`，离线资产与验证工具位于 `python/`，运行入口位于 `scripts/`。默认现场数据集仍是：
+代码按语言隔离：实时核心位于 `cpp/core/`，Apple 原生后端位于 `cpp/backends/metal/`，Windows 原生后端位于 `cpp/backends/d3d11/`，离线资产与验证工具位于 `python/`，运行入口位于 `scripts/`。默认现场数据集仍是：
 
 ```text
 /Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K
