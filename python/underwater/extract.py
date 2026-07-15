@@ -5,7 +5,6 @@ adds underwater-specific defaults, left-to-right ordering, and an isolated CLI.
 """
 import argparse
 import json
-import sys
 from pathlib import Path
 
 from python.assets import extract_fbx, fbx_common

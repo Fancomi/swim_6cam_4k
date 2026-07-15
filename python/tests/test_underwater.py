@@ -159,3 +159,17 @@ class RenderStillTest(unittest.TestCase):
             self.assertTrue(grid.is_file())
             img = cv2.imread(str(still))
             self.assertGreater(int(img.max()), 0)
+
+    def test_render_rejects_json_without_meshes(self):
+        import json
+        import tempfile
+        from python.underwater.render import render_stills
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            bad_path = td / "bad.json"
+            bad_path.write_text(json.dumps({"source": "x"}))
+            still = td / "out_stitch.png"
+            grid = td / "out_grid.png"
+            with self.assertRaises(SystemExit):
+                render_stills(bad_path, td, still, grid)

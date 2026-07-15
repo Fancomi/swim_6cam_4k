@@ -32,7 +32,10 @@ def render_stills(data_path, tex_dir, still_path, grid_path,
     if not data_path.is_file():
         raise SystemExit(f"data file does not exist: {data_path}")
     with open(str(data_path), encoding="utf-8") as f:
-        meshes = json.load(f)["meshes"]
+        loaded = json.load(f)
+    if "meshes" not in loaded:
+        raise SystemExit(f"data file missing 'meshes' key: {data_path}")
+    meshes = loaded["meshes"]
 
     rr.to_meters(meshes, unit_scale, neg_v)
     xmin, xmax, ymin, ymax = rr.world_bounds(meshes)
