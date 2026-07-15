@@ -68,3 +68,57 @@ class ExtractIntegrationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RenderStillTest(unittest.TestCase):
+    def test_resolve_ppm_targets_width(self):
+        from python.underwater.render import resolve_ppm
+        # world X span 2.0 -> ppm ~ 320 for 640 target
+        self.assertAlmostEqual(resolve_ppm(-1.0, 1.0, 640), 320.0, places=3)
+
+    def test_resolve_ppm_degenerate_span_falls_back(self):
+        from python.underwater.render import resolve_ppm
+        self.assertEqual(resolve_ppm(0.0, 0.0, 640), 100.0)
+
+    def test_render_writes_still_and_grid(self):
+        import json
+        import tempfile
+        import cv2
+        import numpy as np
+        from python.underwater.render import render_stills
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            # one unit-square mesh mapped to a full texture
+            tri_a = [
+                {"pos": [0.0, 0.0], "uv": [0.0, 0.0]},
+                {"pos": [1.0, 0.0], "uv": [1.0, 0.0]},
+                {"pos": [1.0, 1.0], "uv": [1.0, 1.0]},
+            ]
+            tri_b = [
+                {"pos": [0.0, 0.0], "uv": [0.0, 0.0]},
+                {"pos": [1.0, 1.0], "uv": [1.0, 1.0]},
+                {"pos": [0.0, 1.0], "uv": [0.0, 1.0]},
+            ]
+            data = {"source": "x", "meshes": [
+                {"node": "p", "texture_basename": "t.png", "uvset": "map1",
+                 "const_axis": 2, "kept_axes": [0, 1], "spans": [1, 1, 0],
+                 "triangles": [tri_a, tri_b]},
+            ]}
+            data_path = td / "mesh.json"
+            data_path.write_text(json.dumps(data))
+            tex = np.full((16, 16, 3), 200, np.uint8)
+            cv2.imwrite(str(td / "t.png"), tex)
+
+            still = td / "out_stitch.png"
+            grid = td / "out_grid.png"
+            out_w, out_h = render_stills(
+                data_path, td, still, grid, ppm=None,
+                unit_scale=1.0, neg_v=False, target_width=64,
+            )
+            self.assertTrue(still.is_file())
+            self.assertTrue(grid.is_file())
+            img = cv2.imread(str(still))
+            self.assertEqual(img.shape[1], out_w)
+            self.assertEqual(img.shape[0], out_h)
+            self.assertGreater(int(img.max()), 0)  # not all black
