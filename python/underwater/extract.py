@@ -25,3 +25,48 @@ def sort_meshes_by_world_x(meshes):
 
     Empty meshes (no triangles) sort last. Input list is not mutated."""
     return sorted(meshes, key=_mesh_min_x)
+
+
+def extract_to_json(src, dst, tex_dir):
+    src = Path(src)
+    dst = Path(dst)
+    tex_dir = Path(tex_dir)
+    if not src.is_file():
+        raise SystemExit(f"source file does not exist: {src}")
+    if not tex_dir.is_dir():
+        raise SystemExit(f"texture directory does not exist: {tex_dir}")
+
+    mgr, scene = fbx_common.InitializeSdkObjects()
+    if not fbx_common.LoadScene(mgr, scene, str(src)):
+        raise SystemExit(f"FAILED to load {src}")
+    meshes = []
+    extract_fbx.walk(scene.GetRootNode(), meshes, tex_dir)
+    mgr.Destroy()
+
+    if not meshes:
+        raise SystemExit(f"no mesh found in {src}")
+    meshes = sort_meshes_by_world_x(meshes)
+
+    data = {"source": extract_fbx.display_path(src), "meshes": meshes}
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with open(str(dst), "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    for m in meshes:
+        print(f"{m['node']:12s} tris={len(m['triangles']):4d} "
+              f"tex={m['texture_basename']} uvset={m['uvset']}")
+    print("wrote", dst)
+    return meshes
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="Extract underwater FBX to mesh JSON")
+    ap.add_argument("src", nargs="?", type=Path, default=INPUTS_DIR / "models" / "01d.fbx")
+    ap.add_argument("dst", nargs="?", type=Path,
+                    default=OUTPUTS_DIR / "underwater" / "01d_mesh.json")
+    ap.add_argument("--tex-dir", type=Path, default=INPUTS_DIR / "models" / "01d.fbm")
+    args = ap.parse_args(argv)
+    extract_to_json(args.src, args.dst, args.tex_dir)
+
+
+if __name__ == "__main__":
+    main()
