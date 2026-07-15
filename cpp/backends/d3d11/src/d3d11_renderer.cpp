@@ -7,8 +7,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -231,6 +233,7 @@ class D3D11StitchRenderer::Impl
         std::this_thread::yield();
       }
       record_completion();
+      maybe_dump_center_pixel(output->texture());
       output->anchor_lifetime(shared_from_this());
       if (completed_output_sink_) {
         completed_output_sink_(std::move(*output));
@@ -439,6 +442,18 @@ class D3D11StitchRenderer::Impl
                                         opaque_blend_.GetAddressOf()))) {
       throw std::runtime_error("cannot create D3D11 opaque blend state");
     }
+
+    // Metal's default pipeline does not cull; the FBX-derived mesh triangles
+    // have no guaranteed winding, so cull nothing here or half the geometry
+    // (and the fullscreen resolve triangle) would be dropped, yielding black.
+    D3D11_RASTERIZER_DESC raster_desc{};
+    raster_desc.FillMode = D3D11_FILL_SOLID;
+    raster_desc.CullMode = D3D11_CULL_NONE;
+    raster_desc.DepthClipEnable = TRUE;
+    if (FAILED(device->CreateRasterizerState(&raster_desc,
+                                             rasterizer_.GetAddressOf()))) {
+      throw std::runtime_error("cannot create D3D11 rasterizer state");
+    }
   }
 
   void upload_camera_resources(const swim::core::RuntimeAsset& asset) {
@@ -575,6 +590,61 @@ class D3D11StitchRenderer::Impl
     }
   }
 
+  // Diagnostic only (SWIM_D3D11_DUMP_PIXEL=1): copy the composite's center pixel
+  // to a staging texture and print it, to tell "black output" (renderer bug)
+  // apart from "black window" (preview/present bug). Not on the hot path.
+  void maybe_dump_center_pixel(ID3D11Texture2D* output_texture) noexcept {
+    static const bool enabled = [] {
+      const char* value = std::getenv("SWIM_D3D11_DUMP_PIXEL");
+      return value != nullptr && value[0] == '1';
+    }();
+    if (!enabled || output_texture == nullptr) {
+      return;
+    }
+    static std::atomic_int dumped{0};
+    if (dumped.fetch_add(1, std::memory_order_relaxed) >= 3) {
+      return;
+    }
+    try {
+      if (staging_pixel_ == nullptr) {
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = 1;
+        desc.Height = 1;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        context_->device->CreateTexture2D(&desc, nullptr,
+                                          staging_pixel_.GetAddressOf());
+      }
+      if (staging_pixel_ == nullptr) {
+        return;
+      }
+      D3D11_BOX box{};
+      box.left = encoded_width_ / 2;
+      box.top = encoded_height_ / 2;
+      box.front = 0;
+      box.right = box.left + 1;
+      box.bottom = box.top + 1;
+      box.back = 1;
+      auto* ctx = context_->immediate_context.Get();
+      ctx->CopySubresourceRegion(staging_pixel_.Get(), 0, 0, 0, 0,
+                                 output_texture, 0, &box);
+      D3D11_MAPPED_SUBRESOURCE mapped{};
+      if (SUCCEEDED(ctx->Map(staging_pixel_.Get(), 0, D3D11_MAP_READ, 0,
+                             &mapped))) {
+        const auto* p = static_cast<const std::uint8_t*>(mapped.pData);
+        std::fprintf(stderr, "[d3d11] center BGRA=%u,%u,%u,%u\n", p[0], p[1],
+                     p[2], p[3]);
+        std::fflush(stderr);
+        ctx->Unmap(staging_pixel_.Get(), 0);
+      }
+    } catch (...) {
+    }
+  }
+
   void set_viewport(UINT width, UINT height) {
     D3D11_VIEWPORT viewport{};
     viewport.Width = static_cast<float>(width);
@@ -593,6 +663,7 @@ class D3D11StitchRenderer::Impl
     ctx->OMSetRenderTargets(1, &accum_rtv, nullptr);
     const float blend_factor[4] = {0.0F, 0.0F, 0.0F, 0.0F};
     ctx->OMSetBlendState(additive_blend_.Get(), blend_factor, 0xffffffffU);
+    ctx->RSSetState(rasterizer_.Get());
     ctx->IASetInputLayout(input_layout_.Get());
     ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx->VSSetShader(vertex_shader_.Get(), nullptr, 0);
@@ -740,10 +811,12 @@ class D3D11StitchRenderer::Impl
   ComPtr<ID3D11SamplerState> sampler_mirror_;
   ComPtr<ID3D11BlendState> additive_blend_;
   ComPtr<ID3D11BlendState> opaque_blend_;
+  ComPtr<ID3D11RasterizerState> rasterizer_;
   ComPtr<ID3D11Texture2D> accumulation_;
   ComPtr<ID3D11RenderTargetView> accumulation_rtv_;
   ComPtr<ID3D11ShaderResourceView> accumulation_srv_;
   ComPtr<ID3D11Query> completion_query_;
+  ComPtr<ID3D11Texture2D> staging_pixel_;
 
   D3D11OutputPool output_pool_;
   swim::core::RuntimeCounterPublication publication_;
