@@ -20,6 +20,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -69,10 +71,16 @@ uniform sampler2D u_weight;  // R, feather
 uniform vec2 u_texel;
 uniform vec2 u_weight_origin;
 uniform vec2 u_weight_size;
+uniform float u_render_height;
 uniform uint u_color_matrix;
 uniform uint u_full_range;
 float weight_at(){
-  vec2 wuv = (gl_FragCoord.xy - u_weight_origin) / u_weight_size;
+  // gl_FragCoord is bottom-left origin (y up); the feather weight texture and
+  // weight_origin/size are in the asset's top-left, y-down output-pixel space.
+  // Flip y so the feather is sampled at the correct row — otherwise overlap
+  // regions blend with a vertically mirrored weight (ghosting + hard seam).
+  vec2 frag = vec2(gl_FragCoord.x, u_render_height - gl_FragCoord.y);
+  vec2 wuv = (frag - u_weight_origin) / u_weight_size;
   return texture(u_weight, wuv).r;
 }
 vec3 ycbcr_to_rgb(float y, vec2 cbcr){
@@ -305,11 +313,38 @@ class CudaGlStitchRenderer::Impl {
       }
 
       record_first_submit();
-      upload_and_stitch(frames, slot);
-      glFinish();
+      // Phase timing (SWIM_CUDAGL_PROFILE=1): separate upload, draw, and the
+      // glFinish stall so we can see which phase misses the frame budget.
+      static const bool profile = [] {
+        const char* v = std::getenv("SWIM_CUDAGL_PROFILE");
+        return v != nullptr && v[0] == '1';
+      }();
+      if (profile) {
+        const auto t0 = std::chrono::steady_clock::now();
+        upload_only(frames);
+        const auto t1 = std::chrono::steady_clock::now();
+        draw_only(slot);
+        const auto t2 = std::chrono::steady_clock::now();
+        glFinish();
+        const auto t3 = std::chrono::steady_clock::now();
+        static std::atomic_int n{0};
+        if (n.fetch_add(1, std::memory_order_relaxed) % 60 == 0) {
+          auto ms = [](auto a, auto b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+          };
+          std::fprintf(stderr,
+                       "[cudagl] upload=%.2fms draw=%.2fms finish=%.2fms total=%.2fms\n",
+                       ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t0, t3));
+          std::fflush(stderr);
+        }
+      } else {
+        upload_and_stitch(frames, slot);
+        glFinish();
+      }
       record_completion();
 
       const GLuint out_tex = slot->texture;
+      maybe_dump_output(out_tex);
       if (sink_) {
         sink_(out_tex);
       }
@@ -540,54 +575,74 @@ class CudaGlStitchRenderer::Impl {
     }
   }
 
-  void upload_nv12(CameraResources& cam, const CudaGlDecodedFrame& frame) {
-    // Map both GL textures for CUDA write, memcpy2D each plane, unmap.
-    CUgraphicsResource resources[2] = {cam.luma.resource, cam.chroma.resource};
-    cuda_check(cuGraphicsMapResources(2, resources, 0),
+  void upload_only(const std::array<CudaGlDecodedFrame*, 6>& frames) {
+    upload_all_nv12(frames);
+  }
+
+  void draw_only(OutputSlot* slot) {
+    std::array<CudaGlDecodedFrame*, 6> dummy{};
+    draw_passes(dummy, slot, /*already_uploaded=*/true);
+  }
+
+  // Upload all six NV12 frames in a SINGLE CUDA-GL map/unmap. Mapping graphics
+  // resources synchronizes the CUDA and GL contexts, so doing it once for all
+  // 12 plane textures instead of 6 separate map/unmap pairs collapses six
+  // context syncs into one — the dominant per-frame cost at 60 fps.
+  void upload_all_nv12(const std::array<CudaGlDecodedFrame*, 6>& frames) {
+    std::array<CUgraphicsResource, 12> resources{};
+    for (std::size_t i = 0; i < cameras_.size(); ++i) {
+      resources[i * 2] = cameras_[i].luma.resource;
+      resources[i * 2 + 1] = cameras_[i].chroma.resource;
+    }
+    cuda_check(cuGraphicsMapResources(static_cast<unsigned>(resources.size()),
+                                      resources.data(), 0),
                "cuGraphicsMapResources");
     struct Unmap {
       CUgraphicsResource* r;
-      ~Unmap() { cuGraphicsUnmapResources(2, r, 0); }
-    } unmap{resources};
+      unsigned n;
+      ~Unmap() { cuGraphicsUnmapResources(n, r, 0); }
+    } unmap{resources.data(), static_cast<unsigned>(resources.size())};
 
-    CUarray luma_array = nullptr;
-    CUarray chroma_array = nullptr;
-    cuda_check(cuGraphicsSubResourceGetMappedArray(&luma_array,
-                                                   cam.luma.resource, 0, 0),
-               "get luma array");
-    cuda_check(cuGraphicsSubResourceGetMappedArray(&chroma_array,
-                                                   cam.chroma.resource, 0, 0),
-               "get chroma array");
+    for (std::size_t i = 0; i < cameras_.size(); ++i) {
+      copy_plane(cameras_[i].luma, static_cast<CUdeviceptr>(frames[i]->luma_ptr),
+                 frames[i]->luma_pitch, frames[i]->width, frames[i]->height,
+                 /*bytes_per_pixel=*/1);
+      copy_plane(cameras_[i].chroma,
+                 static_cast<CUdeviceptr>(frames[i]->chroma_ptr),
+                 frames[i]->chroma_pitch, frames[i]->width / 2,
+                 frames[i]->height / 2, /*bytes_per_pixel=*/2);
+    }
+  }
 
-    // Copy only the valid frame region; the decoder pitch may exceed width and
-    // the GL texture is exactly frame-sized.
-    const std::size_t luma_rows = std::min<std::size_t>(cam.luma.height, frame.height);
-    CUDA_MEMCPY2D luma{};
-    luma.srcMemoryType = CU_MEMORYTYPE_DEVICE;
-    luma.srcDevice = static_cast<CUdeviceptr>(frame.luma_ptr);
-    luma.srcPitch = frame.luma_pitch;
-    luma.dstMemoryType = CU_MEMORYTYPE_ARRAY;
-    luma.dstArray = luma_array;
-    luma.WidthInBytes = std::min<std::size_t>(cam.luma.width, frame.width);
-    luma.Height = luma_rows;
-    cuda_check(cuMemcpy2D(&luma), "cuMemcpy2D luma");
-
-    const std::size_t chroma_rows =
-        std::min<std::size_t>(cam.chroma.height, frame.height / 2);
-    CUDA_MEMCPY2D chroma{};
-    chroma.srcMemoryType = CU_MEMORYTYPE_DEVICE;
-    chroma.srcDevice = static_cast<CUdeviceptr>(frame.chroma_ptr);
-    chroma.srcPitch = frame.chroma_pitch;
-    chroma.dstMemoryType = CU_MEMORYTYPE_ARRAY;
-    chroma.dstArray = chroma_array;
-    chroma.WidthInBytes =
-        std::min<std::size_t>(cam.chroma.width, frame.width / 2) * 2;
-    chroma.Height = chroma_rows;
-    cuda_check(cuMemcpy2D(&chroma), "cuMemcpy2D chroma");
+  void copy_plane(CudaGlTexture& tex, CUdeviceptr src, std::size_t src_pitch,
+                  std::uint32_t src_w, std::uint32_t src_h,
+                  std::size_t bytes_per_pixel) {
+    CUarray array = nullptr;
+    cuda_check(cuGraphicsSubResourceGetMappedArray(&array, tex.resource, 0, 0),
+               "cuGraphicsSubResourceGetMappedArray");
+    CUDA_MEMCPY2D copy{};
+    copy.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+    copy.srcDevice = src;
+    copy.srcPitch = src_pitch;
+    copy.dstMemoryType = CU_MEMORYTYPE_ARRAY;
+    copy.dstArray = array;
+    copy.WidthInBytes =
+        std::min<std::size_t>(tex.width, src_w) * bytes_per_pixel;
+    copy.Height = std::min<std::size_t>(tex.height, src_h);
+    cuda_check(cuMemcpy2D(&copy), "cuMemcpy2D");
   }
 
   void upload_and_stitch(const std::array<CudaGlDecodedFrame*, 6>& frames,
                          OutputSlot* slot) {
+    draw_passes(frames, slot, /*already_uploaded=*/false);
+  }
+
+  void draw_passes(const std::array<CudaGlDecodedFrame*, 6>& frames,
+                   OutputSlot* slot, bool already_uploaded) {
+    // Upload all six NV12 frames in one map/unmap before drawing.
+    if (!already_uploaded) {
+      upload_all_nv12(frames);
+    }
     // Accumulation pass with additive blend into the FP16 target.
     glBindFramebuffer(GL_FRAMEBUFFER, accum_fbo_);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
@@ -604,7 +659,19 @@ class CudaGlStitchRenderer::Impl {
 
     for (std::size_t i = 0; i < cameras_.size(); ++i) {
       auto& cam = cameras_[i];
-      upload_nv12(cam, *frames[i]);
+      const auto fw = already_uploaded ? kFrameW : frames[i]->width;
+      const auto fh = already_uploaded ? kFrameH : frames[i]->height;
+      const auto matrix = already_uploaded
+                              ? 0U
+                              : static_cast<unsigned>(
+                                    frames[i]->metadata.color_matrix);
+      const auto full_range =
+          already_uploaded
+              ? 0U
+              : (frames[i]->metadata.pixel_format ==
+                         swim::core::PixelFormat::nv12_full_range
+                     ? 1U
+                     : 0U);
 
       set_uniform2f("u_output_size", static_cast<float>(encoded_width_),
                     static_cast<float>(encoded_height_));
@@ -614,17 +681,13 @@ class CudaGlStitchRenderer::Impl {
       set_uniform1f("u_perimeter_tolerance", kPerimeterTolerance);
       set_uniform1f("u_inclusive_expansion", kInclusiveExpansion);
       set_uniform1ui("u_expand_perimeter", 1U);
-      set_uniform2f("u_texel", 1.0F / static_cast<float>(frames[i]->width),
-                    1.0F / static_cast<float>(frames[i]->height));
+      set_uniform2f("u_texel", 1.0F / static_cast<float>(fw),
+                    1.0F / static_cast<float>(fh));
       set_uniform2f("u_weight_origin", cam.weight_x, cam.weight_y);
       set_uniform2f("u_weight_size", cam.weight_w, cam.weight_h);
-      set_uniform1ui("u_color_matrix",
-                     static_cast<unsigned>(frames[i]->metadata.color_matrix));
-      set_uniform1ui("u_full_range",
-                     frames[i]->metadata.pixel_format ==
-                             swim::core::PixelFormat::nv12_full_range
-                         ? 1U
-                         : 0U);
+      set_uniform1f("u_render_height", static_cast<float>(encoded_height_));
+      set_uniform1ui("u_color_matrix", matrix);
+      set_uniform1ui("u_full_range", full_range);
       set_sampler("u_luma", 0);
       set_sampler("u_chroma", 1);
       set_sampler("u_weight", 2);
@@ -677,6 +740,44 @@ class CudaGlStitchRenderer::Impl {
   }
   void set_ivec2(GLuint prog, const char* name, int a, int b) {
     glUniform4i(glGetUniformLocation(prog, name), a, b, 0, 0);
+  }
+
+  // Diagnostic only (SWIM_DUMP_RAW=<path>): read the encoded RGBA output back to
+  // the CPU once and dump raw bytes for the golden comparison.
+  void maybe_dump_output(GLuint output_texture) noexcept {
+    static const char* path = std::getenv("SWIM_DUMP_RAW");
+    if (path == nullptr) {
+      return;
+    }
+    static std::atomic_bool done{false};
+    bool expected = false;
+    if (!done.compare_exchange_strong(expected, true)) {
+      return;
+    }
+    try {
+      std::vector<std::uint8_t> pixels(
+          static_cast<std::size_t>(encoded_width_) * encoded_height_ * 4);
+      glBindFramebuffer(GL_FRAMEBUFFER, output_fbo_);
+      glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                             GL_TEXTURE_2D, output_texture, 0);
+      glReadPixels(0, 0, static_cast<GLsizei>(encoded_width_),
+                   static_cast<GLsizei>(encoded_height_), GL_RGBA,
+                   GL_UNSIGNED_BYTE, pixels.data());
+      glBindFramebuffer(GL_FRAMEBUFFER, 0);
+      // glReadPixels origin is bottom-left; flip rows so the dump matches the
+      // top-left reference canvas.
+      std::ofstream out(path, std::ios::binary);
+      const std::size_t stride = static_cast<std::size_t>(encoded_width_) * 4;
+      for (std::uint32_t row = 0; row < encoded_height_; ++row) {
+        const auto* src =
+            pixels.data() + (encoded_height_ - 1 - row) * stride;
+        out.write(reinterpret_cast<const char*>(src),
+                  static_cast<std::streamsize>(stride));
+      }
+      std::fprintf(stderr, "[cudagl] dumped raw RGBA output to %s\n", path);
+      std::fflush(stderr);
+    } catch (...) {
+    }
   }
 
   void destroy() noexcept {

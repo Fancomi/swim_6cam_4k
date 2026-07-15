@@ -234,6 +234,7 @@ class D3D11StitchRenderer::Impl
       }
       record_completion();
       maybe_dump_center_pixel(output->texture());
+      maybe_dump_output(output->texture());
       output->anchor_lifetime(shared_from_this());
       if (completed_output_sink_) {
         completed_output_sink_(std::move(*output));
@@ -590,9 +591,9 @@ class D3D11StitchRenderer::Impl
     }
   }
 
-  // Diagnostic only (SWIM_D3D11_DUMP_PIXEL=1): copy the composite's center pixel
-  // to a staging texture and print it, to tell "black output" (renderer bug)
-  // apart from "black window" (preview/present bug). Not on the hot path.
+  // Diagnostic only (SWIM_D3D11_DUMP_PIXEL=1): copy the composite's center
+  // pixel to a staging texture and print it, to tell "black output" (renderer
+  // bug) apart from "black window" (preview bug). Not on the hot path.
   void maybe_dump_center_pixel(ID3D11Texture2D* output_texture) noexcept {
     static const bool enabled = [] {
       const char* value = std::getenv("SWIM_D3D11_DUMP_PIXEL");
@@ -641,6 +642,52 @@ class D3D11StitchRenderer::Impl
         std::fflush(stderr);
         ctx->Unmap(staging_pixel_.Get(), 0);
       }
+    } catch (...) {
+    }
+  }
+
+  // Diagnostic only (SWIM_DUMP_RAW=<path>): read the full encoded BGRA output
+  // back to the CPU once and dump it as raw bytes for the golden comparison.
+  void maybe_dump_output(ID3D11Texture2D* output_texture) noexcept {
+    static const char* path = std::getenv("SWIM_DUMP_RAW");
+    if (path == nullptr || output_texture == nullptr) {
+      return;
+    }
+    static std::atomic_bool done{false};
+    bool expected = false;
+    if (!done.compare_exchange_strong(expected, true)) {
+      return;
+    }
+    try {
+      D3D11_TEXTURE2D_DESC desc{};
+      desc.Width = encoded_width_;
+      desc.Height = encoded_height_;
+      desc.MipLevels = 1;
+      desc.ArraySize = 1;
+      desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+      desc.SampleDesc.Count = 1;
+      desc.Usage = D3D11_USAGE_STAGING;
+      desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      ComPtr<ID3D11Texture2D> staging;
+      if (FAILED(context_->device->CreateTexture2D(&desc, nullptr,
+                                                   staging.GetAddressOf()))) {
+        return;
+      }
+      auto* ctx = context_->immediate_context.Get();
+      ctx->CopyResource(staging.Get(), output_texture);
+      D3D11_MAPPED_SUBRESOURCE mapped{};
+      if (FAILED(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+        return;
+      }
+      std::ofstream out(path, std::ios::binary);
+      const auto* base = static_cast<const std::uint8_t*>(mapped.pData);
+      for (std::uint32_t row = 0; row < encoded_height_; ++row) {
+        out.write(reinterpret_cast<const char*>(base + row * mapped.RowPitch),
+                  static_cast<std::streamsize>(encoded_width_) * 4);
+      }
+      ctx->Unmap(staging.Get(), 0);
+      std::fprintf(stderr, "[d3d11] dumped raw BGRA output to %s\n", path);
+      std::fflush(stderr);
     } catch (...) {
     }
   }

@@ -64,6 +64,8 @@ void (*glDisable)(GLenum) = nullptr;
 void (*glBlendFunc)(GLenum, GLenum) = nullptr;
 void (*glBlendEquation)(GLenum) = nullptr;
 void (*glFinish)() = nullptr;
+void (*glReadPixels)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum,
+                     void*) = nullptr;
 GLenum (*glGetError)() = nullptr;
 
 namespace {
@@ -130,6 +132,7 @@ void load_gl_functions() {
   load_one(glBlendFunc, "glBlendFunc");
   load_one(glBlendEquation, "glBlendEquation");
   load_one(glFinish, "glFinish");
+  load_one(glReadPixels, "glReadPixels");
   load_one(glGetError, "glGetError");
 }
 

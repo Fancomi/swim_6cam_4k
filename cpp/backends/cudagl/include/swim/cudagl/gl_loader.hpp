@@ -132,6 +132,8 @@ extern void (*glDisable)(GLenum);
 extern void (*glBlendFunc)(GLenum, GLenum);
 extern void (*glBlendEquation)(GLenum);
 extern void (*glFinish)();
+extern void (*glReadPixels)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum,
+                            void*);
 extern GLenum (*glGetError)();
 
 }  // namespace swim::cudagl
