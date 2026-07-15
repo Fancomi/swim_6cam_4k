@@ -318,6 +318,28 @@ SWIMMING_DATASET_DIR="/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K" \
   --minimum-side 200
 ```
 
+## 水下拼接（underwater stitch）
+
+`python/underwater/` 是一个**与六路 pool 流程任务隔离**的新任务，用 `inputs/models/01d.fbx` 验证「N 块平面水平依次连接」的拼接通路（当前 2 块，后续可扩展到 16 块）。它不复制算法，而是 import 复用 pool 的提取与渲染函数（`python.assets.extract_fbx`、`python.validation.reference_renderer`），产物独立写入 `outputs/underwater/`，不与 pool 交叉。
+
+提取 FBX 网格为 JSON（默认 `inputs/models/01d.fbx` + 纹理目录 `inputs/models/01d.fbm`，输出 `outputs/underwater/01d_mesh.json`）：
+
+```bash
+.venv/bin/python -m python.underwater.extract
+```
+
+网格按每块世界 X 最小值升序排列（左→右），不依赖 FBX 节点声明顺序，为 16 块扩展提供稳定顺序。
+
+渲染静态拼接图与网格诊断图（默认输出 `outputs/underwater/01d_stitch.png`、`01d_grid.png`）：
+
+```bash
+.venv/bin/python -m python.underwater.render
+```
+
+- `--ppm` 默认按世界 X 跨度自适应到约 `--target-width`（默认 640）像素宽，避免对 640×360 源纹理无意义放大；可显式覆盖 `--ppm`。
+- 默认按正立朝向合成；如需翻转 Y（世界 V）可加 `--neg-v`。
+- 重叠区由羽化权重平滑混合，无重叠处保持硬边（与 pool 中线接缝同机制）。
+
 ## 已知限制
 
 - 视频渲染会读取各路源 FPS，以最低源 FPS 作为输出帧率，并对较高帧率输入按最近目标帧位置抽帧。这只对齐帧率，不会同步各路视频的采集起始时间。
