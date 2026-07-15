@@ -17,6 +17,10 @@
 #include <swim/d3d11/d3d11_backend.hpp>
 #endif
 
+#if defined(SWIM_HAS_CUDAGL_BACKEND)
+#include <swim/cudagl/cudagl_backend.hpp>
+#endif
+
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -273,6 +277,9 @@ int run_runtime(const swim::core::AppConfig& config,
 #endif
 #if defined(SWIM_HAS_D3D11_BACKEND)
     swim::d3d11::register_d3d11_backend();
+#endif
+#if defined(SWIM_HAS_CUDAGL_BACKEND)
+    swim::cudagl::register_cudagl_backend();
 #endif
     backend = swim::core::BackendRegistry::instance().create(config.backend);
     reporter.bind_backend(*backend);

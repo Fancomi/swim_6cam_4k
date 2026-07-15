@@ -23,3 +23,6 @@ assets/generated/*.swasset
 # Benchmark runs are local machine evidence; keep only the directory anchor.
 benchmarks/*
 !benchmarks/.gitkeep
+
+# Prebuilt CUDA/GL backend deps (FFmpeg+cuvid, GLFW) — large binaries, fetched locally
+/third_party/
