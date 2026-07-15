@@ -122,3 +122,40 @@ class RenderStillTest(unittest.TestCase):
             self.assertEqual(img.shape[1], out_w)
             self.assertEqual(img.shape[0], out_h)
             self.assertGreater(int(img.max()), 0)  # not all black
+
+    def test_render_default_orientation_upright(self):
+        import json
+        import tempfile
+        import cv2
+        import numpy as np
+        from python.underwater.render import render_stills
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            tri_a = [
+                {"pos": [0.0, 0.0], "uv": [0.0, 0.0]},
+                {"pos": [1.0, 0.0], "uv": [1.0, 0.0]},
+                {"pos": [1.0, 1.0], "uv": [1.0, 1.0]},
+            ]
+            tri_b = [
+                {"pos": [0.0, 0.0], "uv": [0.0, 0.0]},
+                {"pos": [1.0, 1.0], "uv": [1.0, 1.0]},
+                {"pos": [0.0, 1.0], "uv": [0.0, 1.0]},
+            ]
+            data = {"source": "x", "meshes": [
+                {"node": "p", "texture_basename": "t.png", "uvset": "map1",
+                 "const_axis": 2, "kept_axes": [0, 1], "spans": [1, 1, 0],
+                 "triangles": [tri_a, tri_b]},
+            ]}
+            data_path = td / "mesh.json"
+            data_path.write_text(json.dumps(data))
+            tex = np.full((16, 16, 3), 200, np.uint8)
+            cv2.imwrite(str(td / "t.png"), tex)
+
+            still = td / "out_stitch.png"
+            grid = td / "out_grid.png"
+            render_stills(data_path, td, still, grid, ppm=None, target_width=64)
+            self.assertTrue(still.is_file())
+            self.assertTrue(grid.is_file())
+            img = cv2.imread(str(still))
+            self.assertGreater(int(img.max()), 0)

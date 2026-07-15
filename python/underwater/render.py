@@ -26,7 +26,7 @@ def resolve_ppm(xmin, xmax, target_width):
 
 
 def render_stills(data_path, tex_dir, still_path, grid_path,
-                  ppm=None, unit_scale=1.0, neg_v=True, target_width=640):
+                  ppm=None, unit_scale=1.0, neg_v=False, target_width=640):
     data_path = Path(data_path)
     tex_dir = Path(tex_dir)
     if not data_path.is_file():
@@ -81,7 +81,8 @@ def main(argv=None):
                     help="pixels per metre; default adapts world-X span to --target-width")
     ap.add_argument("--target-width", type=int, default=640)
     ap.add_argument("--unit-scale", type=float, default=1.0)
-    ap.add_argument("--no-neg-v", dest="neg_v", action="store_false", default=True)
+    ap.add_argument("--neg-v", dest="neg_v", action="store_true", default=False,
+                    help="flip Y (world V) when compositing; off by default (upright for 01d)")
     args = ap.parse_args(argv)
     render_stills(args.data, args.tex_dir, args.still, args.grid_still,
                   ppm=args.ppm, unit_scale=args.unit_scale, neg_v=args.neg_v,
