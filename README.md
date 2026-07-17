@@ -35,7 +35,10 @@ scripts\run_win.bat                     :: d3d11 后端（默认），预览窗�
 scripts\run_win.bat cudagl              :: CUDA/GL（NVDEC+OpenGL）后端
 scripts\run_win.bat cudagl 60           :: 跑 60 秒
 scripts\run_win.bat cudagl 30 nowindow  :: 无窗口（仍执行真实 GPU 拼接）
+scripts\run_win.bat cudagl fps:60       :: 指定渲染帧率 60fps（与输入帧率无关）
 ```
+
+渲染帧率可用 `fps:N` 指定（底层 `--fps=N`，等价 `fps_num=N fps_den=1`），与输入视频帧率无关：latest-frame 邮箱按该节奏重复或丢弃源帧来满足目标 cadence。也可在 config 用 `fps_num`/`fps_den` 或 CLI `--fps-num`/`--fps-den` 设非整数帧率（如 30000/1001）。
 
 CUDA/GL 的六路真实输入路径写在 `configs/windows_cudagl.conf`（`backend=cudagl`）。运行时需要 FFmpeg（`avcodec/avformat/avutil/swresample/swscale`）、`glfw3.dll`、`cudart64_12.dll` 与 exe 同目录。
 
