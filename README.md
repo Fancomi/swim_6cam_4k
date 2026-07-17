@@ -26,15 +26,18 @@ pwsh scripts/run_win.ps1 demo -NoWindow
 
 另有一个与 D3D11 平级的 Windows 后端 `cpp/backends/cudagl/`，对齐 `rtsp-h264-stitcher` 的 NVDEC/CUDA/GL 技术栈，为后续接 RTSP 网络流与 NVENC 推流铺路：六路 H.264 由 FFmpeg 的 `h264_cuvid`（NVDEC）解码，帧直接落在 CUDA 设备内存（`AV_PIX_FMT_CUDA` NV12，无 host copy）；`cuGraphicsGLRegisterImage` + `cuMemcpy2D` 把 NV12 双平面上传到 CUDA 注册的 GL 纹理，OpenGL 3.3 用同一套六网格 + 羽化 GLSL（从 `stitch.metal` 移植）做 FP16 加性累加与归一化，GLFW 窗口呈现。GL 函数通过 `glfwGetProcAddress` 手动加载，不依赖 GLEW。
 
-依赖（预编译，放在 `third_party/`，已 gitignore）：BtbN 的 FFmpeg shared 构建（含 cuvid/nvenc）、GLFW 3.4 win64，以及本机 CUDA Toolkit（头文件与 `cuda.lib`/`cudart.lib`）。CMake 通过 `SWIM_FFMPEG_DIR` / `SWIM_GLFW_DIR` / `SWIM_CUDA_DIR` 定位；三者齐备时自动启用 `swim_cudagl_backend`（配置日志打印 `CUDA/GL backend: enabled`）。运行入口：
+依赖（预编译，放在 `third_party/`，已 gitignore）：BtbN 的 FFmpeg shared 构建（含 cuvid/nvenc）、GLFW 3.4 win64，以及本机 CUDA Toolkit（头文件与 `cuda.lib`/`cudart.lib`）。CMake 通过 `SWIM_FFMPEG_DIR` / `SWIM_GLFW_DIR` / `SWIM_CUDA_DIR` 定位；三者齐备时自动启用 `swim_cudagl_backend`（配置日志打印 `CUDA/GL backend: enabled`）。
+
+两个后端共用同一个入口脚本 `scripts\run_win.bat`，第一个参数选后端；运行时 stderr 每秒刷新一行 render / decode / preview 实时 FPS：
 
 ```bat
-scripts\run_win_cudagl.bat            :: GLFW 预览窗口，~30fps，跑 30 秒
-scripts\run_win_cudagl.bat 60         :: 跑 60 秒
-scripts\run_win_cudagl.bat 30 nowindow :: 无窗口
+scripts\run_win.bat                     :: d3d11 后端（默认），预览窗口，30 秒
+scripts\run_win.bat cudagl              :: CUDA/GL（NVDEC+OpenGL）后端
+scripts\run_win.bat cudagl 60           :: 跑 60 秒
+scripts\run_win.bat cudagl 30 nowindow  :: 无窗口（仍执行真实 GPU 拼接）
 ```
 
-六路真实输入路径写在 `configs/windows_cudagl.conf`（`backend=cudagl`）。运行时需要 FFmpeg（`avcodec/avformat/avutil/swresample/swscale`）、`glfw3.dll`、`cudart64_12.dll` 与 exe 同目录。
+CUDA/GL 的六路真实输入路径写在 `configs/windows_cudagl.conf`（`backend=cudagl`）。运行时需要 FFmpeg（`avcodec/avformat/avutil/swresample/swscale`）、`glfw3.dll`、`cudart64_12.dll` 与 exe 同目录。
 
 ## 实时 Metal 路径
 
