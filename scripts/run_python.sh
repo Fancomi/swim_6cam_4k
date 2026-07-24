@@ -8,6 +8,10 @@
 #   ./scripts/run_python.sh extract [SRC_FBX] [DST_JSON]
 #   ./scripts/run_python.sh bake SRC_FBX DST_FBX [--ext-px N]
 #   ./scripts/run_python.sh asset [INPUT_JSON] [OUTPUT_SWASSET]
+#   ./scripts/run_python.sh uw-extract          # all.fbx -> 16-plane mesh JSON
+#   ./scripts/run_python.sh uw-tex               # export per-camera first frames
+#   ./scripts/run_python.sh uw-render [BLEND_PX] # stitch (grid textures)
+#   ./scripts/run_python.sh uw-real [BLEND_PX]   # stitch (real first-frame images)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -28,6 +32,10 @@ Commands:
   extract    Extract pool FBX mesh JSON
   bake       Bake centre-line UV extension into a new FBX
   asset      Compile mesh JSON into GPU runtime .swasset
+  uw-extract Extract all.fbx into 16-plane underwater mesh JSON (--planes-only)
+  uw-tex     Export each camera's first frame as a stitch texture
+  uw-render  Stitch underwater planes with the baked grid textures [BLEND_PX]
+  uw-real    Stitch underwater planes with real first-frame images [BLEND_PX]
 
 Examples:
   ./scripts/run_python.sh still
@@ -37,6 +45,9 @@ Examples:
   ./scripts/run_python.sh keypoint
   ./scripts/run_python.sh extract
   ./scripts/run_python.sh asset
+  ./scripts/run_python.sh uw-extract
+  ./scripts/run_python.sh uw-tex
+  ./scripts/run_python.sh uw-real 120
 EOF
 }
 
@@ -116,6 +127,53 @@ cmd_asset() {
   echo "done -> $output_swasset"
 }
 
+# --- underwater N-plane stitch (isolated from the 6-camera pool pipeline) -----
+UW_MODELS="$ROOT/inputs/underwater/models"
+UW_OUT="$ROOT/outputs/underwater"
+# Grid stitching uses the dataset's annotation-grids (the canonical grid renders),
+# not the grids baked into all.fbm. Override with UW_GRID_DIR.
+UW_DATASET="${ANNOTATION_PREVIEW_DATASET_ROOT:-/Users/penghaotian/Downloads/DATAS/SWIMMING/swimming-xlj-middle-20260708}"
+UW_GRID_DIR="${UW_GRID_DIR:-$UW_DATASET/annotation-grids}"
+
+cmd_uw_extract() {
+  "$PY" -m python.underwater.extract \
+    "$UW_MODELS/all.fbx" "$UW_OUT/all_mesh.json" \
+    --tex-dir "$UW_MODELS/all.fbm" --planes-only "$@"
+}
+
+cmd_uw_tex() {
+  "$PY" -m python.underwater.export_real_tex "$@"
+}
+
+# Render one full-res stitch + fusion heatmap. $1 = blend-px (default 0).
+cmd_uw_render() {
+  local bp="${1:-0}"
+  [[ -d "$UW_GRID_DIR" ]] || {
+    echo "grid texture dir not found: $UW_GRID_DIR" >&2
+    echo "(set UW_GRID_DIR or ANNOTATION_PREVIEW_DATASET_ROOT)" >&2
+    exit 1
+  }
+  "$PY" -m python.underwater.render \
+    --data "$UW_OUT/all_mesh.json" \
+    --tex-dir "$UW_GRID_DIR" \
+    --still "$UW_OUT/all_stitch_bp${bp}.png" \
+    --grid-still "$UW_OUT/all_grid_bp${bp}.png" \
+    --heatmap "$UW_OUT/all_heat_bp${bp}.png" \
+    --full-res --blend-px "$bp"
+}
+
+cmd_uw_real() {
+  local bp="${1:-0}"
+  [[ -d "$UW_OUT/real_tex_all" ]] || cmd_uw_tex
+  "$PY" -m python.underwater.render \
+    --data "$UW_OUT/all_mesh.json" \
+    --tex-dir "$UW_OUT/real_tex_all" \
+    --still "$UW_OUT/all_real_stitch_bp${bp}.png" \
+    --grid-still "$UW_OUT/all_real_grid_bp${bp}.png" \
+    --heatmap "$UW_OUT/all_real_heat_bp${bp}.png" \
+    --full-res --blend-px "$bp"
+}
+
 if (($# == 0)); then
   usage >&2
   exit 2
@@ -130,6 +188,10 @@ case "$COMMAND" in
   extract) cmd_extract "$@" ;;
   bake) cmd_bake "$@" ;;
   asset|swasset) cmd_asset "$@" ;;
+  uw-extract) cmd_uw_extract "$@" ;;
+  uw-tex) cmd_uw_tex "$@" ;;
+  uw-render) cmd_uw_render "$@" ;;
+  uw-real) cmd_uw_real "$@" ;;
   --help|-h|help) usage ;;
   *)
     echo "unknown command: $COMMAND" >&2

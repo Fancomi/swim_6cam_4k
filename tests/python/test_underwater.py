@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 
-from python.underwater.extract import sort_meshes_by_world_x
+from python.underwater.extract import sort_meshes_by_world_x, select_pool_planes
 
 try:
     import fbx  # noqa: F401
@@ -40,6 +40,54 @@ class SortMeshesTest(unittest.TestCase):
         meshes = [empty, _mesh("left", -2.0)]
         ordered = sort_meshes_by_world_x(meshes)
         self.assertEqual([m["node"] for m in ordered], ["left", "empty"])
+
+
+def _band_plane(node, tex, x0, tris=64):
+    # a full-height pool plane: world-Y (pos[1]) inside the pool band, height 3
+    tri = [
+        {"pos": [x0, -11.28], "uv": [0.0, 0.0]},
+        {"pos": [x0 + 5.5, -11.28], "uv": [1.0, 0.0]},
+        {"pos": [x0, -8.28], "uv": [0.0, 1.0]},
+    ]
+    return {"node": node, "texture_basename": tex, "triangles": [tri] * tris}
+
+
+def _strip(node, tex, x0):
+    # a short lane-marker strip near world-Y 0 (height ~0.5), should be dropped
+    tri = [
+        {"pos": [x0, -0.24], "uv": [0.0, 0.0]},
+        {"pos": [x0 + 0.85, -0.24], "uv": [1.0, 0.0]},
+        {"pos": [x0, 0.24], "uv": [0.0, 1.0]},
+    ]
+    return {"node": node, "texture_basename": tex, "triangles": [tri]}
+
+
+class SelectPoolPlanesTest(unittest.TestCase):
+    def test_keeps_one_full_height_plane_per_texture(self):
+        meshes = [
+            _band_plane("planeA", "a.png", 0.0),
+            _strip("stripA", "a.png", 0.0),
+            _band_plane("planeB", "b.png", 5.0),
+            {"node": "frame", "texture_basename": None, "triangles": [
+                [{"pos": [0.0, 0.0], "uv": [0, 0]},
+                 {"pos": [1.0, 0.0], "uv": [1, 0]},
+                 {"pos": [0.0, 1.0], "uv": [0, 1]}]]},
+        ]
+        kept = select_pool_planes(meshes)
+        self.assertEqual(
+            sorted(m["node"] for m in kept), ["planeA", "planeB"])
+
+    def test_prefers_highest_tri_count_among_duplicates(self):
+        meshes = [
+            _band_plane("small", "a.png", 0.0, tris=10),
+            _band_plane("big", "a.png", 0.0, tris=200),
+        ]
+        kept = select_pool_planes(meshes)
+        self.assertEqual([m["node"] for m in kept], ["big"])
+
+    def test_drops_untextured_and_strips(self):
+        meshes = [_strip("s", "a.png", 0.0)]
+        self.assertEqual(select_pool_planes(meshes), [])
 
 
 class ExtractIntegrationTest(unittest.TestCase):
@@ -172,6 +220,25 @@ class RenderStillTest(unittest.TestCase):
 
         self.assertEqual(result.shape, (100, 250, 3))
         self.assertLess(int(result[..., 0].max()), 100)
+
+    def test_bottom_dirty_rows_counts_ragged_tail(self):
+        import numpy as np
+        from python.underwater.render import bottom_dirty_rows
+
+        # 10 rows: rows 0..6 fully covered (width 5), rows 7..9 ragged
+        cov = np.zeros((10, 5), np.uint8)
+        cov[:7] = 1
+        cov[7, :3] = 1
+        cov[8, :1] = 1
+        # row 9 all zero
+        self.assertEqual(bottom_dirty_rows(cov), 3)
+
+    def test_bottom_dirty_rows_zero_when_clean(self):
+        import numpy as np
+        from python.underwater.render import bottom_dirty_rows
+
+        cov = np.ones((8, 5), np.uint8)
+        self.assertEqual(bottom_dirty_rows(cov), 0)
 
     def test_full_res_crop_bottom_restores_source_height_and_scales_width(self):
         import json

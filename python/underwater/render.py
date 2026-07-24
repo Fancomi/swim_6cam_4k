@@ -76,6 +76,26 @@ def crop_bottom_and_scale(image, crop_px, target_height, interpolation=cv2.INTER
     return cv2.resize(cropped, (target_width, target_height), interpolation=interpolation)
 
 
+def bottom_dirty_rows(coverage):
+    """Count contiguous rows at the BOTTOM that contain an uncovered (black) pixel.
+
+    `coverage` is the union coverage mask (>0 where some layer painted the
+    pixel). The perspective floor of the shorter planes leaves ragged black
+    gaps along the bottom of the stitched canvas; a row is 'clean' only when it
+    is covered as widely as the fullest row (the constant `margin` padding means
+    even a fully-covered row keeps a few zero columns, so the reference is the
+    per-canvas maximum, not the full width). Returns the number of bottom rows
+    to drop so the result starts on the first fully-covered row from below."""
+    cov = (coverage > 0).sum(axis=1)
+    full = int(cov.max())
+    crop = 0
+    for r in range(coverage.shape[0] - 1, -1, -1):
+        if cov[r] >= full:
+            break
+        crop += 1
+    return crop
+
+
 def _horizontal_depth(mask):
     """Per-covered-pixel horizontal distance (px) to the nearest left/right end
     of its own covered run on that row. Peaks at each row's run centre, so the
@@ -201,18 +221,31 @@ def render_stills(data_path, tex_dir, still_path, grid_path,
     heat = (fusion_heatmap(raw_wts, out_h, out_w)
             if heatmap_path is not None else None)
 
-    if crop_bottom_px:
-        if not full_res:
+    # Trim ragged black rows at the bottom (perspective floor gaps of the shorter
+    # planes leave uncovered pixels there) BEFORE scaling to source height, so the
+    # rescale never stretches black. Only meaningful in --full-res (where we then
+    # rescale to source height); an explicit --crop-bottom-px overrides the auto count.
+    if full_res:
+        union = np.zeros((out_h, out_w), np.uint8)
+        for l in layers:
+            union |= l[2]
+        crop = crop_bottom_px if crop_bottom_px else bottom_dirty_rows(union)
+    else:
+        crop = 0
+        if crop_bottom_px:
             raise SystemExit("--crop-bottom-px requires --full-res")
+
+    if crop:
         target_height = max(t.shape[0] for t in texs)
-        comp = crop_bottom_and_scale(comp, crop_bottom_px, target_height)
+        comp = crop_bottom_and_scale(comp, crop, target_height)
         if grid is not None:
-            grid = crop_bottom_and_scale(grid, crop_bottom_px, target_height)
+            grid = crop_bottom_and_scale(grid, crop, target_height)
         if heat is not None:
             heat = crop_bottom_and_scale(
-                heat, crop_bottom_px, target_height, interpolation=cv2.INTER_NEAREST)
+                heat, crop, target_height, interpolation=cv2.INTER_NEAREST)
         out_h, out_w = comp.shape[:2]
-        print(f"cropped bottom {crop_bottom_px}px -> scaled to {out_w}x{out_h}")
+        how = "explicit" if crop_bottom_px else "auto"
+        print(f"cropped bottom {crop}px ({how}) -> scaled to {out_w}x{out_h}")
 
     if still_path is not None:
         still_path = Path(still_path)

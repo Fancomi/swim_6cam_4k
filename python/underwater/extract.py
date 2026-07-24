@@ -30,6 +30,36 @@ def sort_meshes_by_world_x(meshes):
     return sorted(meshes, key=_mesh_min_x)
 
 
+def _mesh_span(mesh, axis):
+    vs = [v["pos"][axis] for tri in mesh["triangles"] for v in tri]
+    return (min(vs), max(vs)) if vs else (float("inf"), float("-inf"))
+
+
+def select_pool_planes(meshes, band=(-11.6, -8.0), min_height=2.5):
+    """Keep exactly one full-height pool plane per texture.
+
+    A clean file (e.g. 1-5.fbx) has one plane per texture; all.fbx carries the
+    16 real planes plus clutter — untextured frames, and per texture a set of
+    lane-marker strips sitting near Y≈0 plus alternate copies. The real swimming
+    plane is the tall mesh (height > `min_height`) whose vertical (world-Y,
+    pos[1]) extent falls inside the pool `band`. Among candidates sharing a
+    texture, keep the one with the most triangles. Meshes without a texture are
+    dropped. Returns the survivors (input not mutated)."""
+    lo, hi = band
+    best = {}
+    for m in meshes:
+        tex = m["texture_basename"]
+        if not tex:
+            continue
+        y0, y1 = _mesh_span(m, 1)
+        if y0 < lo or y1 > hi or (y1 - y0) <= min_height:
+            continue
+        cur = best.get(tex)
+        if cur is None or len(m["triangles"]) > len(cur["triangles"]):
+            best[tex] = m
+    return list(best.values())
+
+
 def used_material_index(node):
     """Index of the material actually painted on this mesh's polygons.
 
@@ -73,7 +103,7 @@ def _mesh_nodes(node, out):
         _mesh_nodes(c, out)
 
 
-def extract_to_json(src, dst, tex_dir):
+def extract_to_json(src, dst, tex_dir, planes_only=False):
     src = Path(src)
     dst = Path(dst)
     tex_dir = Path(tex_dir)
@@ -101,6 +131,13 @@ def extract_to_json(src, dst, tex_dir):
 
     if not meshes:
         raise SystemExit(f"no mesh found in {src}")
+    if planes_only:
+        # all.fbx-style scenes carry clutter (untextured frames, lane-marker
+        # strips, duplicate plane copies) alongside the real swimming planes;
+        # keep one full-height plane per texture.
+        meshes = select_pool_planes(meshes)
+        if not meshes:
+            raise SystemExit(f"no pool plane found in {src}")
     meshes = sort_meshes_by_world_x(meshes)
 
     data = {"source": extract_fbx.display_path(src), "meshes": meshes}
@@ -120,8 +157,12 @@ def main(argv=None):
     ap.add_argument("dst", nargs="?", type=Path,
                     default=OUTPUTS_DIR / "underwater" / "01d_mesh.json")
     ap.add_argument("--tex-dir", type=Path, default=INPUTS_DIR / "underwater" / "models" / "01d.fbm")
+    ap.add_argument("--planes-only", action="store_true",
+                    help="keep only full-height pool planes (one per texture); "
+                         "use for all.fbx-style scenes that carry frames, "
+                         "lane-marker strips, and duplicate meshes")
     args = ap.parse_args(argv)
-    extract_to_json(args.src, args.dst, args.tex_dir)
+    extract_to_json(args.src, args.dst, args.tex_dir, planes_only=args.planes_only)
 
 
 if __name__ == "__main__":

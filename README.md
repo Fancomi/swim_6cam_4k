@@ -330,6 +330,16 @@ SWIMMING_DATASET_DIR="/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K" \
 
 网格按每块世界 X 最小值升序排列（左→右），不依赖 FBX 节点声明顺序，为 16 块扩展提供稳定顺序。
 
+**16 块真实数据（`all.fbx`）**：`inputs/underwater/models/all.fbx` 含全部 16 块平面，但同时夹带无纹理的支架框、泳道标记条与重复网格。加 `--planes-only` 只保留「每个纹理一块、位于泳池 Y 带内的全高平面」：
+
+```bash
+.venv/bin/python -m python.underwater.extract \
+  inputs/underwater/models/all.fbx \
+  outputs/underwater/all_mesh.json \
+  --tex-dir inputs/underwater/models/all.fbm \
+  --planes-only
+```
+
 渲染静态拼接图与网格诊断图（默认输出 `outputs/underwater/01d_stitch.png`、`01d_grid.png`）：
 
 ```bash
@@ -337,8 +347,19 @@ SWIMMING_DATASET_DIR="/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K" \
 ```
 
 - `--ppm` 默认按世界 X 跨度自适应到约 `--target-width`（默认 640）像素宽，避免对 640×360 源纹理无意义放大；可显式覆盖 `--ppm`。
+- `--full-res` 输出高度对齐源图高度、宽度等比缩放；缩放前会**自动砍掉最下方存在黑色（无纹理）像素的整行**（矮平面的透视地面缺口），再等比缩放，避免把黑边拉伸进画面。需要固定裁剪行数时用 `--crop-bottom-px N` 覆盖。
 - 默认按正立朝向合成；如需翻转 Y（世界 V）可加 `--neg-v`。
 - 重叠区由羽化权重平滑混合，无重叠处保持硬边（与 pool 中线接缝同机制）。
+
+**用原图（无网格标注）拼接**：`all.fbm` 里的 `underAi-grid.png` 是标注网格叠加图；每块的「原图像」是各相机的代表帧。`export_real_tex` 复用 `annotation_preview` 的代表帧选择，把干净原图按同一 basename 导出到 `outputs/underwater/real_tex_all/`，随后只需把 `--tex-dir` 指过去即可用真实影像拼接（网格与原图取的是同一帧，逐像素对齐）：
+
+```bash
+.venv/bin/python -m python.underwater.export_real_tex
+.venv/bin/python -m python.underwater.render \
+  --data outputs/underwater/all_mesh.json \
+  --tex-dir outputs/underwater/real_tex_all \
+  --still outputs/underwater/all_real_stitch_fullres.png --full-res
+```
 
 ## 已知限制
 
