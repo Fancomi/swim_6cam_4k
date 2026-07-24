@@ -304,10 +304,10 @@ TEST_CASE(applies_every_supported_cli_override) {
 TEST_CASE(loads_strict_benchmark_fingerprint_manifest) {
   auto config = AppConfig{};
   const std::array arguments{
-      "--benchmark-manifest=cpp/tests/fixtures/benchmark.manifest"sv};
+      "--benchmark-manifest=tests/fixtures/cpp/benchmark.manifest"sv};
   config = swim::core::apply_cli_overrides(std::move(config), arguments);
   CHECK_EQ(config.benchmark_manifest_path,
-           std::filesystem::path{"cpp/tests/fixtures/benchmark.manifest"});
+           std::filesystem::path{"tests/fixtures/cpp/benchmark.manifest"});
 
   const auto manifest = swim::core::load_benchmark_manifest(
       fixture("benchmark.manifest"));

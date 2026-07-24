@@ -11,12 +11,12 @@ elseif(CLI_CASE STREQUAL "missing_path")
   set(expected_error "error: --config requires PATH")
 elseif(CLI_CASE STREQUAL "repeated_config")
   set(arguments
-      --config cpp/tests/fixtures/cli.conf
-      --config cpp/tests/fixtures/cli.conf
+      --config tests/fixtures/cpp/cli.conf
+      --config tests/fixtures/cpp/cli.conf
       --validate-only)
   set(expected_error "error: duplicate command-line option '--config'")
 elseif(CLI_CASE STREQUAL "unknown_override")
-  set(arguments --config cpp/tests/fixtures/cli.conf --wat=true)
+  set(arguments --config tests/fixtures/cpp/cli.conf --wat=true)
   set(expected_error "error: unknown command-line option '--wat=true'")
 else()
   message(FATAL_ERROR "unknown CLI assertion case: ${CLI_CASE}")

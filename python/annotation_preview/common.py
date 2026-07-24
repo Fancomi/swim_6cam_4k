@@ -11,7 +11,10 @@ import re
 import numpy as np
 from PIL import Image, ImageFont
 
-DATASET = "/Users/penghaotian/Downloads/DATAS/SWIMMING/swimming-xlj-middle-20260708"
+DATASET = os.environ.get(
+    "ANNOTATION_PREVIEW_DATASET_ROOT",
+    "/Users/penghaotian/Downloads/DATAS/SWIMMING/swimming-xlj-middle-20260708",
+)
 SNAP_DIR = os.path.join(DATASET, "snapshots")
 OBJ_DIR = os.path.join(DATASET, "object-frames")
 PROJECT_JSON = os.path.join(OBJ_DIR, "dot_label_project.json")

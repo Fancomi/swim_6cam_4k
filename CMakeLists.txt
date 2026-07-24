@@ -60,21 +60,21 @@ add_dependencies(swim_realtime runtime_asset)
 
 enable_testing()
 add_executable(swim_core_tests
-  cpp/tests/test_main.cpp
-  cpp/tests/test_asset.cpp
-  cpp/tests/test_backend.cpp
-  cpp/tests/test_benchmark_reporter.cpp
-  cpp/tests/test_benchmark_stage.cpp
-  cpp/tests/test_camera_health.cpp
-  cpp/tests/test_config.cpp
-  cpp/tests/test_frame_mailbox.cpp
-  cpp/tests/test_render_coordinator.cpp
-  cpp/tests/test_run_lifecycle.cpp
-  cpp/tests/test_metrics.cpp)
+  tests/cpp/test_main.cpp
+  tests/cpp/test_asset.cpp
+  tests/cpp/test_backend.cpp
+  tests/cpp/test_benchmark_reporter.cpp
+  tests/cpp/test_benchmark_stage.cpp
+  tests/cpp/test_camera_health.cpp
+  tests/cpp/test_config.cpp
+  tests/cpp/test_frame_mailbox.cpp
+  tests/cpp/test_render_coordinator.cpp
+  tests/cpp/test_run_lifecycle.cpp
+  tests/cpp/test_metrics.cpp)
 target_link_libraries(swim_core_tests PRIVATE swim_core)
 target_compile_definitions(swim_core_tests PRIVATE
   SWIM_TEST_ASSET_PATH="${RUNTIME_ASSET}"
-  SWIM_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/cpp/tests/fixtures")
+  SWIM_TEST_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/cpp")
 swim_enable_warnings(swim_core_tests)
 swim_enable_sanitizers(swim_core_tests)
 add_dependencies(swim_core_tests runtime_asset)
@@ -82,7 +82,7 @@ add_test(NAME swim_core_tests COMMAND swim_core_tests)
 
 add_test(
   NAME swim_validate_cli
-  COMMAND swim_realtime --config cpp/tests/fixtures/cli.conf --validate-only)
+  COMMAND swim_realtime --config tests/fixtures/cpp/cli.conf --validate-only)
 set_tests_properties(swim_validate_cli PROPERTIES
   WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
   PASS_REGULAR_EXPRESSION
@@ -90,7 +90,7 @@ set_tests_properties(swim_validate_cli PROPERTIES
 
 add_test(
   NAME swim_validate_cli_dimensions
-  COMMAND swim_realtime --config cpp/tests/fixtures/cli.conf --validate-only)
+  COMMAND swim_realtime --config tests/fixtures/cpp/cli.conf --validate-only)
 set_tests_properties(swim_validate_cli_dimensions PROPERTIES
   WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
   PASS_REGULAR_EXPRESSION "dimensions=5001x2101 -> 5002x2102")
@@ -203,22 +203,22 @@ if(APPLE)
   target_compile_definitions(swim_realtime PRIVATE SWIM_HAS_METAL_BACKEND=1)
   target_link_libraries(swim_realtime PRIVATE swim_metal_backend)
 
-  add_executable(metal_golden_test cpp/tests/metal_golden_test.mm)
+  add_executable(metal_golden_test tests/cpp/metal_golden_test.mm)
   add_dependencies(metal_golden_test runtime_asset)
   target_compile_options(metal_golden_test PRIVATE -fobjc-arc)
   target_link_libraries(metal_golden_test PRIVATE swim_metal_renderer)
   swim_enable_warnings(metal_golden_test)
   swim_enable_sanitizers(metal_golden_test)
 
-  add_executable(metal_decode_probe cpp/tests/metal_decode_probe.mm)
+  add_executable(metal_decode_probe tests/cpp/metal_decode_probe.mm)
   target_compile_options(metal_decode_probe PRIVATE -fobjc-arc)
   target_link_libraries(metal_decode_probe PRIVATE swim_metal_decode)
   swim_enable_warnings(metal_decode_probe)
   swim_enable_sanitizers(metal_decode_probe)
 
   add_executable(metal_preview_test
-    cpp/tests/test_main.cpp
-    cpp/tests/metal_preview_test.mm)
+    tests/cpp/test_main.cpp
+    tests/cpp/metal_preview_test.mm)
   target_compile_options(metal_preview_test PRIVATE -fobjc-arc)
   target_link_libraries(metal_preview_test PRIVATE swim_metal_preview)
   swim_enable_warnings(metal_preview_test)
@@ -226,8 +226,8 @@ if(APPLE)
   add_test(NAME metal_preview_test COMMAND metal_preview_test)
 
   add_executable(metal_encoder_test
-    cpp/tests/test_main.cpp
-    cpp/tests/metal_encoder_test.mm)
+    tests/cpp/test_main.cpp
+    tests/cpp/metal_encoder_test.mm)
   target_compile_options(metal_encoder_test PRIVATE -fobjc-arc)
   target_link_libraries(metal_encoder_test PRIVATE swim_metal_backend)
   swim_enable_warnings(metal_encoder_test)

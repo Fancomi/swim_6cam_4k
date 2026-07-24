@@ -5,7 +5,8 @@ f14 为二者正中间帧，按 y 排序后逐点取均值。写回前备份工�
 """
 import json
 import shutil
-import common as C
+
+from python.annotation_preview import common as C
 
 
 def main():

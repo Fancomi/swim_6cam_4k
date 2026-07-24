@@ -11,7 +11,8 @@
 """
 import os
 from PIL import Image, ImageDraw
-import common as C
+
+from python.annotation_preview import common as C
 
 OUT_DIR = os.path.join(C.DATASET, "annotation-grids")
 COL = {"dot": (255, 212, 121), "mesh": (90, 200, 255),

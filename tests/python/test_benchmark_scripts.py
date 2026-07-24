@@ -37,7 +37,7 @@ class BenchmarkScriptsTest(unittest.TestCase):
             "import json, os, subprocess, sys\n"
             "from pathlib import Path\n"
             f"sys.path.insert(0, {str(ROOT)!r})\n"
-            "from python.tests.test_summarize_benchmarks import record_for\n"
+            "from tests.python.test_summarize_benchmarks import record_for\n"
             "args = sys.argv[1:]\n"
             "opts = {a.split('=', 1)[0]: a.split('=', 1)[1] for a in args if a.startswith('--') and '=' in a}\n"
             "manifest = {}\n"

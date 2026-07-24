@@ -9,9 +9,11 @@ import argparse
 import csv
 import os
 import shutil
-import common as C
 
-DET_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "detections.csv")
+from python.annotation_preview import common as C
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DET_CSV = os.path.join(PROJECT_ROOT, "outputs", "annotation_preview", "detections.csv")
 # 不筛选时的默认输出目录：与 object-frames 相邻
 ALL_DIR = os.path.join(C.DATASET, "object-frames-all")
 

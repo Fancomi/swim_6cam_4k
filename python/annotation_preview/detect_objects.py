@@ -9,9 +9,11 @@ import argparse
 import csv
 import os
 import numpy as np
-import common as C
 
-OUT_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "detections.csv")
+from python.annotation_preview import common as C
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+OUT_CSV = os.path.join(PROJECT_ROOT, "outputs", "annotation_preview", "detections.csv")
 DEFAULT_MULT = 1.28
 COLS = ["camera", "frame_index", "snapshot_id", "score_frac_gt40",
         "cam_median", "threshold", "is_object", "filename"]
@@ -44,6 +46,7 @@ def main():
               % (cam, len(r), r[0]["cam_median"], r[0]["threshold"],
                  sum(x["is_object"] for x in r)))
         rows.extend(r)
+    os.makedirs(os.path.dirname(OUT_CSV), exist_ok=True)
     with open(OUT_CSV, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=COLS)
         w.writeheader()

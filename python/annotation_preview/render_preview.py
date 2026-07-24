@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """Render 3 annotation-preview images for one representative snapshot.
 
-Read-only against the dataset; writes only into annotation-preview/.
+Read-only against the dataset; writes only into outputs/annotation_preview/.
 """
 import csv
 import os
 from PIL import Image, ImageDraw, ImageFont
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = os.path.join(ROOT, "annotation-preview")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DATASET_ROOT = os.environ.get(
+    "ANNOTATION_PREVIEW_DATASET_ROOT",
+    "/Users/penghaotian/Downloads/DATAS/SWIMMING/swimming-xlj-middle-20260708",
+)
+OUT = os.path.join(PROJECT_ROOT, "outputs", "annotation_preview")
 SNAP = "raw_1783480173576_15"
-SNAP_DIR = os.path.join(ROOT, "snapshots", SNAP)
-BBOX_CSV = os.path.join(ROOT, "analysis", "underwater-motion-bboxes.csv")
-PANO_CSV = os.path.join(ROOT, "analysis", "underwater-motion-bboxes-with-pano.csv")
+SNAP_DIR = os.path.join(DATASET_ROOT, "snapshots", SNAP)
+BBOX_CSV = os.path.join(DATASET_ROOT, "analysis", "underwater-motion-bboxes.csv")
+PANO_CSV = os.path.join(DATASET_ROOT, "analysis", "underwater-motion-bboxes-with-pano.csv")
 
 
 def load_font(size):
@@ -153,6 +157,7 @@ def render_pano():
     print("wrote", out, "pano_w", pano_w)
 
 
+os.makedirs(OUT, exist_ok=True)
 render_single()
 render_grid()
 render_pano()
