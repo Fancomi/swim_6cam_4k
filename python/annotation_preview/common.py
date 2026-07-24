@@ -11,6 +11,10 @@ import re
 import numpy as np
 from PIL import Image, ImageFont
 
+# 仓库根（.../swim_fbx_demo），用于派生所有生成产物的统一输出根。
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# 外部数据集根：通过环境变量或各 CLI 参数注入，不写死到某个项目内路径。
 DATASET = os.environ.get(
     "ANNOTATION_PREVIEW_DATASET_ROOT",
     "/Users/penghaotian/Downloads/DATAS/SWIMMING/swimming-xlj-middle-20260708",
@@ -18,6 +22,13 @@ DATASET = os.environ.get(
 SNAP_DIR = os.path.join(DATASET, "snapshots")
 OBJ_DIR = os.path.join(DATASET, "object-frames")
 PROJECT_JSON = os.path.join(OBJ_DIR, "dot_label_project.json")
+
+# annotation preview 全部生成产物（CSV / grid / preview / 导出帧）的统一输出根，
+# 默认落在仓库内被 .gitignore 忽略的 outputs/annotation_preview/，可用环境变量覆盖。
+OUTPUT_ROOT = os.environ.get(
+    "ANNOTATION_PREVIEW_OUTPUT_ROOT",
+    os.path.join(PROJECT_ROOT, "outputs", "annotation_preview"),
+)
 
 DIST_THRESH = 40                                    # 判定像素变化的 RGB 欧氏距离阈值
 N_ROWS = 9                                          # 每帧标注点数（一列 9 点）

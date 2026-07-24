@@ -12,8 +12,7 @@ import numpy as np
 
 from python.annotation_preview import common as C
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-OUT_CSV = os.path.join(PROJECT_ROOT, "outputs", "annotation_preview", "detections.csv")
+OUT_CSV = os.path.join(C.OUTPUT_ROOT, "detections.csv")
 DEFAULT_MULT = 1.28
 COLS = ["camera", "frame_index", "snapshot_id", "score_frac_gt40",
         "cam_median", "threshold", "is_object", "filename"]
@@ -38,6 +37,11 @@ def main():
     ap.add_argument("--mult", type=float, default=DEFAULT_MULT,
                     help="自适应阈值 = 相机分数中位数 × MULT（越低越灵敏，默认 %(default)s）")
     args = ap.parse_args()
+
+    if not os.path.isdir(C.SNAP_DIR):
+        raise SystemExit(
+            "缺少快照目录：%s（请通过 ANNOTATION_PREVIEW_DATASET_ROOT 指向有效数据集）"
+            % C.SNAP_DIR)
 
     rows = []
     for cam in C.CAMS_ASC:

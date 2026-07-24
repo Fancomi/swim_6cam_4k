@@ -12,10 +12,10 @@ import shutil
 
 from python.annotation_preview import common as C
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DET_CSV = os.path.join(PROJECT_ROOT, "outputs", "annotation_preview", "detections.csv")
-# 不筛选时的默认输出目录：与 object-frames 相邻
-ALL_DIR = os.path.join(C.DATASET, "object-frames-all")
+DET_CSV = os.path.join(C.OUTPUT_ROOT, "detections.csv")
+# 生成产物统一落在 outputs/annotation_preview 下（可用 --out-dir 覆盖）。
+OBJ_OUT_DIR = os.path.join(C.OUTPUT_ROOT, "object-frames")
+ALL_DIR = os.path.join(C.OUTPUT_ROOT, "object-frames-all")
 
 
 def export(rows, out_dir, keep_all):
@@ -46,10 +46,14 @@ def main():
     ap.add_argument("--all", action="store_true",
                     help="导出全部帧（不按 is_object 筛选），调试用")
     ap.add_argument("--out-dir", default=None,
-                    help="输出目录；默认筛选版 object-frames/，--all 时 object-frames-all/")
+                    help="输出目录；默认 outputs/annotation_preview/object-frames，"
+                         "--all 时 object-frames-all")
     args = ap.parse_args()
 
-    out_dir = args.out_dir or (ALL_DIR if args.all else C.OBJ_DIR)
+    out_dir = args.out_dir or (ALL_DIR if args.all else OBJ_OUT_DIR)
+    if not os.path.exists(DET_CSV):
+        raise SystemExit(
+            "缺少 detections.csv：%s（请先运行 detect_objects 生成）" % DET_CSV)
     rows = list(csv.DictReader(open(DET_CSV)))
     per_cam, missing, n = export(rows, out_dir, args.all)
 
