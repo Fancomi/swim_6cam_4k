@@ -22,7 +22,7 @@ configure_file(
 include(cmake/CompilerWarnings.cmake)
 include(cmake/Sanitizers.cmake)
 
-set(RUNTIME_ASSET ${CMAKE_SOURCE_DIR}/assets/generated/pool_4k.swasset)
+set(RUNTIME_ASSET ${CMAKE_SOURCE_DIR}/build/assets/generated/pool_4k.swasset)
 add_custom_command(
   OUTPUT ${RUNTIME_ASSET}
   COMMAND ${Python3_EXECUTABLE} -m python.assets.compile_runtime_asset

@@ -3,23 +3,15 @@
 .venv
 .worktrees/
 .superpowers/
-/build/
+.pytest_cache/
+build/
+outputs/
 
 # Python caches
 __pycache__/
 *.py[cod]
 
-# Large/generated render artifacts
-outputs/videos/*
-!outputs/videos/.gitkeep
-outputs/logs/*
-!outputs/logs/.gitkeep
-outputs/data/*.fbx
-outputs/keypoint_preview/
-
-# Compiled runtime assets are reproducible build outputs
-assets/generated/*.swasset
-
-# Benchmark runs are local machine evidence; keep only the directory anchor.
-benchmarks/*
-!benchmarks/.gitkeep
+# Controlled inputs that are local-only (heavy FBX assets, not the committed
+# pool fixture already tracked at inputs/pool/models/pool.fbx).
+inputs/underwater/models/
+inputs/pool/models/*.fbx

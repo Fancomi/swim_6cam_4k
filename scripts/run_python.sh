@@ -106,7 +106,7 @@ cmd_bake() {
 
 cmd_asset() {
   local input_json="${1:-$ROOT/outputs/data/pool_mesh.json}"
-  local output_swasset="${2:-$ROOT/assets/generated/pool_4k.swasset}"
+  local output_swasset="${2:-$ROOT/build/assets/generated/pool_4k.swasset}"
   shift $(( $# >= 2 ? 2 : $# )) || true
   mkdir -p "$(dirname "$output_swasset")"
   "$PY" -m python.assets.compile_runtime_asset \

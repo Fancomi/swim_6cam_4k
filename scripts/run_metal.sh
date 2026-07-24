@@ -29,7 +29,7 @@ demo options:
   --no-window        Offscreen Metal present sink (no AppKit window)
   --no-encode        Skip HEVC file write (encode-sink=null)
   --encode-path PATH HEVC output (default: outputs/videos/pool_metal.h265)
-  --metrics PATH     Metrics JSONL (default: benchmarks/manual.jsonl)
+  --metrics PATH     Metrics JSONL (default: outputs/benchmarks/manual.jsonl)
   --config PATH      Runtime config
   --build-dir PATH   Release CMake build directory
   --executable PATH  Use an already-built Release executable
@@ -43,7 +43,7 @@ benchmarks options:
   --config PATH      Runtime config
   --build-dir PATH   Release CMake build directory
   --executable PATH  Use an already-built Release executable
-  --output-dir PATH  Result directory (default: benchmarks/runs/RUN_ID)
+  --output-dir PATH  Result directory (default: outputs/benchmarks/runs/RUN_ID)
   --list-cells       Print the exact 48 cell identities without building or running
 
 soak options:
@@ -111,7 +111,7 @@ cmd_demo() {
   local window=true
   local encode=true
   local encode_path="$ROOT/outputs/videos/pool_metal.h265"
-  local metrics="$ROOT/benchmarks/manual.jsonl"
+  local metrics="$ROOT/outputs/benchmarks/manual.jsonl"
   local stage=full
   local stream_count=6
 
@@ -268,7 +268,7 @@ cmd_benchmarks() {
 
   local run_id="metal-$(date -u +%Y%m%dT%H%M%SZ)-$$"
   if [[ -z "$OUTPUT_DIR" ]]; then
-    OUTPUT_DIR="$ROOT/benchmarks/runs/$run_id"
+    OUTPUT_DIR="$ROOT/outputs/benchmarks/runs/$run_id"
   fi
   mkdir -p "$OUTPUT_DIR/cells" "$OUTPUT_DIR/logs"
   OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd -P)"
@@ -355,8 +355,8 @@ PY
   fi
   "$python" -m python.validation.summarize_benchmarks "${summary_args[@]}"
 
-  mkdir -p "$ROOT/benchmarks"
-  ln -sfn "$OUTPUT_DIR" "$ROOT/benchmarks/latest"
+  mkdir -p "$ROOT/outputs/benchmarks"
+  ln -sfn "$OUTPUT_DIR" "$ROOT/outputs/benchmarks/latest"
   echo "benchmark matrix complete: $OUTPUT_DIR"
 }
 
@@ -422,7 +422,7 @@ cmd_soak() {
   done
 
   local run_id="metal-soak-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-  [[ -n "$OUTPUT_DIR" ]] || OUTPUT_DIR="$ROOT/benchmarks/soaks/$run_id"
+  [[ -n "$OUTPUT_DIR" ]] || OUTPUT_DIR="$ROOT/outputs/benchmarks/soaks/$run_id"
   mkdir -p "$OUTPUT_DIR"
   OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd -P)"
   local manifest="$OUTPUT_DIR/runtime.manifest"

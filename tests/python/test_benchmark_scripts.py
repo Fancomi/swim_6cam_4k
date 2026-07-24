@@ -113,7 +113,7 @@ class BenchmarkScriptsTest(unittest.TestCase):
             self.assertEqual(manifest["git_sha"], expected_sha)
             self.assertEqual(manifest["build_type"], "Release")
             self.assertEqual(manifest["executable_sha256"], hashlib.sha256(executable.read_bytes()).hexdigest())
-            self.assertEqual((ROOT / "benchmarks" / "latest").resolve(), output.resolve())
+            self.assertEqual((ROOT / "outputs" / "benchmarks" / "latest").resolve(), output.resolve())
 
     def test_mismatched_external_executable_stops_after_preflight(self):
         with tempfile.TemporaryDirectory() as temporary:
