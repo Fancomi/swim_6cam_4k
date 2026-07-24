@@ -1,144 +1,169 @@
 # Swim FBX Demo 目录整理设计
 
-日期：2026-07-10
+日期：2026-07-24
+状态：已获用户批准，待实施
 
 ## 目标
 
-将当前根目录中混放的输入、代码、派生数据、图片、视频、日志和文档分开存放，同时修正 Python 导入和所有受影响的路径。整理不得删除或重新编码任何现有媒体产物。
+按职责整理仓库目录，明确源码、运行输入、构建产物、运行产物、测试和文档的边界。
 
-4K 原始数据集保留在项目外，默认位置固定为：
+本次整理遵循以下原则：
+
+1. 生成物不进入 Git。已经被 Git 跟踪的生成物只取消跟踪，保留本地文件，不删除、不重新编码、不改内容。
+2. 运行输入统一位于 `inputs/`；构建工具链和源码不属于输入。
+3. 运行结果统一位于 `outputs/`；可重建的构建缓存统一位于 `build/`。
+4. Python 工具按包职责归入 `python/`；不保留顶层 `annotation-preview/`、`assets/`、`benchmarks/` 等与源码职责冲突的目录。
+5. 路径迁移采用直接切换策略：全仓更新引用并删除旧路径，不保留兼容目录、软链接或双重入口。
+6. 不改变媒体、模型、纹理和日志内容；只移动、改路径或取消 Git 跟踪。
+
+项目外的 4K 原始视频数据集继续保留在：
 
 ```text
 /Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K
 ```
 
-该目录现有六路 `20260629_172532_camN.mp4` 视频及 manifest、validation、sync map 三个元数据文件。项目只读取这些文件，不移动或修改它们。
+项目只通过配置或环境变量读取该数据集，不移动或修改项目外文件。
 
 ## 目标目录
 
 ```text
 swim_fbx_demo/
 ├── README.md
-├── .venv/
-├── inputs/
-│   ├── models/
-│   │   └── pool.fbx
-│   └── textures/
-│       ├── camera_1_composite.png
-│       └── ...
-├── outputs/
+├── CMakeLists.txt
+├── cmake/                         # CMake 构建逻辑
+├── cpp/                           # C++ 生产源码
+├── python/                        # Python 生产包
+│   ├── assets/                    # FBX/资产处理代码，不是静态资产
+│   ├── annotation_preview/       # annotation preview Python 工具
+│   │   └── dot_labeler/           # annotation preview Web 工具
+│   ├── underwater/
+│   └── validation/
+├── scripts/                       # 用户可调用的运行脚本
+├── inputs/                        # 受控运行输入
+│   ├── configs/                   # 运行配置
+│   ├── pool/
+│   │   ├── models/
+│   │   └── textures/
+│   └── underwater/
+│       └── models/
+├── outputs/                       # 全部为运行结果，整体忽略
+│   ├── annotation_preview/
+│   ├── benchmarks/
 │   ├── data/
-│   │   └── pool_mesh.json
 │   ├── images/
-│   │   ├── pool.png
-│   │   ├── pool_grid.png
-│   │   └── pool_grid_preview.png
-│   ├── videos/
-│   │   ├── pool.mp4
-│   │   ├── pool_.mp4
-│   │   ├── pool_4k_full.mp4
-│   │   └── pool_4k_test10s.mp4
-│   └── logs/
-│       └── pool_4k_full.log
-├── src/
-│   ├── bake_uv.py
-│   ├── extract_fbx.py
-│   ├── fbx_common.py
-│   └── render_pool.py
-├── scripts/
-│   └── run_4k.sh
+│   ├── keypoint_preview/
+│   ├── logs/
+│   ├── underwater/
+│   └── videos/
+├── build/                         # 可重建构建目录，整体忽略
+│   └── assets/generated/
+├── tests/                         # 统一测试入口
+│   ├── cpp/
+│   ├── fixtures/
+│   └── python/
 └── docs/
     └── superpowers/specs/
 ```
 
-`.venv` 保留在项目根目录，不移动或重建。根目录 `README.md` 是项目入口文档，因此不放进 `docs/`。
+以下目录属于本机或工具状态，不纳入项目结构设计：`.git/`、`.venv/`、`.worktrees/`、`.claude/` 和 `.pytest_cache/`。它们保持忽略，不参与迁移。
 
-## 文件移动映射
+## 迁移映射
 
-| 当前路径 | 目标路径 |
-| --- | --- |
-| `FbxCommon.py` | `src/fbx_common.py` |
-| `bake_uv.py` | `src/bake_uv.py` |
-| `extract_fbx.py` | `src/extract_fbx.py` |
-| `render_pool.py` | `src/render_pool.py` |
-| `run.sh` | `scripts/run_4k.sh` |
-| `pool.fbx` | `inputs/models/pool.fbx` |
-| `textures/*.png` | `inputs/textures/*.png` |
-| `pool_mesh.json` | `outputs/data/pool_mesh.json` |
-| `pool.png`、`pool_grid.png`、`pool_grid_preview.png` | `outputs/images/` |
-| 根目录全部 `.mp4` | `outputs/videos/` |
-| `pool_4k_full.log` | `outputs/logs/pool_4k_full.log` |
+### 源码
 
-现有历史图片、视频和日志只移动，不删除、不改名、不改内容。macOS 生成的 `.DS_Store` 不属于项目资产，整理时删除。
+| 当前路径 | 目标路径 | 操作 |
+| --- | --- | --- |
+| `annotation-preview/*.py` | `python/annotation_preview/*.py` | `git mv` |
+| `annotation-preview/dot_labeler/` | `python/annotation_preview/dot_labeler/` | `git mv` |
+| `cpp/tests/*.cpp`、`cpp/tests/*.mm` | `tests/cpp/` | `git mv`，同步更新 CMake |
+| `cpp/tests/fixtures/` | `tests/fixtures/cpp/` | `git mv`，同步更新 CMake |
+| `python/tests/*.py` | `tests/python/` | `git mv`，同步更新测试命令与导入 |
+| `python/tests/fixtures/` | `tests/fixtures/python/` | `git mv`，同步更新测试引用 |
 
-## 代码和路径规则
+`python/assets/` 保持为 Python 代码包。它与静态输入资产无关，不移动到 `inputs/`。
 
-### Python 脚本
+### 运行输入
 
-- `FbxCommon.py` 重命名为 `fbx_common.py`，`bake_uv.py` 和 `extract_fbx.py` 同步改为 `import fbx_common`。
-- 脚本内定义项目根目录，例如由 `Path(__file__).resolve().parents[1]` 推导。
-- 未显式传参时，默认模型为 `inputs/models/pool.fbx`，默认纹理目录为 `inputs/textures`，默认网格数据为 `outputs/data/pool_mesh.json`。
-- `extract_fbx.py` 生成的 `source` 和 `texture` 元数据使用项目相对路径，不继续写入旧工程或本机的绝对路径；整理后重新生成 `pool_mesh.json`，三角形和 UV 数据保持同一来源。
-- 用户显式提供的相对路径仍相对于调用命令时的当前目录解析；绝对路径保持原样。
-- 写输出前创建所需父目录，避免因目标目录尚不存在而失败。
-- 保持现有 FBX、UV、映射、合成和编码算法不变。
+| 当前路径 | 目标路径 | 操作 |
+| --- | --- | --- |
+| `configs/macos_20260629.conf` | `inputs/configs/macos_20260629.conf` | `git mv`，清理绝对路径 |
+| `inputs/models/pool.fbx` | `inputs/pool/models/pool.fbx` | `git mv` |
+| `inputs/textures/*.png` | `inputs/pool/textures/*.png` | `git mv` |
+| `inputs/models/01d.fbx` 及 `.fbm/` | `inputs/underwater/models/` | 移动本地输入，按大文件策略忽略 |
+| `inputs/models/1-5.fbx` 及 `.fbm/` | `inputs/underwater/models/` | 移动本地输入，按大文件策略忽略 |
+| `inputs/models/1(2).fbx` 及 `.fbm/` | `inputs/underwater/models/` | 移动本地输入，按大文件策略忽略 |
+| `inputs/models/all.fbx` | `inputs/underwater/models/` | 移动本地输入，按大文件策略忽略 |
 
-### 4K 运行脚本
+大体积或用户本地输入保留在磁盘，但不因本次整理自动加入 Git。是否纳入版本控制由后续单独决定。
 
-- `scripts/run_4k.sh` 使用自身位置推导项目根目录，不依赖从哪个目录调用。
-- 默认数据集目录为 `/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K`。
-- 环境变量 `SWIMMING_DATASET_DIR` 可以覆盖默认数据集位置。
-- 默认会话名保持 `20260629_172532`，视频顺序保持 `cam3 cam2 cam1 cam4 cam5 cam6`，与网格顺序一致。
-- 缺省输出进入 `outputs/videos/pool_4k_test<秒数>s.mp4`；显式提供输出路径时使用该路径。
-- Python 解释器优先使用项目根目录 `.venv/bin/python`，不存在时回退到 `python3`。
+### 运行产物和构建产物
 
-## 数据流
+| 当前路径 | 目标路径 | 操作 |
+| --- | --- | --- |
+| `assets/generated/pool_4k.swasset` | `build/assets/generated/pool_4k.swasset` | 移动本地文件，取消跟踪并忽略 |
+| `benchmarks/manual.jsonl` | `outputs/benchmarks/manual.jsonl` | 移动本地文件，取消跟踪并忽略 |
+| `benchmarks/runs/` | `outputs/benchmarks/runs/` | 移动本地目录，取消跟踪并忽略 |
+| `annotation-preview/detections.csv` | `outputs/annotation_preview/detections.csv` | 移动本地文件，取消跟踪并忽略 |
+| `outputs/**` | `outputs/**` | 保留分类路径，取消所有生成文件的 Git 跟踪并整体忽略 |
+| `.superpowers/` 报告 | `.superpowers/` | 保留本地文件，取消已跟踪报告的 Git 跟踪并忽略 |
 
-1. `bake_uv.py` 读取 FBX 和合成纹理，将 UV 扩展写入用户指定的新 FBX。
-2. `extract_fbx.py` 读取 `inputs/models/pool.fbx`，默认生成 `outputs/data/pool_mesh.json`。
-3. `render_pool.py` 使用网格 JSON 与 `inputs/textures` 生成静态图片，或使用六路视频生成拼接视频。
-4. `run_4k.sh` 固化 4K 数据集、摄像机顺序、网格路径和默认输出路径，作为常用入口。
+`outputs/` 内现有的 JSON、图片、视频、日志、keypoint preview、水下渲染结果均属于生成物，不迁入 `inputs/` 或 `docs/`。
 
-`outputs/data/pool_mesh.json` 是派生数据：它既是 FBX 提取步骤的输出，也是渲染步骤的输入，因此按来源归入 `outputs/data`，渲染器通过明确路径消费它。
+## 引用更新
 
-## 错误处理
+迁移时必须全仓搜索并更新下列引用：
 
-- 在开始重计算前检查模型、JSON、纹理目录、六路视频和 `ffmpeg` 是否存在。
-- 纹理无法由 OpenCV 读取时，报告具体文件，而不是后续以空对象属性错误退出。
-- 视频数量与网格数量不一致、视频无法打开、FBX 无法加载时继续保留现有的非零退出行为，并使错误信息包含路径。
-- 不自动寻找或猜测其他数据集、会话或相机文件。
+- `CMakeLists.txt`、`cmake/` 中的 fixture、生成资产和测试路径；
+- `scripts/run_metal.sh`、`scripts/run_python.sh`；
+- `python/assets/`、`python/underwater/`、`python/validation/` 和 `python/annotation_preview/`；
+- C++、Python 测试及测试发现命令；
+- README、设计文档和运行说明；
+- `.gitignore`、构建脚本和配置文件。
 
-## README 范围
+配置文件中的本机绝对路径改为仓库相对路径、环境变量或明确的本地覆盖项。annotation preview 中依赖外部数据集的路径统一从配置或命令行参数进入，不再硬编码互相矛盾的项目内路径。
 
-根目录 `README.md` 使用中文说明：
+迁移完成后，全仓搜索不得留下旧目录路径：
 
-- 项目用途与处理链路；
-- 完整目录结构及各目录职责；
-- Python 3.10、Autodesk FBX Python SDK、NumPy、OpenCV 和 FFmpeg 依赖；
-- 使用现有 `.venv` 的方式；
-- UV 烘焙、FBX 提取、静态图、网格预览、4K 短片和全长视频命令；
-- 默认外部数据集位置及 `SWIMMING_DATASET_DIR` 覆盖示例；
-- 摄像机输入顺序和主要输出说明；
-- 已知限制：只按最低帧率抽帧，不负责校正采集起始时间。
+```text
+annotation-preview/
+assets/generated/
+benchmarks/
+configs/
+inputs/models/
+inputs/textures/
+cpp/tests/
+python/tests/
+```
 
-## 验证与验收
+## Git 和忽略策略
 
-实施完成后执行以下检查：
+新增或调整忽略规则，覆盖：
 
-1. 对照移动映射检查每个原文件都有且只有一个目标文件，并比对大文件字节数，确认没有删除或重新编码历史产物。
-2. 使用项目 `.venv` 对 `src/` 执行 Python 编译检查。
-3. 执行三个 Python 入口的 `--help` 或等价参数解析检查。
-4. 验证 `fbx_common`、`fbx`、`cv2` 和 `numpy` 可导入。
-5. 从项目根目录以外调用脚本，确认默认路径仍能正确解析。
-6. 用较低 `ppm` 生成临时静态图片，验证 JSON、纹理和合成链路。
-7. 使用外部 4K 数据集生成极短临时视频，验证六路视频顺序、OpenCV 读取和 FFmpeg 编码链路。
-8. 临时验证产物不并入历史输出；不重新渲染 10 分钟全长结果。
+```text
+build/
+outputs/
+.superpowers/
+.pytest_cache/
+inputs/pool/models/*.fbx
+inputs/underwater/models/
+```
 
-验收标准是：根目录只保留入口文档、环境目录以及 `inputs`、`outputs`、`src`、`scripts`、`docs` 五个项目目录；README 中的命令可按文档运行；所有原有媒体产物仍存在且字节数不变；默认路径不依赖调用者当前目录。
+受控的小型输入和源码继续跟踪；运行输出、构建缓存和本地大模型只保留在工作区。迁移提交不得包含 FBX、纹理伴随目录、图片、视频、JSON、CSV、日志或 `.swasset` 生成物。
 
-## 范围外事项
+## 验收标准
 
-- 不修改拼接算法、UV 参数、相机顺序或编码质量。
-- 不移动或修改外部 4K 数据集。
-- 不重建虚拟环境，不引入 Python 打包配置或新的命令行框架。
-- 不删除历史产物，不重新渲染完整视频。
+1. `git ls-files` 不再包含 `outputs/`、`assets/generated/`、`benchmarks/`、`.superpowers/` 下的生成文件。
+2. 本地产物仍存在，且 `git status --short` 不再显示这些产物。
+3. 顶层不再存在 `annotation-preview/`、`assets/`、`benchmarks/`；运行配置不再位于顶层 `configs/`。
+4. 全仓搜索不再出现旧路径引用，且不存在失效的相对路径。
+5. CMake configure、build 和 `ctest` 通过。
+6. Python 测试通过。
+7. `run_python`、`run_metal`、FBX 提取/渲染和 annotation preview 工具能够通过新路径运行；不可用的外部数据集场景至少能给出清晰错误。
+8. `git diff --check` 通过，迁移提交不包含不相关的用户本地产物。
+
+## 非目标
+
+- 不重新编码、压缩或清洗任何媒体和模型。
+- 不修改项目外 4K 视频数据集。
+- 不重构算法、渲染逻辑或 C++/Python API。
+- 不为旧路径保留软链接、包装脚本或兼容层。
