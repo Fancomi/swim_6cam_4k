@@ -116,10 +116,10 @@ def extract_to_json(src, dst, tex_dir):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Extract underwater FBX to mesh JSON")
-    ap.add_argument("src", nargs="?", type=Path, default=INPUTS_DIR / "models" / "01d.fbx")
+    ap.add_argument("src", nargs="?", type=Path, default=INPUTS_DIR / "underwater" / "models" / "01d.fbx")
     ap.add_argument("dst", nargs="?", type=Path,
                     default=OUTPUTS_DIR / "underwater" / "01d_mesh.json")
-    ap.add_argument("--tex-dir", type=Path, default=INPUTS_DIR / "models" / "01d.fbm")
+    ap.add_argument("--tex-dir", type=Path, default=INPUTS_DIR / "underwater" / "models" / "01d.fbm")
     args = ap.parse_args(argv)
     extract_to_json(args.src, args.dst, args.tex_dir)
 

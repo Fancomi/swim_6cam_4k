@@ -2,7 +2,7 @@ set(metrics_path "/tmp/swim_runtime_setup_failure.jsonl")
 file(REMOVE "${metrics_path}")
 execute_process(
   COMMAND "${SWIM_REALTIME}" --config
-          cpp/tests/fixtures/runtime_unknown_backend.conf
+          tests/fixtures/cpp/runtime_unknown_backend.conf
           "--metrics=${metrics_path}"
   WORKING_DIRECTORY "${REPOSITORY_ROOT}"
   RESULT_VARIABLE result

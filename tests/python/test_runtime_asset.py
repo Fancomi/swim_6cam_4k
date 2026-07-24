@@ -17,7 +17,7 @@ from python.assets.asset_format import (
 from python.assets.compile_runtime_asset import compile_asset
 
 
-FIXTURE = Path(__file__).parent / "fixtures" / "tiny_mesh.json"
+FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "python" / "tiny_mesh.json"
 
 
 class RuntimeAssetTest(unittest.TestCase):

@@ -10,8 +10,8 @@ except Exception:
     HAS_FBX = False
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-MODEL_01D = PROJECT_ROOT / "inputs" / "models" / "01d.fbx"
-TEXDIR_01D = PROJECT_ROOT / "inputs" / "models" / "01d.fbm"
+MODEL_01D = PROJECT_ROOT / "inputs" / "underwater" / "models" / "01d.fbx"
+TEXDIR_01D = PROJECT_ROOT / "inputs" / "underwater" / "models" / "01d.fbm"
 
 
 def _mesh(node, x0):

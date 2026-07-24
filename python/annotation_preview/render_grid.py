@@ -7,13 +7,15 @@
   横线：相邻帧的同序号点（行，按真实横向距离标注，单位米：自底向上，最下行为 0m）
 若某图内部存在缺失列（相邻已标注帧之间跳号），按帧号比例线性插值补出该列，
 并以区别色标出。所有文字/图元均画在图内，不改变画布尺寸。
-产物落在数据集根的 annotation-grids/（与 object-frames/ 同级）。
+产物落在 outputs/annotation_preview/annotation-grids/（统一输出根下）。
 """
+import argparse
 import os
 from PIL import Image, ImageDraw
-import common as C
 
-OUT_DIR = os.path.join(C.DATASET, "annotation-grids")
+from python.annotation_preview import common as C
+
+OUT_DIR = os.path.join(C.OUTPUT_ROOT, "annotation-grids")
 COL = {"dot": (255, 212, 121), "mesh": (90, 200, 255),
        "rep": (120, 240, 180), "txt": (255, 255, 255),
        "interp": (255, 170, 60), "stroke": (0, 0, 0)}
@@ -113,6 +115,11 @@ def render_camera(cam, frames, font_hdr, font_lbl):
 
 
 def main():
+    argparse.ArgumentParser(description=__doc__).parse_args()
+    if not os.path.exists(C.PROJECT_JSON):
+        raise SystemExit(
+            "缺少标注工程：%s（请通过 ANNOTATION_PREVIEW_DATASET_ROOT 指向有效数据集）"
+            % C.PROJECT_JSON)
     os.makedirs(OUT_DIR, exist_ok=True)
     groups = C.group_by_camera(C.load_project())
     font_hdr, font_lbl = C.load_font(15), C.load_font(12)

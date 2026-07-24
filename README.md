@@ -31,7 +31,7 @@
 ./scripts/run_metal.sh soak
 ```
 
-`demo` 默认 `--preview-visible=true`，会创建 AppKit/CAMetalLayer 窗口显示实时拼接画面，并把硬件 HEVC 写到 `outputs/videos/pool_metal.h265`，指标写到 `benchmarks/manual.jsonl`。`--no-window` 不是跳过 preview：它仍创建私有 Metal render target，对每个被接受的最新输出执行真实 shader copy/render command，并等待 GPU completion。benchmarks/soak 默认无窗口；需要窗口时加 `--visible`。
+`demo` 默认 `--preview-visible=true`，会创建 AppKit/CAMetalLayer 窗口显示实时拼接画面，并把硬件 HEVC 写到 `outputs/videos/pool_metal.h265`，指标写到 `outputs/benchmarks/manual.jsonl`。`--no-window` 不是跳过 preview：它仍创建私有 Metal render target，对每个被接受的最新输出执行真实 shader copy/render command，并等待 GPU completion。benchmarks/soak 默认无窗口；需要窗口时加 `--visible`。
 
 ## Release 性能矩阵
 
@@ -49,7 +49,7 @@
 ./scripts/run_metal.sh benchmarks --duration 15
 ```
 
-结果位于 `benchmarks/runs/<run_id>/`，成功后 `benchmarks/latest` 指向该目录：
+结果位于 `outputs/benchmarks/runs/<run_id>/`，成功后 `outputs/benchmarks/latest` 指向该目录：
 
 - `cells/*.jsonl`：带唯一 `(stage, stream_count, pacing)` 身份的原始 cell；
 - `results.jsonl`：48 个 cell 全部通过后才生成的合并记录；
@@ -60,7 +60,7 @@
 
 ```bash
 .venv/bin/python -m python.validation.summarize_benchmarks \
-  benchmarks/latest/results.jsonl
+  outputs/benchmarks/latest/results.jsonl
 ```
 
 默认十分钟的六路 paced full soak：
@@ -74,7 +74,7 @@ soak 按每条 interval 的真实 `elapsed_s` 累加时间轴，报告 RSS 与 M
 ## 处理流程
 
 1. `./scripts/run_python.sh bake ...` 可选地把中线 UV 延伸写入一个新的 FBX，原始模型不需要被覆盖。
-2. `./scripts/run_python.sh extract` 读取 `inputs/models/pool.fbx`，提取三角形、二维位置和 UV，默认写入 `outputs/data/pool_mesh.json`。
+2. `./scripts/run_python.sh extract` 读取 `inputs/pool/models/pool.fbx`，提取三角形、二维位置和 UV，默认写入 `outputs/data/pool_mesh.json`。
 3. `./scripts/run_python.sh still` / `4k` 使用网格 JSON 与纹理或六路视频生成静态拼接图或 H.264 视频。
 4. `./scripts/run_python.sh asset` 把网格 JSON 编译为 Metal 运行时 `.swasset`。
 5. `./scripts/run_python.sh keypoint` 生成 2D 关键点裁剪复核页。
@@ -196,27 +196,27 @@ Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统�
 
 ```bash
 .venv/bin/python -m python.assets.extract_fbx \
-  inputs/models/pool.fbx \
+  inputs/pool/models/pool.fbx \
   outputs/data/pool_mesh.json \
-  --tex-dir inputs/textures
+  --tex-dir inputs/pool/textures
 ```
 
 如需把中线 UV 延伸先烘焙到一个新模型，再提取该模型，可运行：
 
 ```bash
 .venv/bin/python -m python.assets.bake_uv \
-  inputs/models/pool.fbx \
+  inputs/pool/models/pool.fbx \
   outputs/data/pool_uv_baked.fbx \
   --ext-px 5 \
-  --tex-dir inputs/textures
+  --tex-dir inputs/pool/textures
 
 .venv/bin/python -m python.assets.extract_fbx \
   outputs/data/pool_uv_baked.fbx \
   outputs/data/pool_mesh.json \
-  --tex-dir inputs/textures
+  --tex-dir inputs/pool/textures
 ```
 
-第一条命令保留 `inputs/models/pool.fbx`，并在已有的 `outputs/data/` 目录创建新 FBX；第二条命令更新渲染器默认使用的网格 JSON。
+第一条命令保留 `inputs/pool/models/pool.fbx`，并在已有的 `outputs/data/` 目录创建新 FBX；第二条命令更新渲染器默认使用的网格 JSON。
 
 ## 生成静态图和网格预览
 
@@ -225,7 +225,7 @@ Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统�
 ```bash
 .venv/bin/python -m python.validation.reference_renderer \
   --data outputs/data/pool_mesh.json \
-  --tex-dir inputs/textures \
+  --tex-dir inputs/pool/textures \
   --still outputs/images/pool.png \
   --grid-still outputs/images/pool_grid.png
 ```
@@ -235,7 +235,7 @@ Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统�
 ```bash
 .venv/bin/python -m python.validation.reference_renderer \
   --data outputs/data/pool_mesh.json \
-  --tex-dir inputs/textures \
+  --tex-dir inputs/pool/textures \
   --ppm 28 \
   --grid-still outputs/images/pool_grid_preview.png
 ```
@@ -271,12 +271,12 @@ SWIMMING_DATASET_DIR="/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K" \
 
 | 位置 | 网格节点 | 合成纹理 | 4K 视频 |
 | ---: | --- | --- | --- |
-| 1 | `01` | `inputs/textures/camera_3_composite.png` | `20260629_172532_cam3.mp4` |
-| 2 | `02` | `inputs/textures/camera_2_composite.png` | `20260629_172532_cam2.mp4` |
-| 3 | `03` | `inputs/textures/camera_1_composite.png` | `20260629_172532_cam1.mp4` |
-| 4 | `u` | `inputs/textures/camera_4_composite.png` | `20260629_172532_cam4.mp4` |
-| 5 | `Plane004` | `inputs/textures/camera_5_composite.png` | `20260629_172532_cam5.mp4` |
-| 6 | `Plane007` | `inputs/textures/camera_6_composite.png` | `20260629_172532_cam6.mp4` |
+| 1 | `01` | `inputs/pool/textures/camera_3_composite.png` | `20260629_172532_cam3.mp4` |
+| 2 | `02` | `inputs/pool/textures/camera_2_composite.png` | `20260629_172532_cam2.mp4` |
+| 3 | `03` | `inputs/pool/textures/camera_1_composite.png` | `20260629_172532_cam1.mp4` |
+| 4 | `u` | `inputs/pool/textures/camera_4_composite.png` | `20260629_172532_cam4.mp4` |
+| 5 | `Plane004` | `inputs/pool/textures/camera_5_composite.png` | `20260629_172532_cam5.mp4` |
+| 6 | `Plane007` | `inputs/pool/textures/camera_6_composite.png` | `20260629_172532_cam6.mp4` |
 
 也就是固定相机顺序：`cam3 cam2 cam1 cam4 cam5 cam6`。`scripts/run_python.sh 4k` 已按此顺序组装参数；直接调用 `python -m python.validation.reference_renderer --videos` 时也必须保持相同顺序。
 
@@ -320,9 +320,9 @@ SWIMMING_DATASET_DIR="/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K" \
 
 ## 水下拼接（underwater stitch）
 
-`python/underwater/` 是一个**与六路 pool 流程任务隔离**的新任务，用 `inputs/models/01d.fbx` 验证「N 块平面水平依次连接」的拼接通路（当前 2 块，后续可扩展到 16 块）。它不复制算法，而是 import 复用 pool 的提取与渲染函数（`python.assets.extract_fbx`、`python.validation.reference_renderer`），产物独立写入 `outputs/underwater/`，不与 pool 交叉。
+`python/underwater/` 是一个**与六路 pool 流程任务隔离**的新任务，用 `inputs/underwater/models/01d.fbx` 验证「N 块平面水平依次连接」的拼接通路（当前 2 块，后续可扩展到 16 块）。它不复制算法，而是 import 复用 pool 的提取与渲染函数（`python.assets.extract_fbx`、`python.validation.reference_renderer`），产物独立写入 `outputs/underwater/`，不与 pool 交叉。
 
-提取 FBX 网格为 JSON（默认 `inputs/models/01d.fbx` + 纹理目录 `inputs/models/01d.fbm`，输出 `outputs/underwater/01d_mesh.json`）：
+提取 FBX 网格为 JSON（默认 `inputs/underwater/models/01d.fbx` + 纹理目录 `inputs/underwater/models/01d.fbm`，输出 `outputs/underwater/01d_mesh.json`）：
 
 ```bash
 .venv/bin/python -m python.underwater.extract

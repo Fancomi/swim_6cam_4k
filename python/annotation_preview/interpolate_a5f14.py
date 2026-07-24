@@ -4,11 +4,17 @@
 f14 为二者正中间帧，按 y 排序后逐点取均值。写回前备份工程。
 """
 import json
+import os
 import shutil
-import common as C
+
+from python.annotation_preview import common as C
 
 
 def main():
+    if not os.path.exists(C.PROJECT_JSON):
+        raise SystemExit(
+            "缺少标注工程：%s（请通过 ANNOTATION_PREVIEW_DATASET_ROOT 指向有效数据集）"
+            % C.PROJECT_JSON)
     doc = C.load_project()
     groups = C.group_by_camera(doc)
     cols = {fi: sorted(pts, key=lambda q: q["y"]) for fi, _r, pts in groups["underA5"]}

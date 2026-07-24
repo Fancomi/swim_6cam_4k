@@ -45,7 +45,7 @@ cmd_still() {
   mkdir -p "$(dirname "$still")"
   "$PY" -m python.validation.reference_renderer \
     --data "$ROOT/outputs/data/pool_mesh.json" \
-    --tex-dir "$ROOT/inputs/textures" \
+    --tex-dir "$ROOT/inputs/pool/textures" \
     --still "$still"
   echo "done -> $still"
 }
@@ -106,7 +106,7 @@ cmd_bake() {
 
 cmd_asset() {
   local input_json="${1:-$ROOT/outputs/data/pool_mesh.json}"
-  local output_swasset="${2:-$ROOT/assets/generated/pool_4k.swasset}"
+  local output_swasset="${2:-$ROOT/build/assets/generated/pool_4k.swasset}"
   shift $(( $# >= 2 ? 2 : $# )) || true
   mkdir -p "$(dirname "$output_swasset")"
   "$PY" -m python.assets.compile_runtime_asset \

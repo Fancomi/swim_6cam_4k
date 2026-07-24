@@ -9,9 +9,10 @@ import argparse
 import csv
 import os
 import numpy as np
-import common as C
 
-OUT_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "detections.csv")
+from python.annotation_preview import common as C
+
+OUT_CSV = os.path.join(C.OUTPUT_ROOT, "detections.csv")
 DEFAULT_MULT = 1.28
 COLS = ["camera", "frame_index", "snapshot_id", "score_frac_gt40",
         "cam_median", "threshold", "is_object", "filename"]
@@ -37,6 +38,11 @@ def main():
                     help="自适应阈值 = 相机分数中位数 × MULT（越低越灵敏，默认 %(default)s）")
     args = ap.parse_args()
 
+    if not os.path.isdir(C.SNAP_DIR):
+        raise SystemExit(
+            "缺少快照目录：%s（请通过 ANNOTATION_PREVIEW_DATASET_ROOT 指向有效数据集）"
+            % C.SNAP_DIR)
+
     rows = []
     for cam in C.CAMS_ASC:
         r = analyze(cam, args.mult)
@@ -44,6 +50,7 @@ def main():
               % (cam, len(r), r[0]["cam_median"], r[0]["threshold"],
                  sum(x["is_object"] for x in r)))
         rows.extend(r)
+    os.makedirs(os.path.dirname(OUT_CSV), exist_ok=True)
     with open(OUT_CSV, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=COLS)
         w.writeheader()
