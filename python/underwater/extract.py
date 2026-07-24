@@ -1,12 +1,16 @@
-"""Extract 01d-style FBX into pool-compatible mesh JSON, ordered left-to-right.
+"""Extract underwater FBX into pool-compatible mesh JSON, ordered left-to-right.
 
 Reuses python.assets.extract_fbx for all FBX/UV/geometry logic; this module only
-adds underwater-specific defaults, left-to-right ordering, and an isolated CLI.
+adds underwater-specific defaults, left-to-right ordering, correct texture
+selection for multi-material meshes, and an isolated CLI.
 """
 import argparse
 import json
+import os
+from collections import Counter
 from pathlib import Path
 
+import fbx
 from python.assets import extract_fbx, fbx_common
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -26,6 +30,49 @@ def sort_meshes_by_world_x(meshes):
     return sorted(meshes, key=_mesh_min_x)
 
 
+def used_material_index(node):
+    """Index of the material actually painted on this mesh's polygons.
+
+    extract_fbx always reads material 0, which is wrong when a newer modelling
+    strategy attaches many materials and selects one per polygon (eByPolygon).
+    For eAllSame (or no material element) the answer is 0, matching extract_fbx."""
+    mesh = node.GetMesh()
+    elem = mesh.GetElementMaterial() if mesh else None
+    if elem is None:
+        return 0
+    if elem.GetMappingMode() == fbx.FbxLayerElement.EMappingMode.eByPolygon:
+        ia = elem.GetIndexArray()
+        if ia.GetCount() == 0:
+            return 0
+        return Counter(ia.GetAt(k) for k in range(ia.GetCount())).most_common(1)[0][0]
+    return 0
+
+
+def texture_for_material(node, idx, tex_dir):
+    """(uvset, basename, display_path) of the diffuse FileTexture on material idx."""
+    if idx >= node.GetMaterialCount():
+        return None, None, None
+    prop = node.GetMaterial(idx).FindProperty(fbx.FbxSurfaceMaterial.sDiffuse)
+    if not prop.IsValid():
+        return None, None, None
+    crit = fbx.FbxCriteria.ObjectType(fbx.FbxFileTexture.ClassId)
+    if prop.GetSrcObjectCount(crit) == 0:
+        return None, None, None
+    tex = prop.GetSrcObject(crit, 0)
+    basename = os.path.basename(str(tex.GetFileName()))
+    return str(tex.UVSet.Get()), basename, extract_fbx.display_path(Path(tex_dir) / basename)
+
+
+def _mesh_nodes(node, out):
+    """Collect mesh-attribute nodes depth-first (nodes, not extracted dicts)."""
+    for i in range(node.GetChildCount()):
+        c = node.GetChild(i)
+        attr = c.GetNodeAttribute()
+        if attr and attr.GetAttributeType() == fbx.FbxNodeAttribute.EType.eMesh:
+            out.append(c)
+        _mesh_nodes(c, out)
+
+
 def extract_to_json(src, dst, tex_dir):
     src = Path(src)
     dst = Path(dst)
@@ -38,8 +85,18 @@ def extract_to_json(src, dst, tex_dir):
     mgr, scene = fbx_common.InitializeSdkObjects()
     if not fbx_common.LoadScene(mgr, scene, str(src)):
         raise SystemExit(f"FAILED to load {src}")
+    nodes = []
+    _mesh_nodes(scene.GetRootNode(), nodes)
     meshes = []
-    extract_fbx.walk(scene.GetRootNode(), meshes, tex_dir)
+    for node in nodes:
+        m = extract_fbx.extract_mesh(node, tex_dir)
+        # correct texture selection for multi-material (eByPolygon) meshes
+        idx = used_material_index(node)
+        if idx != 0:
+            uvset, basename, disp = texture_for_material(node, idx, tex_dir)
+            if basename is not None:
+                m["uvset"], m["texture_basename"], m["texture"] = uvset, basename, disp
+        meshes.append(m)
     mgr.Destroy()
 
     if not meshes:

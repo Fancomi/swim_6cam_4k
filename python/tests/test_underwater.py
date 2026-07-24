@@ -160,6 +160,57 @@ class RenderStillTest(unittest.TestCase):
             img = cv2.imread(str(still))
             self.assertGreater(int(img.max()), 0)
 
+    def test_crop_bottom_row_rescales_to_source_height(self):
+        import numpy as np
+        from python.underwater.render import crop_bottom_and_scale
+
+        image = np.zeros((100, 200, 3), np.uint8)
+        image[:80] = (10, 20, 30)
+        image[80:] = (200, 210, 220)
+
+        result = crop_bottom_and_scale(image, crop_px=20, target_height=100)
+
+        self.assertEqual(result.shape, (100, 250, 3))
+        self.assertLess(int(result[..., 0].max()), 100)
+
+    def test_full_res_crop_bottom_restores_source_height_and_scales_width(self):
+        import json
+        import tempfile
+        import cv2
+        import numpy as np
+        from python.underwater.render import render_stills
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            tri_a = [
+                {"pos": [0.0, 0.0], "uv": [0.0, 0.0]},
+                {"pos": [1.0, 0.0], "uv": [1.0, 0.0]},
+                {"pos": [1.0, 1.0], "uv": [1.0, 1.0]},
+            ]
+            tri_b = [
+                {"pos": [0.0, 0.0], "uv": [0.0, 0.0]},
+                {"pos": [1.0, 1.0], "uv": [1.0, 1.0]},
+                {"pos": [0.0, 1.0], "uv": [0.0, 1.0]},
+            ]
+            data = {"source": "x", "meshes": [
+                {"node": "p", "texture_basename": "t.png", "uvset": "map1",
+                 "const_axis": 2, "kept_axes": [0, 1], "spans": [1, 1, 0],
+                 "triangles": [tri_a, tri_b]},
+            ]}
+            data_path = td / "mesh.json"
+            data_path.write_text(json.dumps(data))
+            cv2.imwrite(str(td / "t.png"), np.full((16, 32, 3), 200, np.uint8))
+            still = td / "out.png"
+
+            out_w, out_h = render_stills(
+                data_path, td, still, None, full_res=True,
+                margin=0, crop_bottom_px=4,
+            )
+
+            img = cv2.imread(str(still))
+            self.assertEqual((out_w, out_h), (21, 16))
+            self.assertEqual(img.shape[:2], (16, 21))
+
     def test_render_rejects_json_without_meshes(self):
         import json
         import tempfile
