@@ -31,7 +31,7 @@
 ./scripts/run_metal.sh soak
 ```
 
-`demo` 默认 `--preview-visible=true`，会创建 AppKit/CAMetalLayer 窗口显示实时拼接画面，并把硬件 HEVC 写到 `outputs/videos/pool_metal.h265`，指标写到 `benchmarks/manual.jsonl`。`--no-window` 不是跳过 preview：它仍创建私有 Metal render target，对每个被接受的最新输出执行真实 shader copy/render command，并等待 GPU completion。benchmarks/soak 默认无窗口；需要窗口时加 `--visible`。
+`demo` 默认 `--preview-visible=true`，会创建 AppKit/CAMetalLayer 窗口显示实时拼接画面，并把硬件 HEVC 写到 `outputs/videos/pool_metal.h265`，指标写到 `outputs/benchmarks/manual.jsonl`。`--no-window` 不是跳过 preview：它仍创建私有 Metal render target，对每个被接受的最新输出执行真实 shader copy/render command，并等待 GPU completion。benchmarks/soak 默认无窗口；需要窗口时加 `--visible`。
 
 ## Release 性能矩阵
 
@@ -49,7 +49,7 @@
 ./scripts/run_metal.sh benchmarks --duration 15
 ```
 
-结果位于 `benchmarks/runs/<run_id>/`，成功后 `benchmarks/latest` 指向该目录：
+结果位于 `outputs/benchmarks/runs/<run_id>/`，成功后 `outputs/benchmarks/latest` 指向该目录：
 
 - `cells/*.jsonl`：带唯一 `(stage, stream_count, pacing)` 身份的原始 cell；
 - `results.jsonl`：48 个 cell 全部通过后才生成的合并记录；
@@ -60,7 +60,7 @@
 
 ```bash
 .venv/bin/python -m python.validation.summarize_benchmarks \
-  benchmarks/latest/results.jsonl
+  outputs/benchmarks/latest/results.jsonl
 ```
 
 默认十分钟的六路 paced full soak：
