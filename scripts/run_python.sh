@@ -45,7 +45,7 @@ cmd_still() {
   mkdir -p "$(dirname "$still")"
   "$PY" -m python.validation.reference_renderer \
     --data "$ROOT/outputs/data/pool_mesh.json" \
-    --tex-dir "$ROOT/inputs/textures" \
+    --tex-dir "$ROOT/inputs/pool/textures" \
     --still "$still"
   echo "done -> $still"
 }

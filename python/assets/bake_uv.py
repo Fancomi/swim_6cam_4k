@@ -130,7 +130,7 @@ def main():
     ap.add_argument("src", type=Path)
     ap.add_argument("dst", type=Path)
     ap.add_argument("--ext-px", type=float, default=5.0)
-    ap.add_argument("--tex-dir", type=Path, default=INPUTS_DIR / "textures")
+    ap.add_argument("--tex-dir", type=Path, default=INPUTS_DIR / "pool" / "textures")
     args = ap.parse_args()
 
     src = args.src

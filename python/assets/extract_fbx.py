@@ -172,8 +172,8 @@ def main(src, dst, tex_dir):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("src", nargs="?", type=Path, default=INPUTS_DIR / "models" / "pool.fbx")
+    ap.add_argument("src", nargs="?", type=Path, default=INPUTS_DIR / "pool" / "models" / "pool.fbx")
     ap.add_argument("dst", nargs="?", type=Path, default=OUTPUTS_DIR / "data" / "pool_mesh.json")
-    ap.add_argument("--tex-dir", type=Path, default=INPUTS_DIR / "textures")
+    ap.add_argument("--tex-dir", type=Path, default=INPUTS_DIR / "pool" / "textures")
     args = ap.parse_args()
     main(args.src, args.dst, args.tex_dir)

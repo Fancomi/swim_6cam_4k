@@ -236,7 +236,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Render underwater stitch still + grid")
     ap.add_argument("--data", type=Path,
                     default=OUTPUTS_DIR / "underwater" / "01d_mesh.json")
-    ap.add_argument("--tex-dir", type=Path, default=INPUTS_DIR / "models" / "01d.fbm")
+    ap.add_argument("--tex-dir", type=Path, default=INPUTS_DIR / "underwater" / "models" / "01d.fbm")
     ap.add_argument("--still", type=Path,
                     default=OUTPUTS_DIR / "underwater" / "01d_stitch.png")
     ap.add_argument("--grid-still", type=Path,
