@@ -7,11 +7,106 @@
 
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace {
+
+// RAII guard that restores (or unsets) a process environment variable so
+// tests cannot leak state into one another.
+class EnvVarGuard {
+ public:
+  explicit EnvVarGuard(std::string name) : name_(std::move(name)) {
+    const auto* const previous = std::getenv(name_.c_str());
+    if (previous != nullptr) {
+      had_previous_ = true;
+      previous_value_ = previous;
+    }
+  }
+
+  EnvVarGuard(std::string name, std::string_view value)
+      : EnvVarGuard(std::move(name)) {
+    set(value);
+  }
+
+  EnvVarGuard(const EnvVarGuard&) = delete;
+  EnvVarGuard& operator=(const EnvVarGuard&) = delete;
+
+  void set(std::string_view value) {
+    setenv(name_.c_str(), std::string(value).c_str(), 1);
+  }
+
+  void unset() { unsetenv(name_.c_str()); }
+
+  ~EnvVarGuard() {
+    if (had_previous_) {
+      setenv(name_.c_str(), previous_value_.c_str(), 1);
+    } else {
+      unsetenv(name_.c_str());
+    }
+  }
+
+ private:
+  std::string name_;
+  bool had_previous_{false};
+  std::string previous_value_;
+};
+
+class TempConfigFile {
+ public:
+  explicit TempConfigFile(std::string_view contents) {
+    path_ = std::filesystem::temp_directory_path() /
+            "swim_config_env_expansion_test.conf";
+    std::ofstream output(path_, std::ios::trunc);
+    output << contents;
+  }
+
+  TempConfigFile(const TempConfigFile&) = delete;
+  TempConfigFile& operator=(const TempConfigFile&) = delete;
+
+  ~TempConfigFile() { std::filesystem::remove(path_); }
+
+  const std::filesystem::path& path() const { return path_; }
+
+ private:
+  std::filesystem::path path_;
+};
+
+std::string valid_config_with_cam3(std::string_view cam3_path) {
+  std::string config{
+      "backend=metal\n"
+      "mode=realtime\n"
+      "stage=full\n"
+      "asset=assets/test.swasset\n"
+      "source.cam3="};
+  config.append(cam3_path);
+  config.append(
+      "\n"
+      "source.cam2=inputs/cam2.mp4\n"
+      "source.cam1=inputs/cam1.mp4\n"
+      "source.cam4=inputs/cam4.mp4\n"
+      "source.cam5=inputs/cam5.mp4\n"
+      "source.cam6=inputs/cam6.mp4\n"
+      "fps_num=30000\n"
+      "fps_den=1001\n"
+      "preview=true\n"
+      "encode=false\n"
+      "diagnostic_replacement=false\n"
+      "encode_path=outputs/test-output.h265\n"
+      "stale_ms=100\n"
+      "replace_ms=1000\n"
+      "decode_surface_pool=8\n"
+      "decode_ticket_pool=16\n"
+      "render_inflight=3\n"
+      "output_pool=4\n"
+      "duration_seconds=10\n"
+      "metrics=outputs/test.jsonl\n");
+  return config;
+}
 
 using namespace std::chrono_literals;
 using namespace std::string_view_literals;
@@ -126,6 +221,31 @@ TEST_CASE(loads_exact_camera_order_and_all_config_values) {
   CHECK(!config.validate_only);
   CHECK_EQ(config.stream_count, 6u);
   CHECK_EQ(config.encode_sink, EncodeSink::file);
+}
+
+TEST_CASE(expands_environment_variable_in_path_valued_config_keys) {
+  const auto temp_dir = std::filesystem::temp_directory_path() /
+                        "swim_config_env_expansion_dataset";
+  EnvVarGuard dataset_guard("SWIMMING_DATASET_DIR", temp_dir.string());
+
+  TempConfigFile config_file(
+      valid_config_with_cam3("${SWIMMING_DATASET_DIR}/cam3.mp4"));
+
+  const auto config = swim::core::load_config(config_file.path());
+  CHECK_EQ(config.sources[0].path, temp_dir / "cam3.mp4");
+}
+
+TEST_CASE(rejects_config_path_referencing_missing_environment_variable) {
+  EnvVarGuard missing_guard("MISSING_DATASET_DIR");
+  missing_guard.unset();
+
+  TempConfigFile config_file(
+      valid_config_with_cam3("${MISSING_DATASET_DIR}/cam3.mp4"));
+
+  CHECK_THROWS_WITH(
+      swim::core::load_config(config_file.path()),
+      config_file.path().string() +
+          ":5: environment variable 'MISSING_DATASET_DIR' is not set");
 }
 
 TEST_CASE(rejects_duplicate_config_key_at_the_second_occurrence) {

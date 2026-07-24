@@ -2,6 +2,7 @@
 
 #include <array>
 #include <charconv>
+#include <cstdlib>
 #include <fstream>
 #include <stdexcept>
 #include <string>
@@ -175,6 +176,48 @@ std::filesystem::path parse_cli_path(std::string_view value,
   return std::filesystem::path{value};
 }
 
+// Expands `${NAME}` tokens in a path-valued config entry using the process
+// environment. Reports errors with the config file path and line number so
+// they read the same as other config parse errors.
+std::string expand_environment_variables(const std::filesystem::path& path,
+                                          std::size_t line,
+                                          std::string_view value) {
+  std::string expanded;
+  expanded.reserve(value.size());
+  std::size_t index = 0;
+  while (index < value.size()) {
+    const auto dollar = value.find("${", index);
+    if (dollar == std::string_view::npos) {
+      expanded.append(value.substr(index));
+      break;
+    }
+    expanded.append(value.substr(index, dollar - index));
+    const auto close = value.find('}', dollar + 2);
+    if (close == std::string_view::npos) {
+      config_error(path, line, "unterminated '${' in value");
+    }
+    const auto name = value.substr(dollar + 2, close - (dollar + 2));
+    if (name.empty()) {
+      config_error(path, line, "empty variable name in '${}'");
+    }
+    const auto name_string = std::string(name);
+    const auto* const resolved = std::getenv(name_string.c_str());
+    if (resolved == nullptr) {
+      config_error(path, line,
+                   "environment variable '" + name_string + "' is not set");
+    }
+    expanded.append(resolved);
+    index = close + 1;
+  }
+  return expanded;
+}
+
+std::filesystem::path parse_config_path(const std::filesystem::path& path,
+                                        std::size_t line,
+                                        std::string_view value) {
+  return std::filesystem::path{expand_environment_variables(path, line, value)};
+}
+
 }  // namespace
 
 AppConfig load_config(const std::filesystem::path& path) {
@@ -211,7 +254,8 @@ AppConfig load_config(const std::filesystem::path& path) {
 
     const auto camera_index = source_index(key);
     if (camera_index < kCameraIds.size()) {
-      config.sources[camera_index].path = std::filesystem::path{value};
+      config.sources[camera_index].path =
+          parse_config_path(path, line_number, value);
       seen_sources[camera_index] = true;
     } else if (key == "backend") {
       config.backend = value;
@@ -221,7 +265,7 @@ AppConfig load_config(const std::filesystem::path& path) {
       config.stage =
           parse_config_enum(path, line_number, key, value, parse_stage);
     } else if (key == "asset") {
-      config.asset_path = std::filesystem::path{value};
+      config.asset_path = parse_config_path(path, line_number, value);
     } else if (key == "fps_num") {
       config.fps_num = parse_config_unsigned(path, line_number, key, value);
     } else if (key == "fps_den") {
@@ -234,7 +278,7 @@ AppConfig load_config(const std::filesystem::path& path) {
       config.diagnostic_replacement =
           parse_config_boolean(path, line_number, key, value);
     } else if (key == "encode_path") {
-      config.encode_path = std::filesystem::path{value};
+      config.encode_path = parse_config_path(path, line_number, value);
     } else if (key == "stale_ms") {
       config.stale_after = std::chrono::milliseconds{
           parse_config_unsigned(path, line_number, key, value)};
