@@ -113,7 +113,8 @@
   git mv cpp/tests/fixtures tests/fixtures/cpp
   git mv python/tests/*.py tests/python/
   git mv python/tests/fixtures tests/fixtures/python
-  rmdir annotation-preview cpp/tests python/tests
+  rmdir cpp/tests python/tests
+  # Keep annotation-preview until Task 4 moves its generated detections.csv.
   ```
 
   Expected: all destination directories exist and the old source/test directories are absent.
