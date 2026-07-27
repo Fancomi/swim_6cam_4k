@@ -7,6 +7,7 @@
 """
 import colorsys
 import datetime
+import os
 import re
 
 import numpy as np
@@ -138,3 +139,53 @@ def annotate(merged, anchors, labels):
         draw.rectangle((lx, ly + 2, lx + swatch, ly + swatch), fill=color)
         draw.text((lx + swatch + LEGEND_PAD, ly), entry, fill=(235, 235, 235), font=font)
     return np.asarray(canvas, dtype=np.uint8)
+
+
+OUT_DIR = os.path.join(C.OUTPUT_ROOT, "overhead-merge")
+
+
+class FrameSizeError(Exception):
+    """同一相机各帧尺寸不一致；静默缩放会产出错误的参考图，所以直接失败。"""
+
+
+def load_stack(paths, scale=1):
+    """解码一组同尺寸图像进 (N, H, W, 3) uint8 栈；scale>1 时整数降采样。"""
+    frames, size = [], None
+    for path in paths:
+        im = Image.open(path).convert("RGB")
+        if size is None:
+            size = im.size
+        elif im.size != size:
+            raise FrameSizeError(
+                "帧尺寸不一致：%s 为 %dx%d，期望 %dx%d"
+                % (os.path.basename(path), im.size[0], im.size[1], size[0], size[1]))
+        if scale > 1:
+            im = im.resize((im.width // scale, im.height // scale), Image.BILINEAR)
+        frames.append(np.asarray(im, dtype=np.uint8))
+    return np.stack(frames, axis=0)
+
+
+def run_camera(cam, out_dir=OUT_DIR, thresh=C.DIST_THRESH, band_rows=BAND_ROWS, scale=1):
+    """跑完一台相机：中值背景 -> 前景叠加 -> 标注，写出三张 PNG。"""
+    frames = C.frames_for_camera(cam)
+    if not frames:
+        print("%-16s 无匹配帧，跳过" % cam)
+        return []
+
+    stack = load_stack([p for _sid, p in frames], scale=scale)
+    print("%-16s frames=%d  %dx%d" % (cam, len(stack), stack.shape[2], stack.shape[1]))
+    background = median_background(stack, band_rows=band_rows)
+    merged, anchors = merge_frames(stack, background, thresh=thresh, band_rows=band_rows)
+    labels = [(i + 1, snapshot_time_label(sid)) for i, (sid, _p) in enumerate(frames)]
+    labeled = annotate(merged, anchors, labels)
+
+    os.makedirs(out_dir, exist_ok=True)
+    written = []
+    for suffix, image in (("background", background),
+                          ("merged", merged),
+                          ("merged_labeled", labeled)):
+        path = os.path.join(out_dir, "%s_%s.png" % (cam, suffix))
+        Image.fromarray(image).save(path)
+        written.append(path)
+        print("  wrote %s" % path)
+    return written

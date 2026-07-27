@@ -1,14 +1,22 @@
+import os
+import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
+from PIL import Image
 
+from python.annotation_preview import common as C
 from python.annotation_preview.merge_overhead import (
     BAND_ROWS,
     CAMERAS,
+    FrameSizeError,
     annotate,
     frame_color,
+    load_stack,
     median_background,
     merge_frames,
+    run_camera,
     snapshot_time_label,
     weighted_median,
 )
@@ -165,6 +173,89 @@ class AnnotateTest(unittest.TestCase):
         before = merged.copy()
         annotate(merged, [(30, 20)], [(1, "11:09:33")])
         np.testing.assert_array_equal(merged, before)
+
+
+class LoadStackTest(unittest.TestCase):
+    def test_stacks_frames_in_given_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            for i, value in enumerate((10, 200)):
+                path = os.path.join(tmp, "f%d.png" % i)
+                Image.fromarray(_solid(6, 8, (value, value, value))).save(path)
+                paths.append(path)
+            stack = load_stack(paths)
+            self.assertEqual(stack.shape, (2, 6, 8, 3))
+            self.assertEqual(stack.dtype, np.uint8)
+            self.assertTrue((stack[0] == 10).all())
+            self.assertTrue((stack[1] == 200).all())
+
+    def test_downscales_by_integer_factor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "a.png")
+            Image.fromarray(_solid(8, 12, (30, 30, 30))).save(path)
+            stack = load_stack([path], scale=2)
+            self.assertEqual(stack.shape, (1, 4, 6, 3))
+
+    def test_rejects_mismatched_sizes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = os.path.join(tmp, "a.png")
+            second = os.path.join(tmp, "b.png")
+            Image.fromarray(_solid(6, 8, (10, 10, 10))).save(first)
+            Image.fromarray(_solid(7, 8, (10, 10, 10))).save(second)
+            with self.assertRaises(FrameSizeError) as ctx:
+                load_stack([first, second])
+            self.assertIn("b.png", str(ctx.exception))
+
+
+def _write_snapshot(snap_dir, snapshot_id, cam, frame):
+    """按真实命名写一张快照图：<snap>/<id>/9_x__<cam>.jpg。"""
+    d = os.path.join(snap_dir, snapshot_id)
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, "9_x__%s.jpg" % cam)
+    Image.fromarray(frame).save(path, quality=100)
+    return path
+
+
+class RunCameraTest(unittest.TestCase):
+    def test_writes_three_products(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snap_dir = os.path.join(tmp, "snapshots")
+            out_dir = os.path.join(tmp, "out")
+            quiet = _solid(24, 32, (60, 60, 60))
+            loud = quiet.copy()
+            loud[4:8, 4:8] = (250, 10, 10)
+            for i, frame in enumerate((quiet, quiet, loud)):
+                _write_snapshot(snap_dir, "raw_178348017357%d_%d" % (i, i + 1),
+                                "overhead5", frame)
+            with patch.object(C, "SNAP_DIR", snap_dir):
+                written = run_camera("overhead5", out_dir=out_dir)
+            names = sorted(os.path.basename(p) for p in written)
+            self.assertEqual(names, [
+                "overhead5_background.png",
+                "overhead5_merged.png",
+                "overhead5_merged_labeled.png",
+            ])
+            for path in written:
+                self.assertTrue(os.path.exists(path), path)
+
+    def test_merged_keeps_source_resolution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snap_dir = os.path.join(tmp, "snapshots")
+            out_dir = os.path.join(tmp, "out")
+            for i in range(3):
+                _write_snapshot(snap_dir, "raw_178348017357%d_%d" % (i, i + 1),
+                                "overhead5", _solid(24, 32, (60, 60, 60)))
+            with patch.object(C, "SNAP_DIR", snap_dir):
+                run_camera("overhead5", out_dir=out_dir)
+            merged = Image.open(os.path.join(out_dir, "overhead5_merged.png"))
+            self.assertEqual(merged.size, (32, 24))
+
+    def test_returns_empty_list_when_camera_has_no_frames(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snap_dir = os.path.join(tmp, "snapshots")
+            os.makedirs(snap_dir)
+            with patch.object(C, "SNAP_DIR", snap_dir):
+                self.assertEqual(run_camera("overhead5", out_dir=os.path.join(tmp, "o")), [])
 
 
 if __name__ == "__main__":
