@@ -78,6 +78,7 @@ soak 按每条 interval 的真实 `elapsed_s` 累加时间轴，报告 RSS 与 M
 3. `./scripts/run_python.sh still` / `4k` 使用网格 JSON 与纹理或六路视频生成静态拼接图或 H.264 视频。
 4. `./scripts/run_python.sh asset` 把网格 JSON 编译为 Metal 运行时 `.swasset`。
 5. `./scripts/run_python.sh keypoint` 生成 2D 关键点裁剪复核页。
+6. `./scripts/run_python.sh oh-merge` 把 `overhead5` / `overhead6` / `orbbec_camera_1` 各自全时段快照合成为一张 UV 参考图，输出到 `outputs/annotation_preview/overhead-merge/`。
 
 ## 目录结构
 
