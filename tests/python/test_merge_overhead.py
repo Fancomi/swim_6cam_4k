@@ -149,6 +149,12 @@ class FrameColorTest(unittest.TestCase):
             self.assertGreaterEqual(channel, 0)
             self.assertLessEqual(channel, 255)
 
+    def test_first_and_last_frame_colours_are_clearly_distinguishable(self):
+        first = frame_color(0, 50)
+        last = frame_color(49, 50)
+        distance2 = sum((a - b) ** 2 for a, b in zip(first, last))
+        self.assertGreater(distance2, 100 ** 2)
+
 
 class AnnotateTest(unittest.TestCase):
     def test_appends_legend_band_below_image(self):

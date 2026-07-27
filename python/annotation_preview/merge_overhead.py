@@ -89,9 +89,12 @@ def snapshot_time_label(snapshot_id):
     return datetime.datetime.fromtimestamp(int(m.group(1)) / 1000.0).strftime("%H:%M:%S")
 
 
+HUE_SPAN = 0.9                                      # 色相环只走到 0.9，避免首尾颜色因环绕而撞色
+
+
 def frame_color(index, total):
-    """按帧序在色相环上均匀取色，便于看出时间方向。"""
-    hue = (index % max(1, total)) / float(max(1, total))
+    """按帧序取色，色相从 0 到 HUE_SPAN 线性推进（不绕回红色），便于看出时间方向。"""
+    hue = HUE_SPAN * (index % max(1, total)) / float(max(1, total))
     r, g, b = colorsys.hsv_to_rgb(hue, 0.95, 1.0)
     return (int(r * 255), int(g * 255), int(b * 255))
 
@@ -211,10 +214,16 @@ def main(argv=None):
             "缺少快照目录：%s（请通过 ANNOTATION_PREVIEW_DATASET_ROOT 指向有效数据集）"
             % C.SNAP_DIR)
 
+    if args.scale < 1:
+        raise SystemExit("--scale 必须 >= 1（收到 %s）" % args.scale)
+
     total = 0
-    for cam in args.cameras:
-        total += len(run_camera(cam, out_dir=args.out_dir, thresh=args.thresh,
-                                band_rows=args.band_rows, scale=args.scale))
+    try:
+        for cam in args.cameras:
+            total += len(run_camera(cam, out_dir=args.out_dir, thresh=args.thresh,
+                                    band_rows=args.band_rows, scale=args.scale))
+    except FrameSizeError as exc:
+        raise SystemExit(str(exc)) from None
     print("\n共写出 %d 个文件 -> %s" % (total, args.out_dir))
 
 
