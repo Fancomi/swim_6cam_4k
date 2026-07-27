@@ -5,6 +5,7 @@
 按时间顺序把前景叠到背景上，后帧覆盖前帧。中值与差分按水平条带计算，
 避免 4K 尺寸下 float32 中间量吃满内存。
 """
+import argparse
 import colorsys
 import datetime
 import os
@@ -189,3 +190,33 @@ def run_camera(cam, out_dir=OUT_DIR, thresh=C.DIST_THRESH, band_rows=BAND_ROWS, 
         written.append(path)
         print("  wrote %s" % path)
     return written
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--cameras", nargs="+", default=list(CAMERAS),
+                    help="要处理的相机（默认 %(default)s）")
+    ap.add_argument("--thresh", type=float, default=C.DIST_THRESH,
+                    help="前景判定的 RGB 距离阈值（默认 %(default)s）")
+    ap.add_argument("--band-rows", type=int, default=BAND_ROWS,
+                    help="分带高度，越小越省内存（默认 %(default)s）")
+    ap.add_argument("--scale", type=int, default=1,
+                    help="整数降采样倍数，仅调试提速用（默认 %(default)s）")
+    ap.add_argument("--out-dir", default=OUT_DIR,
+                    help="输出目录（默认 %(default)s）")
+    args = ap.parse_args(argv)
+
+    if not os.path.isdir(C.SNAP_DIR):
+        raise SystemExit(
+            "缺少快照目录：%s（请通过 ANNOTATION_PREVIEW_DATASET_ROOT 指向有效数据集）"
+            % C.SNAP_DIR)
+
+    total = 0
+    for cam in args.cameras:
+        total += len(run_camera(cam, out_dir=args.out_dir, thresh=args.thresh,
+                                band_rows=args.band_rows, scale=args.scale))
+    print("\n共写出 %d 个文件 -> %s" % (total, args.out_dir))
+
+
+if __name__ == "__main__":
+    main()

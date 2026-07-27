@@ -5,6 +5,7 @@
 #   ./scripts/run_python.sh still
 #   ./scripts/run_python.sh 4k [SECONDS] [OUTPUT_MP4]
 #   ./scripts/run_python.sh keypoint [--dataset-root PATH] [...]
+#   ./scripts/run_python.sh oh-merge [--cameras ...] [--scale N]
 #   ./scripts/run_python.sh extract [SRC_FBX] [DST_JSON]
 #   ./scripts/run_python.sh bake SRC_FBX DST_FBX [--ext-px N]
 #   ./scripts/run_python.sh asset [INPUT_JSON] [OUTPUT_SWASSET]
@@ -29,6 +30,7 @@ Commands:
   still      Render static stitch PNG from composite textures
   4k         Render 4K six-camera H.264 stitch (default 10s test clip)
   keypoint   Build COCO-17 person-crop HTML review page
+  oh-merge   Merge each overhead/orbbec camera's snapshots into one UV reference
   extract    Extract pool FBX mesh JSON
   bake       Bake centre-line UV extension into a new FBX
   asset      Compile mesh JSON into GPU runtime .swasset
@@ -97,6 +99,10 @@ cmd_4k() {
 cmd_keypoint() {
   "$PY" -m python.assets.build_keypoint_preview "$@"
   echo "open outputs/keypoint_preview/index.html (or --output-dir) in a browser"
+}
+
+cmd_oh_merge() {
+  "$PY" -m python.annotation_preview.merge_overhead "$@"
 }
 
 cmd_extract() {
@@ -185,6 +191,7 @@ case "$COMMAND" in
   still) cmd_still "$@" ;;
   4k|video) cmd_4k "$@" ;;
   keypoint|kp) cmd_keypoint "$@" ;;
+  oh-merge) cmd_oh_merge "$@" ;;
   extract) cmd_extract "$@" ;;
   bake) cmd_bake "$@" ;;
   asset|swasset) cmd_asset "$@" ;;

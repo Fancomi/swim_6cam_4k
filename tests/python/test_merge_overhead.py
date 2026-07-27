@@ -14,6 +14,7 @@ from python.annotation_preview.merge_overhead import (
     annotate,
     frame_color,
     load_stack,
+    main,
     median_background,
     merge_frames,
     run_camera,
@@ -256,6 +257,50 @@ class RunCameraTest(unittest.TestCase):
             os.makedirs(snap_dir)
             with patch.object(C, "SNAP_DIR", snap_dir):
                 self.assertEqual(run_camera("overhead5", out_dir=os.path.join(tmp, "o")), [])
+
+
+class MainTest(unittest.TestCase):
+    def test_runs_all_three_cameras_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snap_dir = os.path.join(tmp, "snapshots")
+            os.makedirs(snap_dir)
+            seen = []
+            with patch.object(C, "SNAP_DIR", snap_dir), \
+                 patch("python.annotation_preview.merge_overhead.run_camera",
+                       side_effect=lambda cam, **kw: seen.append(cam) or []):
+                main([])
+            self.assertEqual(seen, list(CAMERAS))
+
+    def test_honours_explicit_camera_selection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snap_dir = os.path.join(tmp, "snapshots")
+            os.makedirs(snap_dir)
+            seen = []
+            with patch.object(C, "SNAP_DIR", snap_dir), \
+                 patch("python.annotation_preview.merge_overhead.run_camera",
+                       side_effect=lambda cam, **kw: seen.append(cam) or []):
+                main(["--cameras", "overhead6"])
+            self.assertEqual(seen, ["overhead6"])
+
+    def test_forwards_tuning_flags(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snap_dir = os.path.join(tmp, "snapshots")
+            os.makedirs(snap_dir)
+            captured = {}
+            with patch.object(C, "SNAP_DIR", snap_dir), \
+                 patch("python.annotation_preview.merge_overhead.run_camera",
+                       side_effect=lambda cam, **kw: captured.update(kw) or []):
+                main(["--cameras", "overhead5", "--thresh", "55",
+                      "--band-rows", "64", "--scale", "4", "--out-dir", tmp])
+            self.assertEqual(captured["thresh"], 55.0)
+            self.assertEqual(captured["band_rows"], 64)
+            self.assertEqual(captured["scale"], 4)
+            self.assertEqual(captured["out_dir"], tmp)
+
+    def test_exits_when_snapshot_dir_missing(self):
+        with patch.object(C, "SNAP_DIR", "/definitely/not/here"):
+            with self.assertRaises(SystemExit):
+                main([])
 
 
 if __name__ == "__main__":
