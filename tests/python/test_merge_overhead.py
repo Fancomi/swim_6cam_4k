@@ -5,8 +5,11 @@ import numpy as np
 from python.annotation_preview.merge_overhead import (
     BAND_ROWS,
     CAMERAS,
+    annotate,
+    frame_color,
     median_background,
     merge_frames,
+    snapshot_time_label,
     weighted_median,
 )
 
@@ -109,6 +112,59 @@ class MergeFramesTest(unittest.TestCase):
         merge_frames(stack, bg, thresh=40)
         np.testing.assert_array_equal(bg, before_bg)
         np.testing.assert_array_equal(stack, before_stack)
+
+
+class SnapshotTimeLabelTest(unittest.TestCase):
+    def test_parses_millisecond_timestamp_in_local_time(self):
+        import datetime
+
+        expected = datetime.datetime.fromtimestamp(1783480173.576).strftime("%H:%M:%S")
+        self.assertEqual(snapshot_time_label("raw_1783480173576_15"), expected)
+
+    def test_falls_back_to_id_when_unparseable(self):
+        self.assertEqual(snapshot_time_label("weird_name"), "weird_name")
+
+
+class FrameColorTest(unittest.TestCase):
+    def test_is_deterministic(self):
+        self.assertEqual(frame_color(3, 10), frame_color(3, 10))
+
+    def test_distinct_indices_differ(self):
+        self.assertNotEqual(frame_color(0, 10), frame_color(5, 10))
+
+    def test_returns_three_bytes(self):
+        color = frame_color(2, 7)
+        self.assertEqual(len(color), 3)
+        for channel in color:
+            self.assertIsInstance(channel, int)
+            self.assertGreaterEqual(channel, 0)
+            self.assertLessEqual(channel, 255)
+
+
+class AnnotateTest(unittest.TestCase):
+    def test_appends_legend_band_below_image(self):
+        merged = _solid(40, 60, (0, 0, 0))
+        labels = [(1, "11:09:33"), (2, "11:11:45")]
+        out = annotate(merged, [(10, 10), (20, 20)], labels)
+        self.assertEqual(out.shape[1], 60)
+        self.assertGreater(out.shape[0], 40)
+        self.assertEqual(out.dtype, np.uint8)
+
+    def test_draws_something_near_anchor(self):
+        merged = _solid(40, 60, (0, 0, 0))
+        out = annotate(merged, [(30, 20)], [(1, "11:09:33")])
+        self.assertTrue((out[10:31, 20:41] > 0).any())
+
+    def test_missing_anchor_leaves_image_region_untouched(self):
+        merged = _solid(40, 60, (7, 7, 7))
+        out = annotate(merged, [None], [(1, "11:09:33")])
+        np.testing.assert_array_equal(out[:40], merged)
+
+    def test_does_not_mutate_input(self):
+        merged = _solid(40, 60, (0, 0, 0))
+        before = merged.copy()
+        annotate(merged, [(30, 20)], [(1, "11:09:33")])
+        np.testing.assert_array_equal(merged, before)
 
 
 if __name__ == "__main__":

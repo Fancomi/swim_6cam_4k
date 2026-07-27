@@ -5,7 +5,12 @@
 按时间顺序把前景叠到背景上，后帧覆盖前帧。中值与差分按水平条带计算，
 避免 4K 尺寸下 float32 中间量吃满内存。
 """
+import colorsys
+import datetime
+import re
+
 import numpy as np
+from PIL import Image, ImageDraw
 
 from python.annotation_preview import common as C
 
@@ -69,3 +74,67 @@ def merge_frames(stack, background, thresh=C.DIST_THRESH, band_rows=BAND_ROWS):
         y = weighted_median(row_hist[i])
         anchors.append(None if x is None or y is None else (x, y))
     return merged, anchors
+
+
+LEGEND_PAD = 8                                      # 图例带内边距
+
+
+def snapshot_time_label(snapshot_id):
+    """raw_<毫秒时间戳>_<序号> -> 本地时间 HH:MM:SS；解析失败原样返回。"""
+    m = re.match(r"raw_(\d+)_", snapshot_id)
+    if not m:
+        return snapshot_id
+    return datetime.datetime.fromtimestamp(int(m.group(1)) / 1000.0).strftime("%H:%M:%S")
+
+
+def frame_color(index, total):
+    """按帧序在色相环上均匀取色，便于看出时间方向。"""
+    hue = (index % max(1, total)) / float(max(1, total))
+    r, g, b = colorsys.hsv_to_rgb(hue, 0.95, 1.0)
+    return (int(r * 255), int(g * 255), int(b * 255))
+
+
+def annotate(merged, anchors, labels):
+    """在合成图上标帧号，并在下方追加 f<NN> -> 时间 的图例带。
+
+    锚点可能被池边人群拉偏，个别标签会落在非线位置；图例带是兜底，
+    即使锚点不准也能按线的空间顺序对上编号。
+    """
+    h, w, _c = merged.shape
+    total = len(labels)
+    size = max(12, w // 120)
+    font = C.load_font(size)
+    line_h = size + 6
+    swatch = size
+
+    # 按最宽条目算列宽，列数取图宽装得下的最大值：50 条在 4K 下排 4 列，
+    # 在低分辨率的 orbbec 上自动收窄，不会互相压字。
+    entries = ["f%02d  %s" % (n, t) for n, t in labels]
+    measure = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    text_w = max([int(measure.textlength(e, font=font)) for e in entries] or [size])
+    col_w = swatch + LEGEND_PAD + text_w + 2 * LEGEND_PAD
+    cols = max(1, min(total, w // col_w)) if total else 1
+    rows = (total + cols - 1) // cols if total else 0
+    legend_h = 2 * LEGEND_PAD + rows * line_h
+
+    canvas = Image.new("RGB", (w, h + legend_h), (16, 16, 16))
+    canvas.paste(Image.fromarray(merged), (0, 0))
+    draw = ImageDraw.Draw(canvas)
+
+    radius = max(3, size // 3)
+    for i, entry in enumerate(entries):
+        color = frame_color(i, total)
+        anchor = anchors[i] if i < len(anchors) else None
+        if anchor is not None:
+            x, y = anchor
+            draw.ellipse((x - radius, y - radius, x + radius, y + radius),
+                         fill=color, outline=(0, 0, 0))
+            # 图上只标帧号，时间放图例带；否则 50 个时间戳会糊成一片。
+            draw.text((x + radius + 2, y - line_h), "f%02d" % labels[i][0],
+                      fill=color, font=font, stroke_width=1, stroke_fill=(0, 0, 0))
+        col, row = divmod(i, max(1, rows))
+        lx = LEGEND_PAD + col * col_w
+        ly = h + LEGEND_PAD + row * line_h
+        draw.rectangle((lx, ly + 2, lx + swatch, ly + swatch), fill=color)
+        draw.text((lx + swatch + LEGEND_PAD, ly), entry, fill=(235, 235, 235), font=font)
+    return np.asarray(canvas, dtype=np.uint8)
