@@ -4,6 +4,7 @@ import tempfile
 import unittest
 
 from python.water_entry import common as C
+from python.water_entry import export_package as E
 from python.water_entry import select_frames as S
 
 
@@ -307,6 +308,45 @@ class CollectFilterTest(unittest.TestCase):
             self.assertEqual([r["frame"] for r in rows], [100, 104])
             self.assertEqual(totals["frames"], 3)
             self.assertEqual(totals["frames_in_range"], 2)
+
+
+class ExportPackageTest(unittest.TestCase):
+    """交付包：预标注来源与 COCO 可见位的约定。"""
+
+    def test_prelabel_prefers_bk_then_falls_back(self):
+        per_model = {S.MODEL_B: {5: _pose(100, 200)},
+                     S.MODEL_A: {5: _pose(110, 210)}}
+        self.assertEqual(E.pick_prelabel(per_model, 5)[0], S.MODEL_B)
+
+        per_model[S.MODEL_B][5] = _null()
+        self.assertEqual(E.pick_prelabel(per_model, 5)[0], S.MODEL_A)
+
+        per_model[S.MODEL_A][5] = _null()
+        self.assertEqual(E.pick_prelabel(per_model, 5), (None, None))
+
+    def test_low_confidence_keypoints_are_marked_unlabelled(self):
+        """置信度不足的点写成 v=0，标注工具会显示为「待补」而不是一个错点。"""
+        rec = _pose(100, 200)          # 只有躯干四点达标，其余为 0 分
+        ann = E.coco_annotation(1, 1, rec)
+        self.assertEqual(ann["num_keypoints"], 4)
+        vis = ann["keypoints"][2::3]
+        self.assertEqual([i for i, v in enumerate(vis) if v == 2],
+                         sorted(C.TORSO_KPS))
+        for i, v in enumerate(vis):
+            if v == 0:
+                self.assertEqual(ann["keypoints"][i * 3:i * 3 + 2], [0, 0])
+
+    def test_bbox_is_converted_to_coco_xywh(self):
+        ann = E.coco_annotation(1, 1, _pose(100, 200, box=(10, 20, 110, 220)))
+        self.assertEqual(ann["bbox"], [10.0, 20.0, 100.0, 200.0])
+        self.assertEqual(ann["area"], 20000.0)
+
+    def test_coco_skeleton_is_one_indexed(self):
+        """COCO 的 skeleton 用 1-based 索引，我们内部的 SKELETON 是 0-based。"""
+        pairs = E.COCO_CATEGORY["skeleton"]
+        self.assertEqual(len(pairs), len(C.SKELETON))
+        self.assertEqual(pairs[0], [C.SKELETON[0][0] + 1, C.SKELETON[0][1] + 1])
+        self.assertTrue(all(1 <= a <= 17 and 1 <= b <= 17 for a, b in pairs))
 
 
 if __name__ == "__main__":

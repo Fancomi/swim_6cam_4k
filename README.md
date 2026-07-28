@@ -125,6 +125,7 @@ swim_fbx_demo/
 │   │   ├── __init__.py
 │   │   ├── annotate_preview.py
 │   │   ├── common.py
+│   │   ├── export_package.py
 │   │   ├── predict.py
 │   │   ├── review.py
 │   │   └── select_frames.py
@@ -134,7 +135,8 @@ swim_fbx_demo/
 │       └── test_layout.py
 ├── scripts/
 │   ├── run_metal.sh              # demo / benchmarks / soak
-│   └── run_python.sh             # still / 4k / keypoint / extract / bake / asset / uw-* / we-*
+│   ├── run_python.sh             # still / 4k / keypoint / extract / bake / asset / uw-* / we-*
+│   └── run_water_entry.sh        # 入水检测机位难例筛选全流程
 └── docs/
     └── superpowers/
         ├── plans/
@@ -462,6 +464,31 @@ MPS 后端偶发把整窗推理返回全零检测（实测复现 1 次，重跑�
 信号在时间上的分工很清楚（`frame - entry_frame` 中位值）：`sign_flip` +2、`kp_disagree` +6，两者集中在入水帧附近，是最有价值的；`both_blind` +17、`diff_person` +12、`torso_broken` +12 则几乎全在入水后，被 `--max-offset 6` 截掉后只剩零星几帧。`torso_broken` 只在 `swimup_bk` 侧触发（`swimup` 的选人硬要求躯干四点，所以它永远是 4/4），单独作为唯一理由的只有 1 帧——它更像 bk 模型的水下伪影，不是独立的质量信号。
 
 分数最高的 100 帧组成：`sign_flip` 66、`one_miss` 29、`kp_disagree` 25，覆盖 71 条片段，77 帧落在入水 ±3 帧内，阶段分布 entry 54 / flight 23 / post 23。
+
+`--kp-mean-norm` 是控制产出量的主要旋钮（其余六类信号是离散判定、无阈值）。分歧值本身的中位数是 0.0497，所以阈值压到 0.05 以下等于「一半的帧都算难例」，不再是筛选：
+
+| `--kp-mean-norm` | 候选帧 | 占窗口内 2613 帧 |
+| ---: | ---: | ---: |
+| 0.10 | 323 | 12.4% |
+| 0.06 | 936 | 35.8% |
+| **0.055（当前默认）** | **1163** | **44.5%** |
+| 0.05 | 1486 | 56.9% |
+
+当前 1163 帧覆盖全部 94 条片段，每片段中位 10 帧、p90 20 帧。抽帧核对过新纳入的两个分歧带：`0.06~0.08`（439 帧）质量良好，多为一侧模型把肢体关键点画成麻花；`0.05~0.06`（550 帧）开始出现两骨架肉眼近乎重合、仅框大小不同的帧，边际价值较低。
+
+### 交付包与全流程脚本
+
+`python.water_entry.export_package` 把候选帧导出成可直接交付标注的数据包：**无叠加原始帧** + `manifest.csv` + COCO keypoints 格式的模型预标注 + 交付说明。质检页那套骨架叠加只用于我们自己判断该不该标，真送标注时叠加线条会干扰标注员。预标注优先取 `swimup_bk`、缺检时退回 `swimup`；置信度低于 `KP_CONF` 的点写成 COCO 的 `v=0`，标注工具会显示为「待补」而不是一个错误的既有点。
+
+```bash
+./scripts/run_water_entry.sh                  # 全流程：预测 -> 选帧 -> 质检页 -> 交付包
+./scripts/run_water_entry.sh --skip-predict   # 复用已有预测，只重跑后续
+./scripts/run_water_entry.sh --kp 0.10        # 收紧阈值，选出更少
+```
+
+**新增片段后重跑这一个脚本即可全量刷新**：`manifest.csv` 是唯一的片段清单来源，`predict` 会把新片段一并纳入，后续每步都从 `predict` 的产物重算，流程内没有增量状态，不存在只更新一半的可能。
+
+本次产出 `outputs/water_entry/annotate_package.zip`：1163 张图、94 条片段、286 MB，1160 帧带 `swimup_bk` 预标注（每框可用关键点中位 15 个），3 帧两模型都没检出、需从零标注。
 
 ## 已知限制
 
