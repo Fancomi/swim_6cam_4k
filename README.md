@@ -79,6 +79,7 @@ soak 按每条 interval 的真实 `elapsed_s` 累加时间轴，报告 RSS 与 M
 4. `./scripts/run_python.sh asset` 把网格 JSON 编译为 Metal 运行时 `.swasset`。
 5. `./scripts/run_python.sh keypoint` 生成 2D 关键点裁剪复核页。
 6. `./scripts/run_python.sh oh-merge` 把 `overhead5` / `overhead6` / `orbbec_camera_1` 各自全时段快照合成为一张原始分辨率的 UV 参考图（另附中值背景帧），输出到 `outputs/annotation_preview/overhead-merge/`。
+7. `./scripts/run_python.sh mask-label` 起本地服务打开保留区域 mask 标注器：选一台相机、逐帧翻、拖拽画胶囊笔画标出该帧要保留的区域，存为数据集根目录下的 `mask_label_project.json`。加 `--selftest` 可打开浏览器自测页。
 
 ## 目录结构
 

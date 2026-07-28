@@ -6,6 +6,7 @@
 #   ./scripts/run_python.sh 4k [SECONDS] [OUTPUT_MP4]
 #   ./scripts/run_python.sh keypoint [--dataset-root PATH] [...]
 #   ./scripts/run_python.sh oh-merge [--cameras ...] [--thresh N]
+#   ./scripts/run_python.sh mask-label [--port N] [--selftest]
 #   ./scripts/run_python.sh extract [SRC_FBX] [DST_JSON]
 #   ./scripts/run_python.sh bake SRC_FBX DST_FBX [--ext-px N]
 #   ./scripts/run_python.sh asset [INPUT_JSON] [OUTPUT_SWASSET]
@@ -31,6 +32,7 @@ Commands:
   4k         Render 4K six-camera H.264 stitch (default 10s test clip)
   keypoint   Build COCO-17 person-crop HTML review page
   oh-merge   Merge each overhead/orbbec camera's snapshots into one UV reference
+  mask-label Serve the keep-region mask labeler (per-frame capsule strokes)
   extract    Extract pool FBX mesh JSON
   bake       Bake centre-line UV extension into a new FBX
   asset      Compile mesh JSON into GPU runtime .swasset
@@ -103,6 +105,10 @@ cmd_keypoint() {
 
 cmd_oh_merge() {
   "$PY" -m python.annotation_preview.merge_overhead "$@"
+}
+
+cmd_mask_label() {
+  "$PY" -m python.annotation_preview.mask_labeler.serve "$@"
 }
 
 cmd_extract() {
@@ -192,6 +198,7 @@ case "$COMMAND" in
   4k|video) cmd_4k "$@" ;;
   keypoint|kp) cmd_keypoint "$@" ;;
   oh-merge) cmd_oh_merge "$@" ;;
+  mask-label) cmd_mask_label "$@" ;;
   extract) cmd_extract "$@" ;;
   bake) cmd_bake "$@" ;;
   asset|swasset) cmd_asset "$@" ;;
