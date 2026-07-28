@@ -1,5 +1,6 @@
 #include <swim/d3d11/mf_source.hpp>
 
+#include <swim/core/camera_capacity.hpp>
 #include <swim/core/camera_health.hpp>
 
 #include <mfapi.h>
@@ -27,8 +28,10 @@ namespace {
 using Microsoft::WRL::ComPtr;
 
 constexpr std::size_t kMaximumLaneErrorBytes = 512;
-constexpr std::uint32_t kRequiredWidth = 3840;
-constexpr std::uint32_t kRequiredHeight = 2160;
+// Frame geometry follows the stream: 3840x2160 for the pool rig, 1280x720 for
+// the underwater rig. NV12 chroma is half-resolution, so only even dimensions
+// can be wrapped as shader resource views.
+constexpr std::uint32_t kMaxFrameDimension = 8192;
 
 enum class LaneFailureKind : std::uint8_t { fatal, recoverable };
 
@@ -254,8 +257,9 @@ class MfSource::Impl final {
     if (source_.path.empty()) {
       throw std::invalid_argument("MF source path must not be empty");
     }
-    if (camera_index_ >= 6) {
-      throw std::invalid_argument("MF source camera index must be below six");
+    if (camera_index_ >= swim::core::kMaxCameras) {
+      throw std::invalid_argument(
+          "MF source camera index must be below kMaxCameras");
     }
     if (surface_capacity_ < 4 || surface_capacity_ > 64) {
       throw std::invalid_argument(
@@ -399,11 +403,13 @@ class MfSource::Impl final {
     UINT32 width = 0;
     UINT32 height = 0;
     MFGetAttributeSize(current.Get(), MF_MT_FRAME_SIZE, &width, &height);
-    if (width != kRequiredWidth || height != kRequiredHeight) {
+    if (width == 0 || height == 0 || (width & 1U) != 0 || (height & 1U) != 0 ||
+        width > kMaxFrameDimension || height > kMaxFrameDimension) {
       throw LaneFailure{
           LaneFailureKind::fatal,
-          "MP4 video is not 3840x2160 (" + std::to_string(width) + "x" +
-              std::to_string(height) + ")"};
+          "MP4 video dimensions must be even and within " +
+              std::to_string(kMaxFrameDimension) + " (" +
+              std::to_string(width) + "x" + std::to_string(height) + ")"};
     }
     UINT32 matrix = 0;
     if (SUCCEEDED(current->GetUINT32(MF_MT_YUV_MATRIX, &matrix))) {
@@ -620,8 +626,9 @@ class MfSource::Impl final {
   swim::core::RunLifecycle* lifecycle_{};
   std::shared_ptr<MediaFoundationRuntime> mf_runtime_;
   std::shared_ptr<DecodedSurfacePool> pool_;
-  std::uint32_t frame_width_{kRequiredWidth};
-  std::uint32_t frame_height_{kRequiredHeight};
+  // Set from the stream's media type before the first frame is published.
+  std::uint32_t frame_width_{};
+  std::uint32_t frame_height_{};
   swim::core::ColorMatrix color_matrix_{swim::core::ColorMatrix::bt709};
   bool full_range_{false};
   LONGLONG slot_pts_{0};

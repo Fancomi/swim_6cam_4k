@@ -107,7 +107,7 @@ struct CoordinatorFixture {
     }
   }
 
-  std::array<swim::core::LatestFrameMailbox, 6> mailboxes;
+  swim::core::MailboxArray mailboxes;
   swim::core::AppConfig config;
   swim::core::BenchmarkGraph graph;
   swim::core::RuntimeCounters metrics;

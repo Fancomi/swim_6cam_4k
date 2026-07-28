@@ -156,36 +156,76 @@ TEST_CASE(accepts_exact_runtime_asset_compatibility) {
                                               false);
 }
 
-TEST_CASE(rejects_wrong_runtime_asset_logical_width) {
+TEST_CASE(rejects_zero_runtime_asset_logical_width) {
   auto asset = compatible_runtime_asset();
-  asset.logical_width = 5000;
+  asset.logical_width = 0;
   CHECK_THROWS_WITH(swim::core::validate_runtime_compatibility(AppConfig{},
                                                                asset, false),
-                    "runtime asset dimensions must be 5001x2101 -> 5002x2102");
+                    "runtime asset logical dimensions must be nonzero");
 }
 
 TEST_CASE(rejects_wrong_runtime_asset_logical_height) {
   auto asset = compatible_runtime_asset();
-  asset.logical_height = 2100;
+  asset.logical_height = 0;
   CHECK_THROWS_WITH(swim::core::validate_runtime_compatibility(AppConfig{},
                                                                asset, false),
-                    "runtime asset dimensions must be 5001x2101 -> 5002x2102");
+                    "runtime asset logical dimensions must be nonzero");
 }
 
 TEST_CASE(rejects_wrong_runtime_asset_encoded_width) {
   auto asset = compatible_runtime_asset();
   asset.encoded_width = 5001;
-  CHECK_THROWS_WITH(swim::core::validate_runtime_compatibility(AppConfig{},
-                                                               asset, false),
-                    "runtime asset dimensions must be 5001x2101 -> 5002x2102");
+  CHECK_THROWS_WITH(
+      swim::core::validate_runtime_compatibility(AppConfig{}, asset, false),
+      "runtime asset encoded dimensions must be the logical size rounded up "
+      "to even: expected 5002x2102, found 5001x2102");
 }
 
 TEST_CASE(rejects_wrong_runtime_asset_encoded_height) {
   auto asset = compatible_runtime_asset();
   asset.encoded_height = 2101;
-  CHECK_THROWS_WITH(swim::core::validate_runtime_compatibility(AppConfig{},
-                                                               asset, false),
-                    "runtime asset dimensions must be 5001x2101 -> 5002x2102");
+  CHECK_THROWS_WITH(
+      swim::core::validate_runtime_compatibility(AppConfig{}, asset, false),
+      "runtime asset encoded dimensions must be the logical size rounded up "
+      "to even: expected 5002x2102, found 5002x2101");
+}
+
+TEST_CASE(accepts_sixteen_camera_underwater_asset_dimensions) {
+  // The 16-plane underwater panorama compiles to a different size than the
+  // 6-camera pool; the runtime must accept whatever the asset declares.
+  swim::core::RuntimeAsset asset{
+      .logical_width = 6001,
+      .logical_height = 721,
+      .encoded_width = 6002,
+      .encoded_height = 722,
+      .source_sha256 = {},
+      .cameras = {},
+  };
+  AppConfig config;
+  config.source_count = 16;
+  for (std::size_t index = 0; index < 16; ++index) {
+    const auto camera_id = "underA" + std::to_string(index + 1);
+    config.sources[index].camera_id = camera_id;
+    asset.cameras.push_back({.camera_id = camera_id});
+  }
+  swim::core::validate_runtime_compatibility(config, asset, false);
+}
+
+TEST_CASE(rejects_camera_count_disagreement_between_config_and_asset) {
+  auto asset = compatible_runtime_asset();
+  asset.cameras.pop_back();
+  CHECK_THROWS_WITH(
+      swim::core::validate_runtime_compatibility(AppConfig{}, asset, false),
+      "config declares 6 sources but the asset contains 5 cameras");
+}
+
+TEST_CASE(rejects_camera_id_mismatch_at_a_lane) {
+  auto asset = compatible_runtime_asset();
+  asset.cameras[2].camera_id = "cam9";
+  CHECK_THROWS_WITH(
+      swim::core::validate_runtime_compatibility(AppConfig{}, asset, false),
+      "camera order mismatch at lane 2: config has 'cam1' but the asset has "
+      "'cam9'");
 }
 
 TEST_CASE(loads_exact_camera_order_and_all_config_values) {
@@ -260,11 +300,34 @@ TEST_CASE(rejects_unknown_config_key_with_source_location) {
                                   "unknown key 'surprise'"));
 }
 
-TEST_CASE(rejects_missing_camera_instead_of_reordering_sources) {
+TEST_CASE(loads_declared_sources_in_file_order_without_a_fixed_table) {
+  // missing.conf lists five lanes; camera identity and count are data now, so
+  // the loader takes them verbatim rather than demanding the pool's six.
+  const auto config = swim::core::load_config(fixture("missing.conf"));
+  CHECK_EQ(config.source_count, 5u);
+  CHECK_EQ(config.stream_count, 5u);
+  constexpr std::array<std::string_view, 5> expected{"cam3", "cam2", "cam1",
+                                                     "cam4", "cam5"};
+  for (std::size_t index = 0; index < expected.size(); ++index) {
+    CHECK_EQ(config.sources[index].camera_id, expected[index]);
+  }
+  CHECK(config.sources[5].camera_id.empty());
+}
+
+TEST_CASE(rejects_config_without_any_source_key) {
   CHECK_THROWS_WITH(
-      swim::core::load_config(fixture("missing.conf")),
-      fixture_error("missing.conf", 8,
-                    "sources must be exactly cam3,cam2,cam1,cam4,cam5,cam6"));
+      swim::core::load_config(fixture("no-sources.conf")),
+      fixture_error("no-sources.conf", 3,
+                    "config must declare at least one "
+                    "'source.<camera-id>' key"));
+}
+
+TEST_CASE(loads_sixteen_underwater_sources_in_declared_order) {
+  const auto config = swim::core::load_config(fixture("underwater.conf"));
+  CHECK_EQ(config.source_count, 16u);
+  CHECK_EQ(config.stream_count, 16u);
+  CHECK_EQ(config.sources[0].camera_id, "underA16");
+  CHECK_EQ(config.sources[15].camera_id, "underA1");
 }
 
 TEST_CASE(applies_every_supported_cli_override) {
@@ -477,9 +540,9 @@ TEST_CASE(rejects_repeated_unknown_and_non_exact_cli_values) {
   CHECK_THROWS_WITH(swim::core::apply_cli_overrides(AppConfig{}, bad_stage),
                     "invalid --stage value 'decode_render'");
 
-  const std::array bad_count{"--stream-count=3"sv};
+  const std::array bad_count{"--stream-count=17"sv};
   CHECK_THROWS_WITH(swim::core::apply_cli_overrides(AppConfig{}, bad_count),
-                    "--stream-count must be one of 1,2,4,6");
+                    "--stream-count must be between 1 and 16");
 
   const std::array missing_encode_path{"--encode-path"sv};
   CHECK_THROWS_WITH(

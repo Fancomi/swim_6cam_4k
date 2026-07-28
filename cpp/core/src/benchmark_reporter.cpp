@@ -133,11 +133,14 @@ void append_string(std::ostringstream& output, std::string_view key,
   output << ",\"" << key << "\":\"" << json_escape(value) << '"';
 }
 
+// Emits only `count` leading lanes so the JSON array length tracks the run's
+// active camera count rather than the compile-time capacity.
 template <std::size_t Size>
 void append_array(std::ostringstream& output, std::string_view key,
-                  const std::array<std::uint64_t, Size>& values) {
+                  const std::array<std::uint64_t, Size>& values,
+                  std::size_t count) {
   output << ",\"" << key << "\":[";
-  for (std::size_t index = 0; index < values.size(); ++index) {
+  for (std::size_t index = 0; index < std::min(count, Size); ++index) {
     if (index != 0) {
       output << ',';
     }
@@ -283,6 +286,9 @@ std::string serialize_benchmark_record(
   const auto encode_fps = final ? current.encode_completion_fps()
                                 : rate(encode_completions, elapsed_seconds);
   const auto machine = machine_identity();
+  // Per-camera arrays report the lanes this run actually drives.
+  const auto lane_count =
+      static_cast<std::size_t>(metadata.graph.active_sources);
   auto frame_age_p50 = current.frame_age_ms_p50;
   auto frame_age_p95 = current.frame_age_ms_p95;
   auto frame_age_p99 = current.frame_age_ms_p99;
@@ -339,26 +345,26 @@ std::string serialize_benchmark_record(
        << gpu_p50
        << ",\"gpu_render_ms_p95\":"
        << gpu_p95;
-  append_array(line, "frame_age_ms_p50", frame_age_p50);
-  append_array(line, "frame_age_ms_p95", frame_age_p95);
-  append_array(line, "frame_age_ms_p99", frame_age_p99);
+  append_array(line, "frame_age_ms_p50", frame_age_p50, lane_count);
+  append_array(line, "frame_age_ms_p95", frame_age_p95, lane_count);
+  append_array(line, "frame_age_ms_p99", frame_age_p99, lane_count);
   line << ",\"snapshot_age_spread_ms_p99\":"
        << age_spread_p99;
   append_array(line, "camera_received",
                interval_array(current.camera_received,
-                              previous.camera_received, final));
+                              previous.camera_received, final), lane_count);
   append_array(line, "camera_decoded",
                interval_array(current.camera_decoded,
-                              previous.camera_decoded, final));
+                              previous.camera_decoded, final), lane_count);
   append_array(line, "camera_published",
                interval_array(current.camera_published,
-                              previous.camera_published, final));
+                              previous.camera_published, final), lane_count);
   append_array(line, "mailbox_overwrites",
                interval_array(current.camera_overwritten,
-                              previous.camera_overwritten, final));
+                              previous.camera_overwritten, final), lane_count);
   append_array(line, "frame_reuses",
                interval_array(current.camera_reused,
-                              previous.camera_reused, final));
+                              previous.camera_reused, final), lane_count);
 
   line << ",\"received\":"
        << event_value(current.received, previous.received, final)
@@ -450,23 +456,23 @@ std::string serialize_benchmark_record(
                       previous.decoded_pixel_host_copies, final);
 
   append_array(line, "decode_surface_pool_capacity",
-               current.decode_surface_capacity);
+               current.decode_surface_capacity, lane_count);
   append_array(line, "decode_surface_pool_in_use",
-               current.decode_surface_in_use);
+               current.decode_surface_in_use, lane_count);
   append_array(line, "decode_surface_pool_high_water",
-               current.decode_surface_high_water);
+               current.decode_surface_high_water, lane_count);
   append_array(line, "decode_surface_pool_misses",
                interval_array(current.decode_surface_pool_misses,
-                              previous.decode_surface_pool_misses, final));
+                              previous.decode_surface_pool_misses, final), lane_count);
   append_array(line, "decode_ticket_pool_capacity",
-               current.decode_ticket_capacity);
+               current.decode_ticket_capacity, lane_count);
   append_array(line, "decode_ticket_pool_in_use",
-               current.decode_ticket_in_use);
+               current.decode_ticket_in_use, lane_count);
   append_array(line, "decode_ticket_pool_high_water",
-               current.decode_ticket_high_water);
+               current.decode_ticket_high_water, lane_count);
   append_array(line, "decode_ticket_pool_misses",
                interval_array(current.decode_ticket_pool_misses,
-                              previous.decode_ticket_pool_misses, final));
+                              previous.decode_ticket_pool_misses, final), lane_count);
 
   const auto texture_wrappers = event_value(
       current.native_texture_wrappers, previous.native_texture_wrappers,

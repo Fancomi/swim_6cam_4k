@@ -906,8 +906,14 @@ class MetalEncoder::Impl final {
 
  private:
   static void validate_dimensions(std::uint32_t width, std::uint32_t height) {
-    if (width != 5002 || height != 2102) {
-      throw std::runtime_error("HEVC encoder requires exact 5002x2102 output");
+    // yuv420p chroma subsampling needs even dimensions; the compiled asset
+    // supplies the actual size, so only the encoder's own constraints apply.
+    if (width == 0 || height == 0 || (width & 1U) != 0 || (height & 1U) != 0) {
+      throw std::runtime_error(
+          "HEVC encoder requires nonzero even output dimensions");
+    }
+    if (width > 16384 || height > 16384) {
+      throw std::runtime_error("HEVC encoder output exceeds 16384 per side");
     }
   }
 

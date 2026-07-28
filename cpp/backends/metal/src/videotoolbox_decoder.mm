@@ -24,8 +24,10 @@
 namespace swim::metal {
 namespace {
 
-constexpr std::uint32_t kRequiredWidth = 3840;
-constexpr std::uint32_t kRequiredHeight = 2160;
+// Decoded frame geometry is whatever the elementary stream declares: the pool
+// runs 3840x2160 mp4, the underwater rig 1280x720 MPEG-TS. Only the constraints
+// the Metal NV12 wrapping actually imposes are enforced (nonzero, even chroma).
+constexpr std::uint32_t kMaxFrameDimension = 8192;
 
 std::uint64_t initial_mask(std::uint32_t capacity) {
   if (capacity == 0 || capacity > 64) {
@@ -346,9 +348,26 @@ class VideoToolboxDecoder::Impl final {
           "VideoToolbox decoder requires an H.264 video format"};
     }
 
+    // Frame geometry is a property of the stream: 3840x2160 for the pool rig,
+    // 1280x720 for the underwater rig. NV12 chroma is half-resolution, so only
+    // even dimensions can be wrapped as Metal textures.
+    const auto dimensions =
+        CMVideoFormatDescriptionGetDimensions(format_description);
+    if (dimensions.width <= 0 || dimensions.height <= 0 ||
+        (dimensions.width & 1) != 0 || (dimensions.height & 1) != 0 ||
+        dimensions.width > static_cast<std::int32_t>(kMaxFrameDimension) ||
+        dimensions.height > static_cast<std::int32_t>(kMaxFrameDimension)) {
+      throw DecoderConfigurationError{
+          DecoderConfigurationFailure::invalid_format,
+          "VideoToolbox decoder requires even frame dimensions within " +
+              std::to_string(kMaxFrameDimension)};
+    }
+
     std::lock_guard lock(session_mutex_);
     advance_generation_locked();
     destroy_session_locked();
+    frame_width_ = static_cast<std::uint32_t>(dimensions.width);
+    frame_height_ = static_cast<std::uint32_t>(dimensions.height);
 
     NSDictionary* decoder_specification = @{
       (__bridge NSString*)kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder : @YES,
@@ -615,8 +634,8 @@ class VideoToolboxDecoder::Impl final {
         return;
       }
       pixel_buffer = static_cast<CVPixelBufferRef>(image_buffer);
-      if (CVPixelBufferGetWidth(pixel_buffer) != kRequiredWidth ||
-          CVPixelBufferGetHeight(pixel_buffer) != kRequiredHeight ||
+      if (CVPixelBufferGetWidth(pixel_buffer) != frame_width_ ||
+          CVPixelBufferGetHeight(pixel_buffer) != frame_height_ ||
           CVPixelBufferGetPixelFormatType(pixel_buffer) !=
               kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
           CVPixelBufferGetPlaneCount(pixel_buffer) != 2) {
@@ -667,7 +686,7 @@ class VideoToolboxDecoder::Impl final {
     surface->pixel_buffer = pixel_buffer;
     auto texture_status = CVMetalTextureCacheCreateTextureFromImage(
         kCFAllocatorDefault, context_->texture_cache, surface->pixel_buffer,
-        nullptr, MTLPixelFormatR8Unorm, kRequiredWidth, kRequiredHeight, 0,
+        nullptr, MTLPixelFormatR8Unorm, frame_width_, frame_height_, 0,
         &surface->luma_texture_ref);
     if (texture_status == kCVReturnSuccess &&
         surface->luma_texture_ref != nullptr) {
@@ -677,8 +696,8 @@ class VideoToolboxDecoder::Impl final {
     if (texture_status == kCVReturnSuccess && surface->luma != nil) {
       texture_status = CVMetalTextureCacheCreateTextureFromImage(
           kCFAllocatorDefault, context_->texture_cache, surface->pixel_buffer,
-          nullptr, MTLPixelFormatRG8Unorm, kRequiredWidth / 2,
-          kRequiredHeight / 2, 1, &surface->chroma_texture_ref);
+          nullptr, MTLPixelFormatRG8Unorm, frame_width_ / 2,
+          frame_height_ / 2, 1, &surface->chroma_texture_ref);
       if (texture_status == kCVReturnSuccess &&
           surface->chroma_texture_ref != nullptr) {
         record_texture_wrapper();
@@ -702,8 +721,8 @@ class VideoToolboxDecoder::Impl final {
       swim::core::HotPathAllocationScope hot_path;
       swim::core::FrameMetadata metadata;
       metadata.camera_index = ticket->camera_index;
-      metadata.width = kRequiredWidth;
-      metadata.height = kRequiredHeight;
+      metadata.width = frame_width_;
+      metadata.height = frame_height_;
       metadata.sequence = ++published_sequence_;
       metadata.decoder_generation = ticket->decoder_generation;
       metadata.pts_value = presentation_time.value;
@@ -783,6 +802,11 @@ class VideoToolboxDecoder::Impl final {
   std::shared_ptr<MetalDecodedSurfacePool> surfaces_;
   const std::uint32_t ticket_capacity_;
   const std::uint32_t surface_capacity_;
+  // Set by configure() from the stream's format description; read by the
+  // decompression callback, which only runs for the generation configure()
+  // installed, so the session mutex covers every transition.
+  std::uint32_t frame_width_{};
+  std::uint32_t frame_height_{};
   std::atomic_uint64_t ticket_in_use_{};
   std::atomic_uint64_t ticket_high_water_{};
   std::atomic_uint64_t ticket_misses_{};

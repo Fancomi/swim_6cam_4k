@@ -154,10 +154,10 @@ std::uint64_t FixedLatencyHistogram::count() const noexcept {
 }
 
 MetricsSnapshot RuntimeCounters::sample_totals() const noexcept {
-  std::array<std::uint64_t, 6> frame_age_p50{};
-  std::array<std::uint64_t, 6> frame_age_p95{};
-  std::array<std::uint64_t, 6> frame_age_p99{};
-  std::array<FixedLatencyHistogramSnapshot, 6> frame_age_histograms{};
+  std::array<std::uint64_t, kMaxCameras> frame_age_p50{};
+  std::array<std::uint64_t, kMaxCameras> frame_age_p95{};
+  std::array<std::uint64_t, kMaxCameras> frame_age_p99{};
+  std::array<FixedLatencyHistogramSnapshot, kMaxCameras> frame_age_histograms{};
   for (std::size_t camera = 0; camera < frame_age.size(); ++camera) {
     const auto snapshot = frame_age[camera].sample();
     frame_age_histograms[camera] = snapshot;

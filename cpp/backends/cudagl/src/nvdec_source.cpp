@@ -1,5 +1,6 @@
 #include <swim/cudagl/nvdec_source.hpp>
 
+#include <swim/core/camera_capacity.hpp>
 #include <swim/core/camera_health.hpp>
 
 extern "C" {
@@ -23,8 +24,9 @@ namespace swim::cudagl {
 namespace {
 
 constexpr std::size_t kMaximumLaneErrorBytes = 512;
-constexpr std::uint32_t kRequiredWidth = 3840;
-constexpr std::uint32_t kRequiredHeight = 2160;
+// Frame geometry follows the stream (4K pool mp4, 720p underwater TS); only the
+// NV12 half-resolution chroma constraint is universal.
+constexpr std::uint32_t kMaxFrameDimension = 8192;
 
 enum class LaneFailureKind : std::uint8_t { fatal, recoverable };
 
@@ -110,8 +112,9 @@ class NvdecSource::Impl final {
     if (source_.path.empty()) {
       throw std::invalid_argument("NVDEC source path must not be empty");
     }
-    if (camera_index_ >= 6) {
-      throw std::invalid_argument("NVDEC source camera index must be below six");
+    if (camera_index_ >= swim::core::kMaxCameras) {
+      throw std::invalid_argument(
+          "NVDEC source camera index must be below kMaxCameras");
     }
   }
 
@@ -224,6 +227,17 @@ class NvdecSource::Impl final {
     f.chroma_pitch = static_cast<std::size_t>(holder->av_frame->linesize[1]);
     f.width = static_cast<std::uint32_t>(holder->av_frame->width);
     f.height = static_cast<std::uint32_t>(holder->av_frame->height);
+    // NV12 chroma is half-resolution, so odd dimensions cannot be wrapped.
+    if (f.width == 0 || f.height == 0 || (f.width & 1U) != 0 ||
+        (f.height & 1U) != 0 || f.width > kMaxFrameDimension ||
+        f.height > kMaxFrameDimension) {
+      delete holder;
+      throw LaneFailure{
+          LaneFailureKind::fatal,
+          "decoded frame dimensions must be even and within " +
+              std::to_string(kMaxFrameDimension) + " (" +
+              std::to_string(f.width) + "x" + std::to_string(f.height) + ")"};
+    }
     f.owner = holder;
     f.metadata.camera_index = camera_index_;
     f.metadata.width = f.width;

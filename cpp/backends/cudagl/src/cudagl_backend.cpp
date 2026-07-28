@@ -71,7 +71,7 @@ class CudaGlRendererAdapter final : public swim::core::IRenderer {
 
   swim::core::RenderSubmitResult submit(
       const swim::core::RenderSnapshot& snapshot) override {
-    for (std::size_t camera = 0; camera < snapshot.frames.size(); ++camera) {
+    for (std::size_t camera = 0; camera < snapshot.camera_count; ++camera) {
       if (!snapshot.frames[camera]) {
         return swim::core::RenderSubmitResult::not_ready;
       }

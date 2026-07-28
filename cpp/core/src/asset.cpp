@@ -1,4 +1,5 @@
 #include <swim/core/asset.hpp>
+#include <swim/core/camera_capacity.hpp>
 
 #include <algorithm>
 #include <array>
@@ -22,7 +23,7 @@ namespace {
 
 constexpr std::array<char, 8> kMagic{'S', 'W', '4', 'K', 'A', 'S', 'T', '\0'};
 constexpr std::uint32_t kVersion = 1;
-constexpr std::uint32_t kRequiredCameraCount = 6;
+
 
 constexpr auto make_crc32_table() {
   std::array<std::uint32_t, 256> table{};
@@ -150,8 +151,9 @@ RuntimeAsset load_asset(const std::filesystem::path& path) {
   if (header.body_bytes != expected_body_bytes) {
     throw std::runtime_error("asset body size mismatch");
   }
-  if (header.camera_count != kRequiredCameraCount) {
-    throw std::runtime_error("asset camera count must be six");
+  if (header.camera_count == 0 || header.camera_count > kMaxCameras) {
+    throw std::runtime_error("asset camera count must be between 1 and " +
+                             std::to_string(kMaxCameras));
   }
 
   const auto camera_table_bytes = checked_multiply(

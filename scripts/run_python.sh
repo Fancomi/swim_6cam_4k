@@ -12,6 +12,11 @@
 #   ./scripts/run_python.sh uw-tex               # export per-camera first frames
 #   ./scripts/run_python.sh uw-render [BLEND_PX] # stitch (grid textures)
 #   ./scripts/run_python.sh uw-real [BLEND_PX]   # stitch (real first-frame images)
+#   ./scripts/run_python.sh uw-video DIR [BP] [S] # stitch 16 clips -> mp4
+#   ./scripts/run_python.sh we-predict [...]     # water-entry cam: YOLO-pose predict
+#   ./scripts/run_python.sh we-review [...]      # water-entry cam: HTML review page
+#   ./scripts/run_python.sh we-select [...]      # water-entry cam: pick frames to annotate
+#   ./scripts/run_python.sh we-annotate [...]    # water-entry cam: candidate QC page
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -36,6 +41,11 @@ Commands:
   uw-tex     Export each camera's first frame as a stitch texture
   uw-render  Stitch underwater planes with the baked grid textures [BLEND_PX]
   uw-real    Stitch underwater planes with real first-frame images [BLEND_PX]
+  uw-video   Stitch the 16 live *_underAi.ts clips into one panorama mp4
+  we-predict Run YOLO-pose over the water-entry camera clips (multi-model compare)
+  we-review  Build the water-entry pose review HTML page from predict results
+  we-select  Pick badly-predicted frames as incremental annotation candidates
+  we-annotate Render the candidate frames into a QC page before annotation
 
 Examples:
   ./scripts/run_python.sh still
@@ -48,6 +58,10 @@ Examples:
   ./scripts/run_python.sh uw-extract
   ./scripts/run_python.sh uw-tex
   ./scripts/run_python.sh uw-real 120
+  ./scripts/run_python.sh we-predict --limit 5
+  ./scripts/run_python.sh we-review --clips 20260725-160224
+  ./scripts/run_python.sh we-select
+  ./scripts/run_python.sh we-annotate --limit 100
 EOF
 }
 
@@ -174,6 +188,40 @@ cmd_uw_real() {
     --full-res --blend-px "$bp"
 }
 
+# Stitch the 16 live clips into one panorama mp4.
+# $1 = video dir, $2 = blend-px (default 120), $3 = seconds (default full clip).
+cmd_uw_video() {
+  local vdir="${1:?usage: uw-video VIDEO_DIR [BLEND_PX] [SECONDS]}"
+  local bp="${2:-120}"
+  local secs="${3:-}"
+  local -a extra=()
+  [[ -n "$secs" ]] && extra+=(--seconds "$secs")
+  "$PY" -m python.underwater.render_video "$vdir" \
+    --data "$UW_OUT/all_mesh.json" \
+    --out "$UW_OUT/all_stitch_bp${bp}.mp4" \
+    --blend-px "$bp" ${extra[@]+"${extra[@]}"}
+}
+
+# --- water-entry camera (underwater plane 0 上方机位) -------------------------
+# 入水检测机位的 YOLO-pose 预测与复核；数据集根用 WATER_ENTRY_DATASET_ROOT 覆盖。
+cmd_we_predict() {
+  "$PY" -m python.water_entry.predict "$@"
+}
+
+cmd_we_review() {
+  "$PY" -m python.water_entry.review "$@"
+  echo "open outputs/water_entry/review/index.html in a browser"
+}
+
+cmd_we_select() {
+  "$PY" -m python.water_entry.select_frames "$@"
+}
+
+cmd_we_annotate() {
+  "$PY" -m python.water_entry.annotate_preview "$@"
+  echo "open outputs/water_entry/annotate_preview/index.html in a browser"
+}
+
 if (($# == 0)); then
   usage >&2
   exit 2
@@ -192,6 +240,11 @@ case "$COMMAND" in
   uw-tex) cmd_uw_tex "$@" ;;
   uw-render) cmd_uw_render "$@" ;;
   uw-real) cmd_uw_real "$@" ;;
+  uw-video) cmd_uw_video "$@" ;;
+  we-predict) cmd_we_predict "$@" ;;
+  we-review) cmd_we_review "$@" ;;
+  we-select) cmd_we_select "$@" ;;
+  we-annotate) cmd_we_annotate "$@" ;;
   --help|-h|help) usage ;;
   *)
     echo "unknown command: $COMMAND" >&2

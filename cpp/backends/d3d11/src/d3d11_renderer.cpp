@@ -1,5 +1,6 @@
 #include <swim/d3d11/d3d11_renderer.hpp>
 
+#include <swim/core/camera_capacity.hpp>
 #include <swim/core/asset_format.hpp>
 #include <swim/core/render_completion_gate.hpp>
 
@@ -23,8 +24,6 @@
 namespace swim::d3d11 {
 namespace {
 
-constexpr std::array<const char*, 6> kCameraOrder{
-    "cam3", "cam2", "cam1", "cam4", "cam5", "cam6"};
 constexpr float kPerimeterTolerance = 1.0F / 64.0F;
 constexpr float kInclusiveExpansion = 1.0F / 16.0F;
 
@@ -142,15 +141,12 @@ class D3D11StitchRenderer::Impl
         encoded_width_ < logical_width_ || encoded_height_ < logical_height_) {
       throw std::invalid_argument("D3D11 renderer dimensions are invalid");
     }
-    if (asset.cameras.size() != cameras_.size()) {
-      throw std::invalid_argument("D3D11 renderer requires six cameras");
+    if (asset.cameras.empty() ||
+        asset.cameras.size() > swim::core::kMaxCameras) {
+      throw std::invalid_argument(
+          "D3D11 renderer camera count must be between 1 and kMaxCameras");
     }
-    for (std::size_t index = 0; index < cameras_.size(); ++index) {
-      if (asset.cameras[index].camera_id != kCameraOrder[index]) {
-        throw std::invalid_argument(
-            "D3D11 renderer camera order must be cam3,cam2,cam1,cam4,cam5,cam6");
-      }
-    }
+    camera_count_ = asset.cameras.size();
     publication_.publish([this, output_capacity = config.output_pool]
                          (auto& m) noexcept {
       m.render_inflight_capacity.store(1, std::memory_order_relaxed);
@@ -172,8 +168,9 @@ class D3D11StitchRenderer::Impl
     if (fatal_error_.load(std::memory_order_acquire)) {
       return false;
     }
-    std::array<D3D11FrameView, 6> frames;
-    for (std::size_t index = 0; index < frames.size(); ++index) {
+    std::array<D3D11FrameView, swim::core::kMaxCameras> frames;
+    const auto camera_count = std::min(camera_count_, snapshot.camera_count);
+    for (std::size_t index = 0; index < camera_count; ++index) {
       const auto& lease = snapshot.frames[index];
       if (!lease || lease.metadata().camera_index != index) {
         return false;
@@ -459,7 +456,7 @@ class D3D11StitchRenderer::Impl
 
   void upload_camera_resources(const swim::core::RuntimeAsset& asset) {
     auto* device = context_->device.Get();
-    for (std::size_t index = 0; index < cameras_.size(); ++index) {
+    for (std::size_t index = 0; index < camera_count_; ++index) {
       const auto& source = asset.cameras[index];
       auto& camera = cameras_[index];
       if (source.vertices.empty() || source.indices.empty() ||
@@ -700,7 +697,8 @@ class D3D11StitchRenderer::Impl
     context_->immediate_context->RSSetViewports(1, &viewport);
   }
 
-  void encode_stitch(const std::array<D3D11FrameView, 6>& frames,
+  void encode_stitch(
+      const std::array<D3D11FrameView, swim::core::kMaxCameras>& frames,
                      ID3D11RenderTargetView* output_rtv) {
     auto* ctx = context_->immediate_context.Get();
     const float clear[4] = {0.0F, 0.0F, 0.0F, 0.0F};
@@ -720,7 +718,7 @@ class D3D11StitchRenderer::Impl
                                        sampler_mirror_.Get()};
     ctx->PSSetSamplers(0, 2, samplers);
 
-    for (std::size_t index = 0; index < cameras_.size(); ++index) {
+    for (std::size_t index = 0; index < camera_count_; ++index) {
       const auto& camera = cameras_[index];
       const auto& frame = frames[index];
       float texel_x = 0.0F;
@@ -843,7 +841,8 @@ class D3D11StitchRenderer::Impl
   std::uint32_t logical_height_;
   std::uint32_t encoded_width_;
   std::uint32_t encoded_height_;
-  std::array<CameraResources, 6> cameras_;
+  std::size_t camera_count_{};
+  std::array<CameraResources, swim::core::kMaxCameras> cameras_;
 
   ComPtr<ID3D11VertexShader> vertex_shader_;
   ComPtr<ID3D11PixelShader> rgba_shader_;

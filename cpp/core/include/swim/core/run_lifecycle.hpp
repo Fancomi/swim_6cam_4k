@@ -1,5 +1,7 @@
 #pragma once
 
+#include <swim/core/camera_capacity.hpp>
+
 #include <array>
 #include <algorithm>
 #include <atomic>
@@ -155,7 +157,7 @@ class RuntimeStartState final {
     return result;
   }
 
-  std::size_t healthy_count(const std::array<bool, 6>& failed) const noexcept {
+  std::size_t healthy_count(const std::array<bool, kMaxCameras>& failed) const noexcept {
     std::size_t result = 0;
     for (std::size_t camera = 0; camera < started_.size(); ++camera) {
       result += started_[camera] && !failed[camera] ? 1U : 0U;
@@ -164,7 +166,7 @@ class RuntimeStartState final {
   }
 
  private:
-  std::array<bool, 6> started_{};
+  std::array<bool, kMaxCameras> started_{};
 };
 
 }  // namespace swim::core

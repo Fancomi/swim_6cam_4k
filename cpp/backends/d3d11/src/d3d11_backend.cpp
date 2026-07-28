@@ -1,5 +1,6 @@
 #include <swim/d3d11/d3d11_backend.hpp>
 
+#include <swim/core/camera_capacity.hpp>
 #include <swim/core/backend.hpp>
 #include <swim/core/benchmark_stage.hpp>
 #include <swim/d3d11/d3d11_frame.hpp>
@@ -69,12 +70,18 @@ void release_static_frame(void*) noexcept {}
 class PlaceholderFrames final {
  public:
   PlaceholderFrames(const std::shared_ptr<D3D11Context>& context,
-                    std::uint32_t width, std::uint32_t height) {
-    for (std::uint32_t camera = 0; camera < views_.size(); ++camera) {
-      // Distinct grey levels per lane so a synthetic render is visibly six
+                    std::uint32_t width, std::uint32_t height,
+                    std::uint32_t camera_count)
+      : camera_count_(camera_count) {
+    if (camera_count_ == 0 || camera_count_ > swim::core::kMaxCameras) {
+      throw std::invalid_argument(
+          "D3D11 placeholder lane count must be between 1 and kMaxCameras");
+    }
+    for (std::uint32_t camera = 0; camera < camera_count_; ++camera) {
+      // Distinct grey levels per lane so a synthetic render shows separate
       // panels rather than a flat frame.
-      const std::uint8_t level =
-          static_cast<std::uint8_t>(40 + camera * 30);
+      const std::uint8_t level = static_cast<std::uint8_t>(
+          40 + camera * (200 / camera_count_));
       create_solid(context, width, height, level, camera);
       views_[camera].rgba = srvs_[camera].Get();
       views_[camera].metadata.camera_index = camera;
@@ -85,7 +92,7 @@ class PlaceholderFrames final {
   }
 
   swim::core::FrameLease lease(std::uint32_t camera_index) const {
-    if (camera_index >= views_.size()) {
+    if (camera_index >= camera_count_) {
       return {};
     }
     return swim::core::FrameLease{
@@ -124,9 +131,10 @@ class PlaceholderFrames final {
     }
   }
 
-  std::array<ComPtr<ID3D11Texture2D>, 6> textures_;
-  std::array<ComPtr<ID3D11ShaderResourceView>, 6> srvs_;
-  std::array<D3D11FrameView, 6> views_;
+  std::uint32_t camera_count_{};
+  std::array<ComPtr<ID3D11Texture2D>, swim::core::kMaxCameras> textures_;
+  std::array<ComPtr<ID3D11ShaderResourceView>, swim::core::kMaxCameras> srvs_;
+  std::array<D3D11FrameView, swim::core::kMaxCameras> views_;
 };
 
 class D3D11RendererAdapter final : public swim::core::IRenderer {
@@ -137,13 +145,14 @@ class D3D11RendererAdapter final : public swim::core::IRenderer {
                        swim::core::RuntimeCounters& metrics,
                        std::shared_ptr<D3D11Preview> preview)
       : preview_(std::move(preview)),
-        placeholders_(context, 3840, 2160),
+        placeholders_(context, asset.logical_width, asset.logical_height,
+                      static_cast<std::uint32_t>(asset.cameras.size())),
         renderer_(context, asset, config, &metrics,
                   make_sink(preview_)) {}
 
   swim::core::RenderSubmitResult submit(
       const swim::core::RenderSnapshot& snapshot) override {
-    for (std::size_t camera = 0; camera < snapshot.frames.size(); ++camera) {
+    for (std::size_t camera = 0; camera < snapshot.camera_count; ++camera) {
       const auto& lease = snapshot.frames[camera];
       if (!lease) {
         return swim::core::RenderSubmitResult::not_ready;

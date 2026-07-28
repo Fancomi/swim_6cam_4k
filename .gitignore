@@ -18,3 +18,7 @@ inputs/pool/models/*.fbx
 
 # Prebuilt CUDA/GL backend deps (FFmpeg+cuvid, GLFW) — large binaries, fetched locally
 /third_party/
+
+# Agent worktrees and downloaded model weights are local scratch
+.claude/worktrees/
+*.pt

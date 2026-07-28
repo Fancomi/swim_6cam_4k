@@ -123,14 +123,15 @@ void print_validation(const swim::core::AppConfig& config,
   std::cout << "configuration valid\n";
   std::cout << "backend=" << config.backend << '\n';
   std::cout << "camera_order=";
-  for (std::size_t index = 0; index < config.sources.size(); ++index) {
+  for (std::uint32_t index = 0; index < config.source_count; ++index) {
     if (index != 0) {
       std::cout << ',';
     }
     std::cout << config.sources[index].camera_id;
   }
   std::cout << '\n';
-  for (const auto& source : config.sources) {
+  for (std::uint32_t index = 0; index < config.source_count; ++index) {
+    const auto& source = config.sources[index];
     std::cout << "source." << source.camera_id << '=' << source.path.string()
               << '\n';
   }
@@ -217,7 +218,7 @@ class RuntimeFinalizer final {
           std::make_exception_ptr(std::runtime_error(std::move(message)));
     }
 
-    std::array<bool, 6> failed{};
+    std::array<bool, swim::core::kMaxCameras> failed{};
     bool started_source_failed = false;
     for (std::size_t camera = 0; camera < sources_.size(); ++camera) {
       if (!sources_[camera]) {

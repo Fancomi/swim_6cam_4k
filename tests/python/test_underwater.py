@@ -90,6 +90,97 @@ class SelectPoolPlanesTest(unittest.TestCase):
         self.assertEqual(select_pool_planes(meshes), [])
 
 
+class VideoAlignmentTest(unittest.TestCase):
+    """Time alignment must come from the manifest wall clocks, not file order."""
+
+    def test_camera_of_parses_texture_basename(self):
+        from python.underwater.render_video import camera_of
+
+        self.assertEqual(camera_of("underA7-grid.png"), "underA7")
+        self.assertEqual(camera_of("underA16-grid.png"), "underA16")
+        self.assertIsNone(camera_of("pool.png"))
+        self.assertIsNone(camera_of(None))
+
+    def test_start_frames_follow_playback_formula(self):
+        from python.underwater.render_video import alignment_plan
+
+        align_start, align_end, fps = 1_000_000, 1_030_000, 30.0
+        cams = {
+            # frame 0 lands 2970ms before align_start -> start at frame 89
+            "underA2": {"keyframe_ms": align_start - 2970,
+                        "last_decodable_ms": align_end, "frames": 989},
+            # frame 0 lands 14ms before align_start -> start at frame 0
+            "underA1": {"keyframe_ms": align_start - 14,
+                        "last_decodable_ms": align_end, "frames": 900},
+        }
+        starts, report = alignment_plan(
+            align_start, align_end, fps, cams, ["underA2", "underA1"])
+
+        self.assertEqual(starts, [89, 0])
+        self.assertEqual([r["skew_ms"] for r in report], [2970, 14])
+        self.assertFalse(any(r["late_start"] for r in report))
+
+    def test_flags_camera_starting_after_align_start(self):
+        from python.underwater.render_video import alignment_plan
+
+        align_start, align_end, fps = 1_000_000, 1_030_000, 30.0
+        cams = {"underA1": {"keyframe_ms": align_start + 500,
+                            "last_decodable_ms": align_end, "frames": 900}}
+        starts, report = alignment_plan(
+            align_start, align_end, fps, cams, ["underA1"])
+
+        self.assertEqual(starts, [0])          # clamped, cannot read before frame 0
+        self.assertTrue(report[0]["late_start"])
+
+    def test_reports_short_tail_against_align_end(self):
+        from python.underwater.render_video import alignment_plan
+
+        align_start, align_end, fps = 1_000_000, 1_030_000, 30.0
+        cams = {"underA1": {"keyframe_ms": align_start,
+                            "last_decodable_ms": align_end - 400, "frames": 890}}
+        _starts, report = alignment_plan(
+            align_start, align_end, fps, cams, ["underA1"])
+
+        self.assertEqual(report[0]["short_ms"], 400)
+
+    def test_manifest_without_align_window_is_fatal(self):
+        import json
+        import tempfile
+        from python.underwater.render_video import load_manifest
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            (td / "manifest.json").write_text(json.dumps({"files": []}))
+            with self.assertRaises(SystemExit):
+                load_manifest(td)
+
+    def test_missing_manifest_is_fatal(self):
+        import tempfile
+        from python.underwater.render_video import load_manifest
+
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(SystemExit):
+                load_manifest(Path(td))
+
+    def test_falls_back_to_first_decodable_anchor(self):
+        import json
+        import tempfile
+        from python.underwater.render_video import load_manifest
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            (td / "manifest.json").write_text(json.dumps({
+                "align_start_ms": 10, "align_end_ms": 20, "fps": 30.0,
+                "files": [{"source_id": "underA1",
+                           "first_decodable_timestamp_ms": 7,
+                           "last_decodable_timestamp_ms": 20, "frames": 30}],
+            }))
+            start, end, fps, cams = load_manifest(td)
+
+            self.assertEqual((start, end, fps), (10, 20, 30.0))
+            self.assertEqual(cams["underA1"]["keyframe_ms"], 7)
+
+
 class ExtractIntegrationTest(unittest.TestCase):
     @unittest.skipUnless(HAS_FBX, "FBX SDK not available")
     @unittest.skipUnless(MODEL_01D.is_file(), "01d.fbx not present")

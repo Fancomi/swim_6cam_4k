@@ -1,5 +1,6 @@
 #include <swim/cudagl/cudagl_renderer.hpp>
 
+#include <swim/core/camera_capacity.hpp>
 #include <swim/core/asset_format.hpp>
 #include <swim/core/render_completion_gate.hpp>
 
@@ -31,8 +32,6 @@
 namespace swim::cudagl {
 namespace {
 
-constexpr std::array<const char*, 6> kCameraOrder{
-    "cam3", "cam2", "cam1", "cam4", "cam5", "cam6"};
 constexpr float kPerimeterTolerance = 1.0F / 64.0F;
 constexpr float kInclusiveExpansion = 1.0F / 16.0F;
 
@@ -232,15 +231,12 @@ class CudaGlStitchRenderer::Impl {
         output_capacity_(config.output_pool == 0 ? 4 : config.output_pool),
         publication_(metrics),
         sink_(std::move(sink)) {
-    if (asset.cameras.size() != cameras_.size()) {
-      throw std::invalid_argument("CUDA/GL renderer requires six cameras");
+    if (asset.cameras.empty() ||
+        asset.cameras.size() > swim::core::kMaxCameras) {
+      throw std::invalid_argument(
+          "CUDA/GL renderer camera count must be between 1 and kMaxCameras");
     }
-    for (std::size_t i = 0; i < cameras_.size(); ++i) {
-      if (asset.cameras[i].camera_id != kCameraOrder[i]) {
-        throw std::invalid_argument(
-            "CUDA/GL renderer camera order must be cam3,cam2,cam1,cam4,cam5,cam6");
-      }
-    }
+    camera_count_ = asset.cameras.size();
     cuda_check(cuInit(0), "cuInit");
     // GL objects and the CUDA context are created lazily on the first submit(),
     // which runs on the render thread that owns the GL context. The constructor
@@ -286,8 +282,9 @@ class CudaGlStitchRenderer::Impl {
     try {
       ensure_initialized();
       // Gather the six decoded CUDA frames.
-      std::array<CudaGlDecodedFrame*, 6> frames{};
-      for (std::size_t i = 0; i < 6; ++i) {
+      std::array<CudaGlDecodedFrame*, swim::core::kMaxCameras> frames{};
+      const auto camera_count = std::min(camera_count_, snapshot.camera_count);
+      for (std::size_t i = 0; i < camera_count; ++i) {
         const auto& lease = snapshot.frames[i];
         if (!lease || lease.metadata().camera_index != i) {
           return false;
@@ -507,8 +504,19 @@ class CudaGlStitchRenderer::Impl {
                "cuGraphicsGLRegisterImage");
   }
 
+  void destroy_cuda_gl_texture(CudaGlTexture& tex) noexcept {
+    if (tex.resource != nullptr) {
+      cuGraphicsUnregisterResource(tex.resource);
+      tex.resource = nullptr;
+    }
+    if (tex.texture != 0) {
+      glDeleteTextures(1, &tex.texture);
+      tex.texture = 0;
+    }
+  }
+
   void upload_camera_resources(const swim::core::RuntimeAsset& asset) {
-    for (std::size_t i = 0; i < cameras_.size(); ++i) {
+    for (std::size_t i = 0; i < camera_count_; ++i) {
       const auto& src = asset.cameras[i];
       auto& cam = cameras_[i];
       if (src.vertices.empty() || src.indices.empty() ||
@@ -570,17 +578,38 @@ class CudaGlStitchRenderer::Impl {
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-      make_cuda_gl_texture(cam.luma, kFrameW, kFrameH, GL_R8, GL_RED);
-      make_cuda_gl_texture(cam.chroma, kFrameW / 2, kFrameH / 2, GL_RG8, GL_RG);
     }
   }
 
-  void upload_only(const std::array<CudaGlDecodedFrame*, 6>& frames) {
+  // NV12 plane textures are sized from the first decoded frame, since frame
+  // geometry follows the stream (4K pool mp4, 720p underwater TS) rather than a
+  // compile-time constant. Registering with CUDA is a one-time cost per lane.
+  void ensure_plane_textures(std::uint32_t width, std::uint32_t height) {
+    if (frame_width_ == width && frame_height_ == height) {
+      return;
+    }
+    if (width == 0 || height == 0 || (width & 1U) != 0 || (height & 1U) != 0) {
+      throw std::invalid_argument(
+          "CUDA/GL decoded frame dimensions must be nonzero and even");
+    }
+    for (std::size_t i = 0; i < camera_count_; ++i) {
+      auto& cam = cameras_[i];
+      destroy_cuda_gl_texture(cam.luma);
+      destroy_cuda_gl_texture(cam.chroma);
+      make_cuda_gl_texture(cam.luma, width, height, GL_R8, GL_RED);
+      make_cuda_gl_texture(cam.chroma, width / 2, height / 2, GL_RG8, GL_RG);
+    }
+    frame_width_ = width;
+    frame_height_ = height;
+  }
+
+  void upload_only(
+      const std::array<CudaGlDecodedFrame*, swim::core::kMaxCameras>& frames) {
     upload_all_nv12(frames);
   }
 
   void draw_only(OutputSlot* slot) {
-    std::array<CudaGlDecodedFrame*, 6> dummy{};
+    std::array<CudaGlDecodedFrame*, swim::core::kMaxCameras> dummy{};
     draw_passes(dummy, slot, /*already_uploaded=*/true);
   }
 
@@ -588,22 +617,25 @@ class CudaGlStitchRenderer::Impl {
   // resources synchronizes the CUDA and GL contexts, so doing it once for all
   // 12 plane textures instead of 6 separate map/unmap pairs collapses six
   // context syncs into one — the dominant per-frame cost at 60 fps.
-  void upload_all_nv12(const std::array<CudaGlDecodedFrame*, 6>& frames) {
-    std::array<CUgraphicsResource, 12> resources{};
-    for (std::size_t i = 0; i < cameras_.size(); ++i) {
+  void upload_all_nv12(
+      const std::array<CudaGlDecodedFrame*, swim::core::kMaxCameras>& frames) {
+    ensure_plane_textures(frames[0]->width, frames[0]->height);
+    std::array<CUgraphicsResource, swim::core::kMaxCameras * 2> resources{};
+    const auto resource_count = camera_count_ * 2;
+    for (std::size_t i = 0; i < camera_count_; ++i) {
       resources[i * 2] = cameras_[i].luma.resource;
       resources[i * 2 + 1] = cameras_[i].chroma.resource;
     }
-    cuda_check(cuGraphicsMapResources(static_cast<unsigned>(resources.size()),
+    cuda_check(cuGraphicsMapResources(static_cast<unsigned>(resource_count),
                                       resources.data(), 0),
                "cuGraphicsMapResources");
     struct Unmap {
       CUgraphicsResource* r;
       unsigned n;
       ~Unmap() { cuGraphicsUnmapResources(n, r, 0); }
-    } unmap{resources.data(), static_cast<unsigned>(resources.size())};
+    } unmap{resources.data(), static_cast<unsigned>(resource_count)};
 
-    for (std::size_t i = 0; i < cameras_.size(); ++i) {
+    for (std::size_t i = 0; i < camera_count_; ++i) {
       copy_plane(cameras_[i].luma, static_cast<CUdeviceptr>(frames[i]->luma_ptr),
                  frames[i]->luma_pitch, frames[i]->width, frames[i]->height,
                  /*bytes_per_pixel=*/1);
@@ -632,12 +664,14 @@ class CudaGlStitchRenderer::Impl {
     cuda_check(cuMemcpy2D(&copy), "cuMemcpy2D");
   }
 
-  void upload_and_stitch(const std::array<CudaGlDecodedFrame*, 6>& frames,
+  void upload_and_stitch(
+      const std::array<CudaGlDecodedFrame*, swim::core::kMaxCameras>& frames,
                          OutputSlot* slot) {
     draw_passes(frames, slot, /*already_uploaded=*/false);
   }
 
-  void draw_passes(const std::array<CudaGlDecodedFrame*, 6>& frames,
+  void draw_passes(
+      const std::array<CudaGlDecodedFrame*, swim::core::kMaxCameras>& frames,
                    OutputSlot* slot, bool already_uploaded) {
     // Upload all six NV12 frames in one map/unmap before drawing.
     if (!already_uploaded) {
@@ -657,10 +691,10 @@ class CudaGlStitchRenderer::Impl {
     glBlendEquation(GL_FUNC_ADD);
     glUseProgram(stitch_program_);
 
-    for (std::size_t i = 0; i < cameras_.size(); ++i) {
+    for (std::size_t i = 0; i < camera_count_; ++i) {
       auto& cam = cameras_[i];
-      const auto fw = already_uploaded ? kFrameW : frames[i]->width;
-      const auto fh = already_uploaded ? kFrameH : frames[i]->height;
+      const auto fw = already_uploaded ? frame_width_ : frames[i]->width;
+      const auto fh = already_uploaded ? frame_height_ : frames[i]->height;
       const auto matrix = already_uploaded
                               ? 0U
                               : static_cast<unsigned>(
@@ -795,15 +829,17 @@ class CudaGlStitchRenderer::Impl {
     }
   }
 
-  static constexpr std::uint32_t kFrameW = 3840;
-  static constexpr std::uint32_t kFrameH = 2160;
+  // Decoded frame geometry, set by ensure_plane_textures() from the stream.
+  std::uint32_t frame_width_{};
+  std::uint32_t frame_height_{};
 
   std::shared_ptr<CudaGlContext> context_;
   const swim::core::RuntimeAsset* asset_ = nullptr;
   bool initialized_ = false;
   std::uint32_t logical_width_, logical_height_, encoded_width_, encoded_height_;
   std::uint32_t output_capacity_;
-  std::array<CameraResources, 6> cameras_;
+  std::size_t camera_count_{};
+  std::array<CameraResources, swim::core::kMaxCameras> cameras_;
   GLuint stitch_program_ = 0;
   GLuint resolve_program_ = 0;
   GLuint empty_vao_ = 0;

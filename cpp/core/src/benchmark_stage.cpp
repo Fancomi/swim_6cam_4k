@@ -8,15 +8,12 @@
 namespace swim::core {
 
 BenchmarkGraph resolve_benchmark_graph(const AppConfig& config) {
-  switch (config.stream_count) {
-    case 1:
-    case 2:
-    case 4:
-    case 6:
-      break;
-    default:
-      throw std::invalid_argument(
-          "stream_count must be one of 1, 2, 4, or 6");
+  // stream_count selects how many of the config's declared lanes to drive. The
+  // benchmark matrix sweeps 1/2/4/6 on the pool layout; other layouts (e.g. the
+  // 16-plane underwater panorama) simply use all of their lanes.
+  if (config.stream_count == 0 || config.stream_count > config.source_count) {
+    throw std::invalid_argument(
+        "stream_count must be between 1 and the declared source count");
   }
 
   switch (config.stage) {
@@ -66,8 +63,9 @@ std::string_view pacing_name(RunMode mode) noexcept {
 
 SourceArray make_sources(IBackend& backend, const AppConfig& config,
                          std::uint32_t active_sources) {
-  if (active_sources > config.sources.size()) {
-    throw std::invalid_argument("active_sources must not exceed six");
+  if (active_sources > config.source_count) {
+    throw std::invalid_argument(
+        "active_sources must not exceed the declared source count");
   }
   SourceArray sources;
   for (std::uint32_t camera = 0; camera < active_sources; ++camera) {
