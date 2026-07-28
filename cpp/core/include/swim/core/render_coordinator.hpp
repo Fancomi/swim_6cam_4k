@@ -1,5 +1,6 @@
 #pragma once
 
+#include <swim/core/camera_capacity.hpp>
 #include <swim/core/backend.hpp>
 #include <swim/core/benchmark_stage.hpp>
 #include <swim/core/config.hpp>
@@ -18,7 +19,7 @@ namespace swim::core {
 // for a camera and retains the six selected front leases between ticks.
 class RenderCoordinator final {
  public:
-  static constexpr std::size_t kCameraCount = 6;
+  static constexpr std::size_t kCameraCapacity = kMaxCameras;
   using Clock = std::chrono::steady_clock;
   using Mailboxes = MailboxArray;
 
@@ -41,13 +42,16 @@ class RenderCoordinator final {
   BenchmarkGraph graph_;
   RuntimeCounters& metrics_;
   RunLifecycle& lifecycle_;
-  std::array<FrameLease, kCameraCount> fronts_;
-  std::array<Clock::time_point, kCameraCount> last_source_frames_{};
-  std::array<bool, kCameraCount> replacements_{};
-  std::array<bool, kCameraCount> fixed_frames_{};
-  std::array<std::uint64_t, kCameraCount> last_real_generations_{};
-  std::array<std::uint64_t, kCameraCount> last_real_sequences_{};
-  std::array<bool, kCameraCount> have_real_frames_{};
+  std::array<FrameLease, kCameraCapacity> fronts_;
+  std::array<Clock::time_point, kCameraCapacity> last_source_frames_{};
+  std::array<bool, kCameraCapacity> replacements_{};
+  std::array<bool, kCameraCapacity> fixed_frames_{};
+  std::array<std::uint64_t, kCameraCapacity> last_real_generations_{};
+  std::array<std::uint64_t, kCameraCapacity> last_real_sequences_{};
+  std::array<bool, kCameraCapacity> have_real_frames_{};
+  // Lanes this run drives: the config's declared sources, which
+  // validate_runtime_compatibility has already matched against the asset.
+  std::size_t camera_count_{};
   Clock::time_point first_tick_{};
 };
 

@@ -225,8 +225,6 @@ void MetalOutputPool::release(MetalOutputSlot* slot) noexcept {
 
 namespace {
 
-constexpr std::array<const char*, 6> kCameraOrder{
-    "cam3", "cam2", "cam1", "cam4", "cam5", "cam6"};
 constexpr float kPerimeterTolerance = 1.0F / 64.0F;
 constexpr float kInclusiveExpansion = 1.0F / 16.0F;
 
@@ -339,6 +337,14 @@ std::uint32_t validate_inflight_capacity(std::uint32_t capacity) {
         "Metal render in-flight capacity must be between 1 and 64");
   }
   return capacity;
+}
+
+std::size_t validate_camera_count(std::size_t count) {
+  if (count == 0 || count > swim::core::kMaxCameras) {
+    throw std::invalid_argument(
+        "Metal renderer camera count must be between 1 and kMaxCameras");
+  }
+  return count;
 }
 
 std::uint64_t seconds_to_nanoseconds(double seconds) noexcept {
@@ -473,8 +479,8 @@ class MetalStitchRenderer::Impl final
   struct InFlightRecord final {
     std::atomic_bool busy{false};
     id<MTLTexture> accumulation = nil;
-    std::array<MetalFrameView, 6> frame_views;
-    std::array<swim::core::FrameLease, 6> input_leases;
+    std::array<MetalFrameView, swim::core::kMaxCameras> frame_views;
+    std::array<swim::core::FrameLease, swim::core::kMaxCameras> input_leases;
     MetalOutputLease output;
   };
 
@@ -488,6 +494,7 @@ class MetalStitchRenderer::Impl final
         logical_height_(asset.logical_height),
         encoded_width_(asset.encoded_width),
         encoded_height_(asset.encoded_height),
+        camera_count_(validate_camera_count(asset.cameras.size())),
         inflight_count_(validate_inflight_capacity(config.render_inflight)),
         in_flight_(std::make_unique<InFlightRecord[]>(inflight_count_)),
         output_pool_(context_, config.output_pool, encoded_width_,
@@ -502,8 +509,9 @@ class MetalStitchRenderer::Impl final
         encoded_width_ < logical_width_ || encoded_height_ < logical_height_) {
       throw std::invalid_argument("Metal renderer dimensions are invalid");
     }
-    if (asset.cameras.size() != cameras_.size()) {
-      throw std::invalid_argument("Metal renderer requires six cameras");
+    if (asset.cameras.size() != camera_count_) {
+      throw std::invalid_argument(
+          "Metal renderer camera count does not match the asset");
     }
     publication_.publish([this, output_capacity = config.output_pool]
                          (auto& metrics) noexcept {
@@ -512,13 +520,6 @@ class MetalStitchRenderer::Impl final
       metrics.render_output_capacity.store(output_capacity,
                                            std::memory_order_relaxed);
     });
-    for (std::size_t index = 0; index < cameras_.size(); ++index) {
-      if (asset.cameras[index].camera_id != kCameraOrder[index]) {
-        throw std::invalid_argument(
-            "Metal renderer camera order must be cam3,cam2,cam1,cam4,cam5,cam6");
-      }
-    }
-
     library_ = compile_shader_library(context_->device);
     rgba_pipeline_ = make_pipeline(context_->device, library_, @"stitch_rgba",
                                    MTLPixelFormatRGBA16Float, true);
@@ -535,8 +536,8 @@ class MetalStitchRenderer::Impl final
 
   ~Impl() { drain_noexcept(); }
 
-  bool submit(const std::array<MetalFrameView, 6>& frames,
-              const std::array<swim::core::FrameLease, 6>* leases,
+  bool submit(const std::array<MetalFrameView, swim::core::kMaxCameras>& frames,
+              const std::array<swim::core::FrameLease, swim::core::kMaxCameras>* leases,
               MetalRenderResult& result) noexcept {
     result.output = {};
     result.gpu_start_ns = 0;
@@ -545,7 +546,7 @@ class MetalStitchRenderer::Impl final
     if (fatal_error_.load(std::memory_order_acquire)) {
       return false;
     }
-    for (std::size_t index = 0; index < frames.size(); ++index) {
+    for (std::size_t index = 0; index < camera_count_; ++index) {
       if (frames[index].metadata.camera_index != index) {
         return false;
       }
@@ -704,12 +705,14 @@ class MetalStitchRenderer::Impl final
     return fatal_error_message_;
   }
 
+  std::size_t camera_count() const noexcept { return camera_count_; }
+
   bool uploaded_vertices_match(
       const swim::core::RuntimeAsset& asset) const noexcept {
-    if (asset.cameras.size() != cameras_.size()) {
+    if (asset.cameras.size() != camera_count_) {
       return false;
     }
-    for (std::size_t index = 0; index < cameras_.size(); ++index) {
+    for (std::size_t index = 0; index < camera_count_; ++index) {
       const auto& source = asset.cameras[index];
       const auto& camera = cameras_[index];
       const auto expected_bytes =
@@ -852,7 +855,7 @@ class MetalStitchRenderer::Impl final
   }
 
   void upload_camera_resources(const swim::core::RuntimeAsset& asset) {
-    for (std::size_t index = 0; index < cameras_.size(); ++index) {
+    for (std::size_t index = 0; index < camera_count_; ++index) {
       const auto& source = asset.cameras[index];
       auto& camera = cameras_[index];
       if (source.vertices.empty() || source.indices.empty() ||
@@ -948,7 +951,7 @@ class MetalStitchRenderer::Impl final
   }
 
   void encode_stitch(id<MTLCommandBuffer> command,
-                     const std::array<MetalFrameView, 6>& frames,
+                     const std::array<MetalFrameView, swim::core::kMaxCameras>& frames,
                      InFlightRecord& record,
                      id<MTLTexture> output_texture) {
     auto* accumulation_pass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -963,7 +966,7 @@ class MetalStitchRenderer::Impl final
       throw std::runtime_error("cannot create Metal stitch encoder");
     }
 
-    for (std::size_t index = 0; index < cameras_.size(); ++index) {
+    for (std::size_t index = 0; index < camera_count_; ++index) {
       const auto& camera = cameras_[index];
       const auto& frame = frames[index];
       const auto texture_width = frame.rgba != nil ? frame.rgba.width
@@ -1061,7 +1064,8 @@ class MetalStitchRenderer::Impl final
   std::uint32_t logical_height_;
   std::uint32_t encoded_width_;
   std::uint32_t encoded_height_;
-  std::array<CameraResources, 6> cameras_;
+  std::size_t camera_count_;
+  std::array<CameraResources, swim::core::kMaxCameras> cameras_;
   id<MTLBuffer> fullscreen_vertices_ = nil;
   id<MTLLibrary> library_ = nil;
   id<MTLRenderPipelineState> rgba_pipeline_ = nil;
@@ -1108,7 +1112,7 @@ MetalStitchRenderer::~MetalStitchRenderer() {
 }
 
 bool MetalStitchRenderer::submit(
-    const std::array<MetalFrameView, 6>& frames,
+    const std::array<MetalFrameView, swim::core::kMaxCameras>& frames,
     MetalRenderResult& result) noexcept {
   @autoreleasepool {
     return impl_->submit(frames, nullptr, result);
@@ -1120,8 +1124,10 @@ bool MetalStitchRenderer::submit(
     MetalRenderResult& result) noexcept {
   @autoreleasepool {
     try {
-      std::array<MetalFrameView, 6> frames;
-      for (std::size_t index = 0; index < frames.size(); ++index) {
+      std::array<MetalFrameView, swim::core::kMaxCameras> frames;
+      const auto camera_count = std::min(impl_->camera_count(),
+                                        snapshot.camera_count);
+      for (std::size_t index = 0; index < camera_count; ++index) {
         if (snapshot.frames[index].metadata().camera_index != index) {
           return false;
         }

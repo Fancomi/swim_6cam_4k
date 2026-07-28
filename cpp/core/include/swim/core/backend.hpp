@@ -1,5 +1,6 @@
 #pragma once
 
+#include <swim/core/camera_capacity.hpp>
 #include <swim/core/asset.hpp>
 #include <swim/core/config.hpp>
 #include <swim/core/frame.hpp>
@@ -9,6 +10,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -36,8 +38,11 @@ class ISource {
 };
 
 struct RenderSnapshot {
-  std::array<FrameLease, 6> frames;
+  std::array<FrameLease, kMaxCameras> frames;
   std::chrono::steady_clock::time_point sampled_at;
+  // Live lanes in `frames`; entries at or past this index are unused capacity.
+  // Backends must iterate this, not frames.size().
+  std::size_t camera_count{};
 };
 
 enum class RenderSubmitResult : std::uint8_t {
@@ -76,8 +81,8 @@ class IBackend {
   virtual void stop_main_loop() noexcept = 0;
 };
 
-using SourceArray = std::array<std::unique_ptr<ISource>, 6>;
-using MailboxArray = std::array<LatestFrameMailbox, 6>;
+using SourceArray = std::array<std::unique_ptr<ISource>, kMaxCameras>;
+using MailboxArray = std::array<LatestFrameMailbox, kMaxCameras>;
 
 using BackendFactory = std::unique_ptr<IBackend> (*)();
 

@@ -18,7 +18,7 @@ void retain_static(void*) noexcept {}
 void release_static(void*) noexcept {}
 
 swim::core::FrameLease static_frame(std::uint32_t camera) {
-  static std::array<std::uint32_t, 6> storage{};
+  static std::array<std::uint32_t, swim::core::kMaxCameras> storage{};
   swim::core::FrameMetadata metadata{};
   metadata.camera_index = camera;
   metadata.width = 3840;
@@ -70,7 +70,7 @@ class CountingBackend final : public swim::core::IBackend {
   void run_main_loop(std::stop_token) override {}
   void stop_main_loop() noexcept override {}
 
-  std::array<FakeSource*, 6> views{};
+  std::array<FakeSource*, swim::core::kMaxCameras> views{};
   std::uint32_t source_calls{};
   std::uint32_t renderer_calls{};
 };
@@ -146,15 +146,29 @@ TEST_CASE(benchmark_stage_output_policy_is_authoritative) {
   CHECK(!render.encode);
 }
 
-TEST_CASE(benchmark_stage_rejects_unsupported_stream_counts) {
+TEST_CASE(benchmark_stage_rejects_stream_counts_outside_declared_sources) {
   using swim::core::BenchmarkStage;
   using swim::core::resolve_benchmark_graph;
 
-  for (const auto count : std::array<std::uint32_t, 4>{0, 3, 5, 7}) {
+  // config_for leaves source_count at the pool default of six, so zero and any
+  // count past six are out of range; 3 and 5 are now legitimate subsets.
+  for (const auto count : std::array<std::uint32_t, 3>{0, 7, 17}) {
     CHECK_THROWS_WITH(
         resolve_benchmark_graph(config_for(BenchmarkStage::full, count)),
-        "stream_count must be one of 1, 2, 4, or 6");
+        "stream_count must be between 1 and the declared source count");
   }
+  for (const auto count : std::array<std::uint32_t, 3>{1, 3, 6}) {
+    CHECK_EQ(resolve_benchmark_graph(config_for(BenchmarkStage::full, count))
+                 .active_sources,
+             count);
+  }
+}
+
+TEST_CASE(benchmark_stage_accepts_sixteen_declared_underwater_lanes) {
+  using swim::core::BenchmarkStage;
+  auto config = config_for(BenchmarkStage::full, 16);
+  config.source_count = 16;
+  CHECK_EQ(swim::core::resolve_benchmark_graph(config).active_sources, 16u);
 }
 
 TEST_CASE(benchmark_stage_and_pacing_names_are_stable) {
@@ -189,7 +203,7 @@ TEST_CASE(benchmark_stage_creates_and_starts_only_active_sources) {
     CHECK(!sources[camera]);
   }
 
-  std::array<swim::core::LatestFrameMailbox, 6> mailboxes;
+  swim::core::MailboxArray mailboxes;
   swim::core::RuntimeStartState state;
   swim::core::start_sources_recorded(sources, mailboxes, state);
   CHECK_EQ(state.started_count(), 2u);
@@ -203,7 +217,7 @@ TEST_CASE(decode_only_lifecycle_starts_on_publication_and_runs_for_duration) {
   swim::core::AppConfig config;
   auto sources = swim::core::make_sources(backend, config, 1);
   backend.views[0]->publish_on_start = true;
-  std::array<swim::core::LatestFrameMailbox, 6> mailboxes;
+  swim::core::MailboxArray mailboxes;
   swim::core::RuntimeStartState state;
   swim::core::start_sources_recorded(sources, mailboxes, state);
   swim::core::RunLifecycle lifecycle{15ms};
@@ -225,7 +239,7 @@ TEST_CASE(decode_only_exits_early_when_every_active_source_fails) {
   auto sources = swim::core::make_sources(backend, config, 2);
   backend.views[0]->failure = true;
   backend.views[1]->failure = true;
-  std::array<swim::core::LatestFrameMailbox, 6> mailboxes;
+  swim::core::MailboxArray mailboxes;
   swim::core::RunLifecycle lifecycle{10s};
 
   const auto started = std::chrono::steady_clock::now();
@@ -244,7 +258,7 @@ TEST_CASE(decode_only_partial_failure_waits_for_healthy_lane_publication) {
   swim::core::AppConfig config;
   auto sources = swim::core::make_sources(backend, config, 2);
   backend.views[0]->failure = true;
-  std::array<swim::core::LatestFrameMailbox, 6> mailboxes;
+  swim::core::MailboxArray mailboxes;
   swim::core::RunLifecycle lifecycle{15ms};
   swim::core::DecodeOnlyExit result{
       swim::core::DecodeOnlyExit::stop_requested};

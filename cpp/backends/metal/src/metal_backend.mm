@@ -76,11 +76,15 @@ class MetalRendererAdapter final : public swim::core::IRenderer {
         router_(std::move(router)),
         preview_(std::move(preview)),
         encoder_(std::move(encoder)),
+        camera_count_(static_cast<std::uint32_t>(asset.cameras.size())),
         renderer_(context_, asset, config, &metrics, router_sink(router_)) {
+    // Synthetic stand-ins for render-only/benchmark stages. They only need to
+    // cover the stitch's UV sampling, so the asset's logical size is the natural
+    // choice — no dependence on any particular camera resolution.
     auto* descriptor = [MTLTextureDescriptor
         texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-                                    width:3840
-                                   height:2160
+                                    width:asset.logical_width
+                                   height:asset.logical_height
                                 mipmapped:NO];
     descriptor.storageMode = MTLStorageModePrivate;
     descriptor.usage =
@@ -91,8 +95,7 @@ class MetalRendererAdapter final : public swim::core::IRenderer {
       throw std::runtime_error(
           "cannot create Metal benchmark-frame command buffer");
     }
-    for (std::uint32_t camera = 0; camera < benchmark_frames_.size();
-         ++camera) {
+    for (std::uint32_t camera = 0; camera < camera_count_; ++camera) {
       benchmark_textures_[camera] =
           [context_->device newTextureWithDescriptor:descriptor];
       if (benchmark_textures_[camera] == nil) {
@@ -113,8 +116,8 @@ class MetalRendererAdapter final : public swim::core::IRenderer {
 
       benchmark_frames_[camera].rgba = benchmark_textures_[camera];
       benchmark_frames_[camera].metadata.camera_index = camera;
-      benchmark_frames_[camera].metadata.width = 3840;
-      benchmark_frames_[camera].metadata.height = 2160;
+      benchmark_frames_[camera].metadata.width = asset.logical_width;
+      benchmark_frames_[camera].metadata.height = asset.logical_height;
       benchmark_frames_[camera].metadata.pixel_format =
           swim::core::PixelFormat::bgra8;
     }
@@ -130,7 +133,7 @@ class MetalRendererAdapter final : public swim::core::IRenderer {
     if (encoder_ != nullptr && !metal_encoder_admits_render(*encoder_)) {
       return swim::core::RenderSubmitResult::fatal;
     }
-    for (std::size_t camera = 0; camera < snapshot.frames.size(); ++camera) {
+    for (std::size_t camera = 0; camera < snapshot.camera_count; ++camera) {
       const auto& lease = snapshot.frames[camera];
       if (!lease) {
         return swim::core::RenderSubmitResult::not_ready;
@@ -182,7 +185,7 @@ class MetalRendererAdapter final : public swim::core::IRenderer {
 
   swim::core::FrameLease benchmark_frame(
       std::uint32_t camera_index) const override {
-    if (camera_index >= benchmark_frames_.size()) {
+    if (camera_index >= camera_count_) {
       return {};
     }
     return swim::core::FrameLease{
@@ -246,9 +249,10 @@ class MetalRendererAdapter final : public swim::core::IRenderer {
   std::shared_ptr<MetalCompletedOutputRouter> router_;
   std::shared_ptr<MetalPreview> preview_;
   std::shared_ptr<MetalEncoder> encoder_;
+  std::uint32_t camera_count_{};
   MetalStitchRenderer renderer_;
-  std::array<id<MTLTexture>, 6> benchmark_textures_{};
-  std::array<MetalFrameView, 6> benchmark_frames_;
+  std::array<id<MTLTexture>, swim::core::kMaxCameras> benchmark_textures_{};
+  std::array<MetalFrameView, swim::core::kMaxCameras> benchmark_frames_;
 };
 
 class MetalSourceAdapter final : public swim::core::ISource {

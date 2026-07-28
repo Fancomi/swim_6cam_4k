@@ -1,5 +1,6 @@
 #include <swim/metal/mp4_source.hpp>
 
+#include <swim/core/camera_capacity.hpp>
 #include <swim/core/camera_health.hpp>
 #include <swim/metal/videotoolbox_decoder.hpp>
 
@@ -116,8 +117,9 @@ class Mp4VideoToolboxSource::Impl final {
     if (source_.path.empty()) {
       throw std::invalid_argument("MP4 source path must not be empty");
     }
-    if (camera_index_ >= 6) {
-      throw std::invalid_argument("MP4 source camera index must be below six");
+    if (camera_index_ >= swim::core::kMaxCameras) {
+      throw std::invalid_argument(
+          "MP4 source camera index must be below kMaxCameras");
     }
     if (run_duration_.count() < 0) {
       throw std::invalid_argument("MP4 source duration must not be negative");

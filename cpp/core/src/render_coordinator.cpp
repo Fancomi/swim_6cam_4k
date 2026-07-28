@@ -23,7 +23,8 @@ RenderCoordinator::RenderCoordinator(Mailboxes& mailboxes,
       graph_(graph),
       metrics_(metrics),
       lifecycle_(lifecycle) {
-  for (std::size_t camera = 0; camera < kCameraCount; ++camera) {
+  camera_count_ = std::min<std::size_t>(config_.source_count, kCameraCapacity);
+  for (std::size_t camera = 0; camera < camera_count_; ++camera) {
     if (graph_.synthetic_inputs || camera >= graph_.active_sources) {
       fronts_[camera] =
           renderer_.benchmark_frame(static_cast<std::uint32_t>(camera));
@@ -67,7 +68,7 @@ RenderSubmitResult RenderCoordinator::tick(Clock::time_point sampled_at) {
     first_tick_ = sampled_at;
   }
 
-  for (std::size_t camera = 0; camera < kCameraCount; ++camera) {
+  for (std::size_t camera = 0; camera < camera_count_; ++camera) {
     if (fixed_frames_[camera]) {
       continue;
     }
@@ -115,7 +116,7 @@ RenderSubmitResult RenderCoordinator::tick(Clock::time_point sampled_at) {
   auto youngest_age = std::chrono::milliseconds::max();
   auto oldest_age = std::chrono::milliseconds::zero();
   std::size_t measured_frames = 0;
-  for (std::size_t camera = 0; camera < kCameraCount; ++camera) {
+  for (std::size_t camera = 0; camera < camera_count_; ++camera) {
     if (!fronts_[camera] || replacements_[camera]) {
       continue;
     }
@@ -133,7 +134,7 @@ RenderSubmitResult RenderCoordinator::tick(Clock::time_point sampled_at) {
     metrics_.snapshot_age_spread.observe(oldest_age - youngest_age);
   }
 
-  RenderSnapshot snapshot{fronts_, sampled_at};
+  RenderSnapshot snapshot{fronts_, sampled_at, camera_count_};
   const auto result = renderer_.submit(snapshot);
   switch (result) {
     case RenderSubmitResult::accepted:

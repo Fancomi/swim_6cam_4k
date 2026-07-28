@@ -146,8 +146,12 @@ void validate_frame(const swim::core::FrameLease& frame,
                     CMTime& previous_pts) {
   const auto& metadata = frame.metadata();
   require(metadata.camera_index == camera, "camera metadata crossed lanes");
-  require(metadata.width == 3840, "decoded width is not 3840");
-  require(metadata.height == 2160, "decoded height is not 2160");
+  // Frame geometry follows the stream (4K pool mp4, 720p underwater TS); only
+  // the NV12 wrapping constraints are universal.
+  require(metadata.width > 0 && (metadata.width & 1U) == 0,
+          "decoded width is not a positive even number");
+  require(metadata.height > 0 && (metadata.height & 1U) == 0,
+          "decoded height is not a positive even number");
   require(metadata.pixel_format ==
               swim::core::PixelFormat::nv12_video_range,
           "decoded format is not video-range NV12");
@@ -233,6 +237,8 @@ int run(const Options& options) {
   std::array<CMTime, kMaximumLanes> first_pts;
   first_pts.fill(kCMTimeInvalid);
   std::array<std::uint64_t, kMaximumLanes> consumed{};
+  std::array<std::uint32_t, kMaximumLanes> lane_width{};
+  std::array<std::uint32_t, kMaximumLanes> lane_height{};
   std::uint64_t allocation_baseline{};
   bool allocation_baseline_set = false;
   const auto started_at = std::chrono::steady_clock::now();
@@ -245,6 +251,8 @@ int run(const Options& options) {
       if (mailboxes[camera].consume_latest(frame)) {
         validate_frame(frame, camera, previous_sequence[camera],
                        previous_pts[camera]);
+        lane_width[camera] = frame.metadata().width;
+        lane_height[camera] = frame.metadata().height;
         if (!CMTIME_IS_VALID(first_pts[camera])) {
           first_sequence[camera] = frame.metadata().sequence;
           first_pts[camera] = previous_pts[camera];
@@ -295,6 +303,8 @@ int run(const Options& options) {
     if (mailboxes[camera].consume_latest(frame)) {
       validate_frame(frame, camera, previous_sequence[camera],
                      previous_pts[camera]);
+      lane_width[camera] = frame.metadata().width;
+      lane_height[camera] = frame.metadata().height;
       if (!CMTIME_IS_VALID(first_pts[camera])) {
         first_sequence[camera] = frame.metadata().sequence;
         first_pts[camera] = previous_pts[camera];
@@ -343,8 +353,8 @@ int run(const Options& options) {
         seconds;
     require(measured_fps >= 29.8 && measured_fps <= 30.1,
             "measured decoded FPS is outside 29.8..30.1");
-    std::cout << "cam" << camera + 1
-              << " 3840x2160 measured_fps=" << measured_fps
+    std::cout << "cam" << camera + 1 << ' ' << lane_width[camera] << 'x'
+              << lane_height[camera] << " measured_fps=" << measured_fps
               << " hardware=true callbacks=" << stats.callbacks
               << " minimum_callbacks=" << minimum_callbacks
               << " published=" << published

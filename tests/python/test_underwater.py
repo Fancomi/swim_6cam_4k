@@ -90,6 +90,97 @@ class SelectPoolPlanesTest(unittest.TestCase):
         self.assertEqual(select_pool_planes(meshes), [])
 
 
+class VideoAlignmentTest(unittest.TestCase):
+    """Time alignment must come from the manifest wall clocks, not file order."""
+
+    def test_camera_of_parses_texture_basename(self):
+        from python.underwater.render_video import camera_of
+
+        self.assertEqual(camera_of("underA7-grid.png"), "underA7")
+        self.assertEqual(camera_of("underA16-grid.png"), "underA16")
+        self.assertIsNone(camera_of("pool.png"))
+        self.assertIsNone(camera_of(None))
+
+    def test_start_frames_follow_playback_formula(self):
+        from python.underwater.render_video import alignment_plan
+
+        align_start, align_end, fps = 1_000_000, 1_030_000, 30.0
+        cams = {
+            # frame 0 lands 2970ms before align_start -> start at frame 89
+            "underA2": {"keyframe_ms": align_start - 2970,
+                        "last_decodable_ms": align_end, "frames": 989},
+            # frame 0 lands 14ms before align_start -> start at frame 0
+            "underA1": {"keyframe_ms": align_start - 14,
+                        "last_decodable_ms": align_end, "frames": 900},
+        }
+        starts, report = alignment_plan(
+            align_start, align_end, fps, cams, ["underA2", "underA1"])
+
+        self.assertEqual(starts, [89, 0])
+        self.assertEqual([r["skew_ms"] for r in report], [2970, 14])
+        self.assertFalse(any(r["late_start"] for r in report))
+
+    def test_flags_camera_starting_after_align_start(self):
+        from python.underwater.render_video import alignment_plan
+
+        align_start, align_end, fps = 1_000_000, 1_030_000, 30.0
+        cams = {"underA1": {"keyframe_ms": align_start + 500,
+                            "last_decodable_ms": align_end, "frames": 900}}
+        starts, report = alignment_plan(
+            align_start, align_end, fps, cams, ["underA1"])
+
+        self.assertEqual(starts, [0])          # clamped, cannot read before frame 0
+        self.assertTrue(report[0]["late_start"])
+
+    def test_reports_short_tail_against_align_end(self):
+        from python.underwater.render_video import alignment_plan
+
+        align_start, align_end, fps = 1_000_000, 1_030_000, 30.0
+        cams = {"underA1": {"keyframe_ms": align_start,
+                            "last_decodable_ms": align_end - 400, "frames": 890}}
+        _starts, report = alignment_plan(
+            align_start, align_end, fps, cams, ["underA1"])
+
+        self.assertEqual(report[0]["short_ms"], 400)
+
+    def test_manifest_without_align_window_is_fatal(self):
+        import json
+        import tempfile
+        from python.underwater.render_video import load_manifest
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            (td / "manifest.json").write_text(json.dumps({"files": []}))
+            with self.assertRaises(SystemExit):
+                load_manifest(td)
+
+    def test_missing_manifest_is_fatal(self):
+        import tempfile
+        from python.underwater.render_video import load_manifest
+
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(SystemExit):
+                load_manifest(Path(td))
+
+    def test_falls_back_to_first_decodable_anchor(self):
+        import json
+        import tempfile
+        from python.underwater.render_video import load_manifest
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            (td / "manifest.json").write_text(json.dumps({
+                "align_start_ms": 10, "align_end_ms": 20, "fps": 30.0,
+                "files": [{"source_id": "underA1",
+                           "first_decodable_timestamp_ms": 7,
+                           "last_decodable_timestamp_ms": 20, "frames": 30}],
+            }))
+            start, end, fps, cams = load_manifest(td)
+
+            self.assertEqual((start, end, fps), (10, 20, 30.0))
+            self.assertEqual(cams["underA1"]["keyframe_ms"], 7)
+
+
 class ExtractIntegrationTest(unittest.TestCase):
     @unittest.skipUnless(HAS_FBX, "FBX SDK not available")
     @unittest.skipUnless(MODEL_01D.is_file(), "01d.fbx not present")
@@ -291,3 +382,72 @@ class RenderStillTest(unittest.TestCase):
             grid = td / "out_grid.png"
             with self.assertRaises(SystemExit):
                 render_stills(bad_path, td, still, grid)
+
+
+class OneClickRunnerTest(unittest.TestCase):
+    """The one-command runner must pick the right platform toolchain and emit a
+    config whose lane order matches the compiled asset."""
+
+    def test_platform_selects_backend_build_dir_and_executable(self):
+        import python.underwater.run as runner
+
+        original = runner.platform.system
+        try:
+            runner.platform.system = lambda: "Darwin"
+            self.assertEqual(runner.default_backend(), "metal")
+            self.assertEqual(runner.build_dir_for("metal").name, "metal-release")
+            self.assertEqual(
+                runner.executable_for(runner.build_dir_for("metal")).name,
+                "swim_realtime")
+
+            runner.platform.system = lambda: "Windows"
+            self.assertEqual(runner.default_backend(), "d3d11")
+            self.assertEqual(runner.build_dir_for("d3d11").name, "win-d3d11")
+            self.assertEqual(
+                runner.executable_for(runner.build_dir_for("d3d11")).name,
+                "swim_realtime.exe")
+        finally:
+            runner.platform.system = original
+
+    def test_generated_config_declares_sixteen_lanes_right_to_left(self):
+        import tempfile
+        import python.underwater.run as runner
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            for index in range(1, 17):
+                (td / f"swb_test_underA{index}.ts").write_bytes(b"")
+            config = td / "generated.conf"
+            runner.write_config(config, td, "metal", td / "out.h265")
+
+            lines = config.read_text().splitlines()
+            sources = [line.split("=", 1)[0].removeprefix("source.")
+                       for line in lines if line.startswith("source.")]
+            # extract orders meshes left-to-right, which is underA16 -> underA1
+            self.assertEqual(sources, [f"underA{i}" for i in range(16, 0, -1)])
+            self.assertIn("backend=metal", lines)
+
+    def test_missing_clip_is_reported_not_silently_skipped(self):
+        import tempfile
+        import python.underwater.run as runner
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            for index in range(1, 16):          # underA16 absent
+                (td / f"swb_test_underA{index}.ts").write_bytes(b"")
+            with self.assertRaises(runner.StepError):
+                runner.write_config(td / "c.conf", td, "metal", td / "o.h265")
+
+    def test_newer_than_treats_missing_target_as_stale(self):
+        import tempfile
+        import python.underwater.run as runner
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            source = td / "src"
+            source.write_text("x")
+            self.assertFalse(runner.newer_than(td / "absent", source))
+
+            target = td / "target"
+            target.write_text("y")
+            self.assertTrue(runner.newer_than(target, source))

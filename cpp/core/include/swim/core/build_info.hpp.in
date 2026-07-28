@@ -5,7 +5,15 @@
 namespace swim::core::build_info {
 
 inline constexpr std::string_view git_sha{"@SWIM_GIT_SHA@"};
+// Multi-config generators (Visual Studio, Xcode) do not fix the build type at
+// configure time, so CMAKE_BUILD_TYPE is empty there. When the build system
+// injects SWIM_BUILD_TYPE per configuration it wins; otherwise fall back to the
+// single-config CMAKE_BUILD_TYPE substituted here.
+#if defined(SWIM_BUILD_TYPE)
+inline constexpr std::string_view build_type{SWIM_BUILD_TYPE};
+#else
 inline constexpr std::string_view build_type{"@CMAKE_BUILD_TYPE@"};
+#endif
 inline constexpr std::string_view compiler{
     "@CMAKE_CXX_COMPILER_ID@ @CMAKE_CXX_COMPILER_VERSION@"};
 

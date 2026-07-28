@@ -15,6 +15,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 
 @interface SwimPreviewDelegate : NSObject <NSWindowDelegate>
@@ -46,6 +47,11 @@
 
 namespace swim::metal {
 namespace {
+
+// Preview target geometry. The width is the nominal size; very wide composites
+// trade width for the minimum legible height instead of being stretched.
+constexpr std::uint32_t kPreviewTargetWidth = 1280;
+constexpr std::uint32_t kPreviewMinimumHeight = 180;
 
 struct PreviewScale final {
   float x;
@@ -79,15 +85,21 @@ struct PreviewVertexOut {
   float2 uv;
 };
 
+// A four-vertex strip covering exactly the letterboxed content rect. An
+// oversized single triangle cannot be used here: scaling its overhang by the
+// letterbox factor pulls the overhanging corner inside the clip box, where its
+// out-of-range UVs get ClampToEdge-smeared into a visible wedge of stretched
+// edge pixels. This quad spans only [-scale, +scale] with UVs in [0,1].
 vertex PreviewVertexOut preview_vertex(uint vertex_id [[vertex_id]],
                                         constant float2& scale [[buffer(0)]]) {
-  constexpr float2 positions[3] = {
-      float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0)};
-  constexpr float2 uvs[3] = {
-      float2(0.0, 1.0), float2(2.0, 1.0), float2(0.0, -1.0)};
+  constexpr float2 corners[4] = {
+      float2(-1.0, -1.0), float2(1.0, -1.0),
+      float2(-1.0, 1.0), float2(1.0, 1.0)};
+  const float2 corner = corners[vertex_id];
   PreviewVertexOut out;
-  out.position = float4(positions[vertex_id] * scale, 0.0, 1.0);
-  out.uv = uvs[vertex_id];
+  out.position = float4(corner * scale, 0.0, 1.0);
+  // Clip space is y-up, texture space y-down.
+  out.uv = float2((corner.x + 1.0) * 0.5, (1.0 - corner.y) * 0.5);
   return out;
 }
 
@@ -125,6 +137,22 @@ fragment float4 preview_fragment(PreviewVertexOut in [[stage_in]],
 }
 
 }  // namespace
+
+std::pair<std::uint32_t, std::uint32_t> preview_target_size(
+    std::uint32_t width, std::uint32_t height) {
+  if (width == 0 || height == 0) {
+    throw std::invalid_argument("preview target needs nonzero dimensions");
+  }
+  auto target_width = kPreviewTargetWidth;
+  auto target_height = static_cast<std::uint32_t>(std::lround(
+      static_cast<double>(kPreviewTargetWidth) * height / width));
+  if (target_height < kPreviewMinimumHeight) {
+    target_height = kPreviewMinimumHeight;
+    target_width = static_cast<std::uint32_t>(std::lround(
+        static_cast<double>(kPreviewMinimumHeight) * width / height));
+  }
+  return {target_width, target_height};
+}
 
 class MetalPreview::Impl final
     : public std::enable_shared_from_this<MetalPreview::Impl> {
@@ -168,11 +196,10 @@ class MetalPreview::Impl final
         throw std::runtime_error("cannot create Metal preview sampler");
       }
 
-      constexpr std::uint32_t target_width = 1280;
-      const auto scaled_height = static_cast<std::uint32_t>(std::lround(
-          static_cast<double>(target_width) * source_height_ / source_width_));
-      offscreen_width_ = target_width;
-      offscreen_height_ = std::max<std::uint32_t>(360, scaled_height);
+      // Matching the composite's aspect ratio makes the letterbox in
+      // display_tick() collapse to nothing while the window is untouched.
+      std::tie(offscreen_width_, offscreen_height_) =
+          preview_target_size(source_width_, source_height_);
       if (!visible_) {
         auto* descriptor = [MTLTextureDescriptor
             texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
@@ -192,12 +219,11 @@ class MetalPreview::Impl final
       application_ = [NSApplication sharedApplication];
       [application_ setActivationPolicy:NSApplicationActivationPolicyRegular];
 
-      constexpr CGFloat initial_width = 1280.0;
-      const auto aspect = static_cast<CGFloat>(source_height_) /
-                          static_cast<CGFloat>(source_width_);
-      const NSRect frame = NSMakeRect(80.0, 80.0, initial_width,
-                                      std::max<CGFloat>(360.0,
-                                                        initial_width * aspect));
+      // Open at the composite's own aspect ratio so the content fills the window
+      // with no letterbox, and keep that ratio pinned while the user resizes.
+      const NSRect frame =
+          NSMakeRect(80.0, 80.0, static_cast<CGFloat>(offscreen_width_),
+                     static_cast<CGFloat>(offscreen_height_));
       window_ = [[NSWindow alloc]
           initWithContentRect:frame
                     styleMask:(NSWindowStyleMaskTitled |
@@ -209,8 +235,15 @@ class MetalPreview::Impl final
       if (window_ == nil) {
         throw std::runtime_error("cannot create Metal preview window");
       }
-      window_.title = @"Swimming 6-Camera Metal Preview";
+      window_.title =
+          [NSString stringWithFormat:@"Swimming Metal Preview — %ux%u",
+                                     source_width_, source_height_];
       window_.releasedWhenClosed = NO;
+      // Resizing then preserves the composite ratio, so what the user drags is
+      // always a scaled view of the whole stitch rather than a cropped band.
+      window_.contentAspectRatio =
+          NSMakeSize(static_cast<CGFloat>(source_width_),
+                     static_cast<CGFloat>(source_height_));
 
       view_ = [[NSView alloc] initWithFrame:window_.contentView.bounds];
       view_.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
@@ -486,7 +519,9 @@ class MetalPreview::Impl final
     [encoder setVertexBytes:&scale length:sizeof(scale) atIndex:0];
     [encoder setFragmentTexture:output.texture() atIndex:0];
     [encoder setFragmentSamplerState:sampler_ atIndex:0];
-    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip
+                vertexStart:0
+                vertexCount:4];
     [encoder endEncoding];
     if (!present_accounting_.begin()) {
       record_preview_drop();

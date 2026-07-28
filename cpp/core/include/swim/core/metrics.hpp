@@ -1,5 +1,7 @@
 #pragma once
 
+#include <swim/core/camera_capacity.hpp>
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -74,14 +76,14 @@ struct MetricsSnapshot final {
   const std::uint64_t render_output_in_use;
   const std::uint64_t render_output_high_water;
   const std::uint64_t render_output_pool_misses;
-  const std::array<std::uint64_t, 6> camera_received;
-  const std::array<std::uint64_t, 6> camera_decoded;
-  const std::array<std::uint64_t, 6> camera_published;
-  const std::array<std::uint64_t, 6> camera_overwritten;
-  const std::array<std::uint64_t, 6> camera_reused;
-  const std::array<std::uint64_t, 6> frame_age_ms_p50;
-  const std::array<std::uint64_t, 6> frame_age_ms_p95;
-  const std::array<std::uint64_t, 6> frame_age_ms_p99;
+  const std::array<std::uint64_t, kMaxCameras> camera_received;
+  const std::array<std::uint64_t, kMaxCameras> camera_decoded;
+  const std::array<std::uint64_t, kMaxCameras> camera_published;
+  const std::array<std::uint64_t, kMaxCameras> camera_overwritten;
+  const std::array<std::uint64_t, kMaxCameras> camera_reused;
+  const std::array<std::uint64_t, kMaxCameras> frame_age_ms_p50;
+  const std::array<std::uint64_t, kMaxCameras> frame_age_ms_p95;
+  const std::array<std::uint64_t, kMaxCameras> frame_age_ms_p99;
   const std::uint64_t snapshot_age_spread_ms_p99;
   const std::uint64_t gpu_render_duration_ms_p50;
   const std::uint64_t gpu_render_duration_ms_p95;
@@ -110,15 +112,15 @@ struct MetricsSnapshot final {
   const std::uint64_t native_decode_tickets;
   const std::uint64_t native_callback_wrappers;
   const std::uint64_t application_hot_path_allocations;
-  const std::array<std::uint64_t, 6> decode_surface_capacity;
-  const std::array<std::uint64_t, 6> decode_surface_in_use;
-  const std::array<std::uint64_t, 6> decode_surface_high_water;
-  const std::array<std::uint64_t, 6> decode_surface_pool_misses;
-  const std::array<std::uint64_t, 6> decode_ticket_capacity;
-  const std::array<std::uint64_t, 6> decode_ticket_in_use;
-  const std::array<std::uint64_t, 6> decode_ticket_high_water;
-  const std::array<std::uint64_t, 6> decode_ticket_pool_misses;
-  const std::array<FixedLatencyHistogramSnapshot, 6> frame_age_histograms;
+  const std::array<std::uint64_t, kMaxCameras> decode_surface_capacity;
+  const std::array<std::uint64_t, kMaxCameras> decode_surface_in_use;
+  const std::array<std::uint64_t, kMaxCameras> decode_surface_high_water;
+  const std::array<std::uint64_t, kMaxCameras> decode_surface_pool_misses;
+  const std::array<std::uint64_t, kMaxCameras> decode_ticket_capacity;
+  const std::array<std::uint64_t, kMaxCameras> decode_ticket_in_use;
+  const std::array<std::uint64_t, kMaxCameras> decode_ticket_high_water;
+  const std::array<std::uint64_t, kMaxCameras> decode_ticket_pool_misses;
+  const std::array<FixedLatencyHistogramSnapshot, kMaxCameras> frame_age_histograms;
   const FixedLatencyHistogramSnapshot snapshot_age_spread_histogram;
   const FixedLatencyHistogramSnapshot gpu_render_duration_histogram;
 
@@ -186,23 +188,23 @@ struct RuntimeCounters final {
   alignas(kMetricsCacheLineBytes) std::atomic_uint64_t
       native_callback_wrappers{};
 
-  std::array<std::atomic_uint64_t, 6> camera_received{};
-  std::array<std::atomic_uint64_t, 6> camera_decoded{};
-  std::array<std::atomic_uint64_t, 6> camera_published{};
-  std::array<std::atomic_uint64_t, 6> camera_overwritten{};
-  std::array<std::atomic_uint64_t, 6> camera_reused{};
-  std::array<std::atomic_uint64_t, 6> decode_surface_capacity{};
-  std::array<std::atomic_uint64_t, 6> decode_surface_in_use{};
-  std::array<std::atomic_uint64_t, 6> decode_surface_high_water{};
-  std::array<std::atomic_uint64_t, 6> decode_surface_pool_misses{};
-  std::array<std::atomic_uint64_t, 6> decode_ticket_capacity{};
-  std::array<std::atomic_uint64_t, 6> decode_ticket_in_use{};
-  std::array<std::atomic_uint64_t, 6> decode_ticket_high_water{};
-  std::array<std::atomic_uint64_t, 6> decode_ticket_pool_misses{};
+  std::array<std::atomic_uint64_t, kMaxCameras> camera_received{};
+  std::array<std::atomic_uint64_t, kMaxCameras> camera_decoded{};
+  std::array<std::atomic_uint64_t, kMaxCameras> camera_published{};
+  std::array<std::atomic_uint64_t, kMaxCameras> camera_overwritten{};
+  std::array<std::atomic_uint64_t, kMaxCameras> camera_reused{};
+  std::array<std::atomic_uint64_t, kMaxCameras> decode_surface_capacity{};
+  std::array<std::atomic_uint64_t, kMaxCameras> decode_surface_in_use{};
+  std::array<std::atomic_uint64_t, kMaxCameras> decode_surface_high_water{};
+  std::array<std::atomic_uint64_t, kMaxCameras> decode_surface_pool_misses{};
+  std::array<std::atomic_uint64_t, kMaxCameras> decode_ticket_capacity{};
+  std::array<std::atomic_uint64_t, kMaxCameras> decode_ticket_in_use{};
+  std::array<std::atomic_uint64_t, kMaxCameras> decode_ticket_high_water{};
+  std::array<std::atomic_uint64_t, kMaxCameras> decode_ticket_pool_misses{};
 
   // Fixed atomic buckets make reporter snapshots race-safe without handoff
   // allocation or destructive reset.
-  std::array<FixedLatencyHistogram, 6> frame_age;
+  std::array<FixedLatencyHistogram, kMaxCameras> frame_age;
   FixedLatencyHistogram snapshot_age_spread;
   FixedLatencyHistogram gpu_render_duration;
 

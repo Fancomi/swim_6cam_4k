@@ -47,7 +47,7 @@ TEST_CASE(run_lifecycle_first_activation_owns_the_global_deadline) {
 
 TEST_CASE(runtime_start_state_counts_only_completed_healthy_starts) {
   swim::core::RuntimeStartState state;
-  std::array<bool, 6> failed{};
+  std::array<bool, swim::core::kMaxCameras> failed{};
   CHECK_EQ(state.healthy_count(failed), 0u);
   state.mark_started(0);
   state.mark_started(2);

@@ -389,15 +389,29 @@ TEST_CASE(encoder_input_drain_is_bounded_and_reports_timeout) {
   CHECK(gate.wait_until_empty(std::chrono::milliseconds{10}));
 }
 
-TEST_CASE(hardware_encoder_requires_exact_canvas_and_reports_hardware) {
+TEST_CASE(hardware_encoder_requires_even_canvas_and_reports_hardware) {
   swim::core::AppConfig config;
   config.encode = true;
   config.encode_sink = swim::core::EncodeSink::null_sink;
   swim::core::RuntimeCounters metrics;
-  CHECK_THROWS_WITH(swim::metal::MetalEncoder(5000, 2102, config, metrics),
-                    "HEVC encoder requires exact 5002x2102 output");
+  // Odd dimensions are what yuv420p cannot express; the exact canvas size is
+  // the compiled asset's business, not the encoder's.
+  CHECK_THROWS_WITH(swim::metal::MetalEncoder(5001, 2102, config, metrics),
+                    "HEVC encoder requires nonzero even output dimensions");
+  CHECK_THROWS_WITH(swim::metal::MetalEncoder(5002, 0, config, metrics),
+                    "HEVC encoder requires nonzero even output dimensions");
   swim::metal::MetalEncoder encoder(5002, 2102, config, metrics);
   CHECK(encoder.stats().using_hardware);
+  encoder.close_and_drain();
+  CHECK(!encoder.stats().drain_timed_out);
+}
+
+TEST_CASE(hardware_encoder_accepts_the_underwater_panorama_canvas) {
+  swim::core::AppConfig config;
+  config.encode = true;
+  config.encode_sink = swim::core::EncodeSink::null_sink;
+  swim::core::RuntimeCounters metrics;
+  swim::metal::MetalEncoder encoder(6002, 722, config, metrics);
   encoder.close_and_drain();
   CHECK(!encoder.stats().drain_timed_out);
 }

@@ -13,8 +13,25 @@
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
+
+#if defined(_WIN32)
+// Windows provides the low-level descriptor calls under an underscore prefix in
+// <io.h> and reports host/memory identity through the Win32 API instead of the
+// POSIX headers. The rest of this file uses the swim_os_* shims below so the
+// serialization and write logic stays platform-neutral.
+#include <io.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <psapi.h>
+#else
 #include <sys/utsname.h>
 #include <unistd.h>
+#endif
 
 #if defined(__APPLE__)
 #include <libproc.h>
@@ -23,9 +40,51 @@
 namespace swim::core {
 namespace {
 
+#if defined(_WIN32)
+constexpr int kStdoutFileno = 1;
+int swim_os_write(int fd, const void* bytes, unsigned int size) {
+  return _write(fd, bytes, size);
+}
+int swim_os_close(int fd) { return _close(fd); }
+int swim_os_dup(int fd) { return _dup(fd); }
+long long swim_os_seek_end(int fd) { return _lseeki64(fd, 0, SEEK_END); }
+int swim_os_truncate(int fd, long long length) {
+  return _chsize_s(fd, length);
+}
+int swim_os_open_append(const std::filesystem::path& path) {
+  int fd = -1;
+  // _wsopen_s preserves the wide native path and opens in binary append mode so
+  // the JSONL records are written byte-for-byte like the POSIX O_APPEND path.
+  const auto error = _wsopen_s(&fd, path.wstring().c_str(),
+                               _O_WRONLY | _O_CREAT | _O_APPEND | _O_BINARY,
+                               _SH_DENYNO, _S_IREAD | _S_IWRITE);
+  if (error != 0) {
+    return -1;
+  }
+  return fd;
+}
+#else
+constexpr int kStdoutFileno = STDOUT_FILENO;
+int swim_os_write(int fd, const void* bytes, std::size_t size) {
+  return static_cast<int>(::write(fd, bytes, size));
+}
+int swim_os_close(int fd) { return ::close(fd); }
+int swim_os_dup(int fd) { return ::dup(fd); }
+long long swim_os_seek_end(int fd) {
+  return static_cast<long long>(::lseek(fd, 0, SEEK_END));
+}
+int swim_os_truncate(int fd, long long length) {
+  return ::ftruncate(fd, static_cast<off_t>(length));
+}
+int swim_os_open_append(const std::filesystem::path& path) {
+  return open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+}
+#endif
+
 std::ptrdiff_t system_write(int fd, const void* bytes,
                             std::size_t size) {
-  return static_cast<std::ptrdiff_t>(::write(fd, bytes, size));
+  return static_cast<std::ptrdiff_t>(
+      swim_os_write(fd, bytes, static_cast<unsigned int>(size)));
 }
 
 std::string json_escape(std::string_view value) {
@@ -74,11 +133,14 @@ void append_string(std::ostringstream& output, std::string_view key,
   output << ",\"" << key << "\":\"" << json_escape(value) << '"';
 }
 
+// Emits only `count` leading lanes so the JSON array length tracks the run's
+// active camera count rather than the compile-time capacity.
 template <std::size_t Size>
 void append_array(std::ostringstream& output, std::string_view key,
-                  const std::array<std::uint64_t, Size>& values) {
+                  const std::array<std::uint64_t, Size>& values,
+                  std::size_t count) {
   output << ",\"" << key << "\":[";
-  for (std::size_t index = 0; index < values.size(); ++index) {
+  for (std::size_t index = 0; index < std::min(count, Size); ++index) {
     if (index != 0) {
       output << ',';
     }
@@ -117,7 +179,11 @@ std::string default_run_id() {
   const auto now = std::chrono::system_clock::now();
   const auto timestamp = std::chrono::system_clock::to_time_t(now);
   std::tm utc{};
+#if defined(_WIN32)
+  gmtime_s(&utc, &timestamp);
+#else
   gmtime_r(&timestamp, &utc);
+#endif
   char buffer[32]{};
   static_cast<void>(std::strftime(buffer, sizeof(buffer), "%Y%m%dT%H%M%SZ",
                                   &utc));
@@ -133,22 +199,55 @@ std::optional<std::uint64_t> resident_bytes() noexcept {
                       reinterpret_cast<rusage_info_t*>(&info)) == 0) {
     return info.ri_resident_size;
   }
+#elif defined(_WIN32)
+  PROCESS_MEMORY_COUNTERS counters{};
+  counters.cb = sizeof(counters);
+  if (GetProcessMemoryInfo(GetCurrentProcess(), &counters,
+                           sizeof(counters)) != 0) {
+    return static_cast<std::uint64_t>(counters.WorkingSetSize);
+  }
 #endif
   return std::nullopt;
 }
 
 std::array<std::string, 3> machine_identity() {
+#if defined(_WIN32)
+  char hostname[MAX_COMPUTERNAME_LENGTH + 1] = "unavailable";
+  DWORD length = sizeof(hostname);
+  if (GetComputerNameA(hostname, &length) == 0) {
+    return {"unavailable", "unavailable", "unavailable"};
+  }
+  std::string machine = "unknown";
+  SYSTEM_INFO system_info{};
+  GetNativeSystemInfo(&system_info);
+  switch (system_info.wProcessorArchitecture) {
+    case PROCESSOR_ARCHITECTURE_AMD64:
+      machine = "x86_64";
+      break;
+    case PROCESSOR_ARCHITECTURE_ARM64:
+      machine = "arm64";
+      break;
+    case PROCESSOR_ARCHITECTURE_INTEL:
+      machine = "x86";
+      break;
+    default:
+      machine = "unknown";
+      break;
+  }
+  return {std::string(hostname), "Windows", machine};
+#else
   utsname value{};
   if (uname(&value) != 0) {
     return {"unavailable", "unavailable", "unavailable"};
   }
   return {value.nodename, std::string(value.sysname) + " " + value.release,
           value.machine};
+#endif
 }
 
 int open_output(const std::filesystem::path& path) {
   if (path.empty()) {
-    const auto duplicate = dup(STDOUT_FILENO);
+    const auto duplicate = swim_os_dup(kStdoutFileno);
     if (duplicate < 0) {
       throw std::runtime_error("cannot duplicate benchmark stdout descriptor");
     }
@@ -158,7 +257,7 @@ int open_output(const std::filesystem::path& path) {
   if (!parent.empty()) {
     std::filesystem::create_directories(parent);
   }
-  const auto fd = open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+  const auto fd = swim_os_open_append(path);
   if (fd < 0) {
     throw std::runtime_error("cannot open metrics output: " + path.string());
   }
@@ -187,6 +286,9 @@ std::string serialize_benchmark_record(
   const auto encode_fps = final ? current.encode_completion_fps()
                                 : rate(encode_completions, elapsed_seconds);
   const auto machine = machine_identity();
+  // Per-camera arrays report the lanes this run actually drives.
+  const auto lane_count =
+      static_cast<std::size_t>(metadata.graph.active_sources);
   auto frame_age_p50 = current.frame_age_ms_p50;
   auto frame_age_p95 = current.frame_age_ms_p95;
   auto frame_age_p99 = current.frame_age_ms_p99;
@@ -243,26 +345,26 @@ std::string serialize_benchmark_record(
        << gpu_p50
        << ",\"gpu_render_ms_p95\":"
        << gpu_p95;
-  append_array(line, "frame_age_ms_p50", frame_age_p50);
-  append_array(line, "frame_age_ms_p95", frame_age_p95);
-  append_array(line, "frame_age_ms_p99", frame_age_p99);
+  append_array(line, "frame_age_ms_p50", frame_age_p50, lane_count);
+  append_array(line, "frame_age_ms_p95", frame_age_p95, lane_count);
+  append_array(line, "frame_age_ms_p99", frame_age_p99, lane_count);
   line << ",\"snapshot_age_spread_ms_p99\":"
        << age_spread_p99;
   append_array(line, "camera_received",
                interval_array(current.camera_received,
-                              previous.camera_received, final));
+                              previous.camera_received, final), lane_count);
   append_array(line, "camera_decoded",
                interval_array(current.camera_decoded,
-                              previous.camera_decoded, final));
+                              previous.camera_decoded, final), lane_count);
   append_array(line, "camera_published",
                interval_array(current.camera_published,
-                              previous.camera_published, final));
+                              previous.camera_published, final), lane_count);
   append_array(line, "mailbox_overwrites",
                interval_array(current.camera_overwritten,
-                              previous.camera_overwritten, final));
+                              previous.camera_overwritten, final), lane_count);
   append_array(line, "frame_reuses",
                interval_array(current.camera_reused,
-                              previous.camera_reused, final));
+                              previous.camera_reused, final), lane_count);
 
   line << ",\"received\":"
        << event_value(current.received, previous.received, final)
@@ -354,23 +456,23 @@ std::string serialize_benchmark_record(
                       previous.decoded_pixel_host_copies, final);
 
   append_array(line, "decode_surface_pool_capacity",
-               current.decode_surface_capacity);
+               current.decode_surface_capacity, lane_count);
   append_array(line, "decode_surface_pool_in_use",
-               current.decode_surface_in_use);
+               current.decode_surface_in_use, lane_count);
   append_array(line, "decode_surface_pool_high_water",
-               current.decode_surface_high_water);
+               current.decode_surface_high_water, lane_count);
   append_array(line, "decode_surface_pool_misses",
                interval_array(current.decode_surface_pool_misses,
-                              previous.decode_surface_pool_misses, final));
+                              previous.decode_surface_pool_misses, final), lane_count);
   append_array(line, "decode_ticket_pool_capacity",
-               current.decode_ticket_capacity);
+               current.decode_ticket_capacity, lane_count);
   append_array(line, "decode_ticket_pool_in_use",
-               current.decode_ticket_in_use);
+               current.decode_ticket_in_use, lane_count);
   append_array(line, "decode_ticket_pool_high_water",
-               current.decode_ticket_high_water);
+               current.decode_ticket_high_water, lane_count);
   append_array(line, "decode_ticket_pool_misses",
                interval_array(current.decode_ticket_pool_misses,
-                              previous.decode_ticket_pool_misses, final));
+                              previous.decode_ticket_pool_misses, final), lane_count);
 
   const auto texture_wrappers = event_value(
       current.native_texture_wrappers, previous.native_texture_wrappers,
@@ -500,7 +602,7 @@ BenchmarkReporter::~BenchmarkReporter() {
     }
   }
   if (output_fd_ >= 0) {
-    static_cast<void>(close(output_fd_));
+    static_cast<void>(swim_os_close(output_fd_));
   }
 }
 
@@ -613,14 +715,14 @@ void BenchmarkReporter::write_record(const MetricsSnapshot& current,
   const auto line = serialize_benchmark_record(
       metadata_, current, previous, backend, elapsed_seconds, final,
       healthy_sources, resident_bytes());
-  const auto record_start = lseek(output_fd_, 0, SEEK_END);
+  const auto record_start = swim_os_seek_end(output_fd_);
   const auto written = writer_(output_fd_, line.data(), line.size());
   if (written < 0) {
     const auto write_error = errno;
     if (record_start >= 0) {
-      static_cast<void>(ftruncate(output_fd_, record_start));
+      static_cast<void>(swim_os_truncate(output_fd_, record_start));
     }
-    static_cast<void>(close(output_fd_));
+    static_cast<void>(swim_os_close(output_fd_));
     output_fd_ = -1;
     auto error = std::make_exception_ptr(std::runtime_error(
         "benchmark metrics write failed: " + std::to_string(write_error)));
@@ -629,9 +731,9 @@ void BenchmarkReporter::write_record(const MetricsSnapshot& current,
   }
   if (static_cast<std::size_t>(written) != line.size()) {
     if (record_start >= 0) {
-      static_cast<void>(ftruncate(output_fd_, record_start));
+      static_cast<void>(swim_os_truncate(output_fd_, record_start));
     }
-    static_cast<void>(close(output_fd_));
+    static_cast<void>(swim_os_close(output_fd_));
     output_fd_ = -1;
     auto error = std::make_exception_ptr(
         std::runtime_error("benchmark metrics write was partial"));

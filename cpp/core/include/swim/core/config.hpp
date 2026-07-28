@@ -1,5 +1,7 @@
 #pragma once
 
+#include <swim/core/camera_capacity.hpp>
+
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -38,15 +40,22 @@ struct SourceConfig {
 struct BenchmarkManifest final {
   std::string run_id;
   std::string asset_sha256;
-  std::array<std::string, 6> source_sha256;
+  std::array<std::string, kMaxCameras> source_sha256;
 };
+
+// Camera identity is data, not code: `source.<id>=<path>` lines define both the
+// lane order and the ids, so a 16-plane underwater layout and the 6-camera pool
+// layout share one runtime. The default remains the pool order so existing
+// configs and CLI-only invocations behave exactly as before.
+inline constexpr std::array<std::string_view, 6> kPoolCameraIds{
+    "cam3", "cam2", "cam1", "cam4", "cam5", "cam6"};
 
 struct AppConfig {
   std::string backend{"metal"};
   RunMode mode{RunMode::realtime};
   BenchmarkStage stage{BenchmarkStage::full};
   std::filesystem::path asset_path;
-  std::array<SourceConfig, 6> sources{{
+  std::array<SourceConfig, kMaxCameras> sources{{
       {"cam3", {}},
       {"cam2", {}},
       {"cam1", {}},
@@ -54,6 +63,8 @@ struct AppConfig {
       {"cam5", {}},
       {"cam6", {}},
   }};
+  // Lanes actually described by the config; sources beyond this are unset.
+  std::uint32_t source_count{6};
   std::uint32_t fps_num{30000};
   std::uint32_t fps_den{1001};
   bool preview{true};

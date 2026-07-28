@@ -15,3 +15,12 @@ __pycache__/
 # pool fixture already tracked at inputs/pool/models/pool.fbx).
 inputs/underwater/models/
 inputs/pool/models/*.fbx
+
+# Prebuilt CUDA/GL backend deps (FFmpeg+cuvid, GLFW) — large binaries, fetched locally
+/third_party/
+
+# Agent worktrees and downloaded model weights are local scratch
+.claude/worktrees/
+*.pt
+# Runtime configs generated per machine by python.underwater.run
+inputs/configs/underwater_16_*.conf

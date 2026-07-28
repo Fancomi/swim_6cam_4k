@@ -6,6 +6,7 @@
 #include <atomic>
 #include <barrier>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -271,4 +272,25 @@ TEST_CASE(completed_output_lease_copies_keep_the_pool_owner_anchored) {
   CHECK(!downstream);
   presented = {};
   CHECK(weak_owner.expired());
+}
+
+TEST_CASE(preview_target_keeps_the_composite_aspect_for_a_wide_panorama) {
+  // The 16-plane underwater composite is 8.3:1. A fixed 360px floor would have
+  // made the preview target 1280x360 (3.6:1) and letterboxed 2.3x, which is
+  // what produced the smeared wedge above the content.
+  const auto size = swim::metal::preview_target_size(6002, 722);
+  const auto content_aspect = 6002.0 / 722.0;
+  const auto target_aspect =
+      static_cast<double>(size.first) / static_cast<double>(size.second);
+  CHECK(std::abs(target_aspect - content_aspect) / content_aspect < 0.01);
+  CHECK(size.second >= 180u);
+}
+
+TEST_CASE(preview_target_keeps_the_composite_aspect_for_the_pool_canvas) {
+  const auto size = swim::metal::preview_target_size(5002, 2102);
+  const auto content_aspect = 5002.0 / 2102.0;
+  const auto target_aspect =
+      static_cast<double>(size.first) / static_cast<double>(size.second);
+  CHECK(std::abs(target_aspect - content_aspect) / content_aspect < 0.01);
+  CHECK_EQ(size.first, 1280u);
 }

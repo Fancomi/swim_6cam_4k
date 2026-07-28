@@ -188,14 +188,14 @@ TEST_CASE(global_backend_registry_is_stable) {
 }
 
 TEST_CASE(recorded_source_start_stops_all_and_excludes_throwing_lane) {
-  std::array<std::unique_ptr<swim::core::ISource>, 6> sources;
-  std::array<ThrowingStartSource*, 6> views{};
+  swim::core::SourceArray sources;
+  std::array<ThrowingStartSource*, swim::core::kMaxCameras> views{};
   for (std::size_t camera = 0; camera < sources.size(); ++camera) {
     auto source = std::make_unique<ThrowingStartSource>(camera == 2);
     views[camera] = source.get();
     sources[camera] = std::move(source);
   }
-  std::array<swim::core::LatestFrameMailbox, 6> mailboxes;
+  swim::core::MailboxArray mailboxes;
   swim::core::RuntimeStartState state;
   CHECK_THROWS_WITH(
       swim::core::start_sources_recorded(sources, mailboxes, state),

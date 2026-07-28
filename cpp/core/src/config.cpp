@@ -8,12 +8,10 @@
 #include <string>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace swim::core {
 namespace {
-
-constexpr std::array<std::string_view, 6> kCameraIds{
-    "cam3", "cam2", "cam1", "cam4", "cam5", "cam6"};
 
 std::string_view trim_ascii(std::string_view value) {
   constexpr std::string_view whitespace{" \t\r\n\f\v"};
@@ -122,22 +120,25 @@ auto parse_config_enum(const std::filesystem::path& path, std::size_t line,
   }
 }
 
-std::size_t source_index(std::string_view key) {
-  for (std::size_t index = 0; index < kCameraIds.size(); ++index) {
-    if (key == "source." + std::string(kCameraIds[index])) {
-      return index;
-    }
+constexpr std::string_view kSourcePrefix{"source."};
+
+// Returns the camera id in `source.<id>` keys, or empty when `key` is not one.
+std::string_view source_camera_id(std::string_view key) {
+  if (!key.starts_with(kSourcePrefix)) {
+    return {};
   }
-  return kCameraIds.size();
+  return key.substr(kSourcePrefix.size());
 }
 
-std::size_t manifest_source_index(std::string_view key) {
-  for (std::size_t index = 0; index < kCameraIds.size(); ++index) {
-    if (key == "source." + std::string(kCameraIds[index]) + "_sha256") {
-      return index;
-    }
+// Manifest hashes are keyed by the same camera ids as the config, so the lane
+// is resolved against the config's declared order rather than a fixed table.
+std::string_view manifest_camera_id(std::string_view key) {
+  constexpr std::string_view suffix{"_sha256"};
+  const auto camera_id = source_camera_id(key);
+  if (!camera_id.ends_with(suffix)) {
+    return {};
   }
-  return kCameraIds.size();
+  return camera_id.substr(0, camera_id.size() - suffix.size());
 }
 
 bool valid_sha256(std::string_view value) noexcept {
@@ -228,7 +229,9 @@ AppConfig load_config(const std::filesystem::path& path) {
 
   AppConfig config;
   std::unordered_set<std::string> seen_keys;
-  std::array<bool, kCameraIds.size()> seen_sources{};
+  // Lanes are filled in the order the config declares them, so the file defines
+  // both the camera ids and their left-to-right order.
+  std::vector<SourceConfig> declared_sources;
   std::string storage;
   std::size_t line_number = 0;
   while (std::getline(input, storage)) {
@@ -252,11 +255,15 @@ AppConfig load_config(const std::filesystem::path& path) {
                    "duplicate key '" + std::string(key) + "'");
     }
 
-    const auto camera_index = source_index(key);
-    if (camera_index < kCameraIds.size()) {
-      config.sources[camera_index].path =
-          parse_config_path(path, line_number, value);
-      seen_sources[camera_index] = true;
+    const auto camera_id = source_camera_id(key);
+    if (!camera_id.empty()) {
+      if (declared_sources.size() >= kMaxCameras) {
+        config_error(path, line_number,
+                     "at most " + std::to_string(kMaxCameras) +
+                         " source keys are supported");
+      }
+      declared_sources.push_back(
+          {std::string(camera_id), parse_config_path(path, line_number, value)});
     } else if (key == "backend") {
       config.backend = value;
     } else if (key == "mode") {
@@ -308,12 +315,18 @@ AppConfig load_config(const std::filesystem::path& path) {
     }
   }
 
-  for (const auto seen : seen_sources) {
-    if (!seen) {
-      config_error(path, line_number + 1,
-                   "sources must be exactly cam3,cam2,cam1,cam4,cam5,cam6");
-    }
+  if (declared_sources.empty()) {
+    config_error(path, line_number + 1,
+                 "config must declare at least one 'source.<camera-id>' key");
   }
+  config.sources = {};
+  for (std::size_t index = 0; index < declared_sources.size(); ++index) {
+    config.sources[index] = std::move(declared_sources[index]);
+  }
+  config.source_count = static_cast<std::uint32_t>(declared_sources.size());
+  // stream_count defaults to every declared lane; an explicit --stream-count
+  // override may still narrow it for benchmark sweeps.
+  config.stream_count = config.source_count;
   return config;
 }
 
@@ -360,12 +373,31 @@ AppConfig apply_cli_overrides(
       config.stage = parse_stage(value, "--stage");
     } else if (name == "--stream-count") {
       const auto count = parse_unsigned(value, "--stream-count");
-      if (count != 1 && count != 2 && count != 4 && count != 6) {
-        throw std::runtime_error("--stream-count must be one of 1,2,4,6");
+      if (count == 0 || count > kMaxCameras) {
+        throw std::runtime_error("--stream-count must be between 1 and " +
+                                 std::to_string(kMaxCameras));
       }
       config.stream_count = count;
     } else if (name == "--metrics") {
       config.metrics_path = parse_cli_path(value, name);
+    } else if (name == "--fps") {
+      // Data-independent render cadence: sets the realtime pacing target
+      // directly (fps_num/1). The latest-frame mailbox reuses or drops source
+      // frames to meet it, so it is independent of the input clip's fps.
+      const auto fps = parse_unsigned(value, "--fps");
+      if (fps == 0) {
+        throw std::runtime_error("--fps must be a positive integer");
+      }
+      config.fps_num = fps;
+      config.fps_den = 1;
+    } else if (name == "--fps-num") {
+      config.fps_num = parse_unsigned(value, "--fps-num");
+    } else if (name == "--fps-den") {
+      const auto den = parse_unsigned(value, "--fps-den");
+      if (den == 0) {
+        throw std::runtime_error("--fps-den must be a positive integer");
+      }
+      config.fps_den = den;
     } else if (name == "--benchmark-manifest") {
       config.benchmark_manifest_path = parse_cli_path(value, name);
     } else {
@@ -384,7 +416,9 @@ BenchmarkManifest load_benchmark_manifest(const std::filesystem::path& path) {
 
   BenchmarkManifest manifest;
   std::unordered_set<std::string> seen_keys;
-  std::array<bool, kCameraIds.size()> seen_sources{};
+  // Hashes fill lanes in declaration order, mirroring how load_config assigns
+  // camera ids; the count is checked against the config by the caller.
+  std::size_t source_count = 0;
   bool seen_run_id = false;
   bool seen_asset = false;
   std::string storage;
@@ -422,17 +456,22 @@ BenchmarkManifest load_benchmark_manifest(const std::filesystem::path& path) {
       seen_asset = true;
       continue;
     }
-    const auto camera = manifest_source_index(key);
-    if (camera == kCameraIds.size()) {
+    const auto camera_id = manifest_camera_id(key);
+    if (camera_id.empty()) {
       config_error(path, line_number,
                    "unknown key '" + std::string(key) + "'");
+    }
+    if (source_count >= kMaxCameras) {
+      config_error(path, line_number,
+                   "at most " + std::to_string(kMaxCameras) +
+                       " source hashes are supported");
     }
     if (!valid_sha256(value)) {
       config_error(path, line_number, std::string(key) +
                                           " must be exactly 64 hexadecimal digits");
     }
-    manifest.source_sha256[camera] = value;
-    seen_sources[camera] = true;
+    manifest.source_sha256[source_count] = value;
+    ++source_count;
   }
 
   if (!seen_run_id) {
@@ -441,12 +480,10 @@ BenchmarkManifest load_benchmark_manifest(const std::filesystem::path& path) {
   if (!seen_asset) {
     config_error(path, line_number + 1, "missing key 'asset_sha256'");
   }
-  for (std::size_t camera = 0; camera < seen_sources.size(); ++camera) {
-    if (!seen_sources[camera]) {
-      config_error(path, line_number + 1,
-                   "missing key 'source." + std::string(kCameraIds[camera]) +
-                       "_sha256'");
-    }
+  if (source_count == 0) {
+    config_error(path, line_number + 1,
+                 "manifest must declare at least one "
+                 "'source.<camera-id>_sha256' key");
   }
   return manifest;
 }

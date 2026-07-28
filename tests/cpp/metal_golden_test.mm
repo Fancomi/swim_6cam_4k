@@ -95,7 +95,7 @@ void release_test_frame(void*) noexcept {}
 
 void verify_camera_metadata_contract(
     swim::metal::MetalStitchRenderer& renderer,
-    const std::array<swim::metal::MetalFrameView, 6>& valid_frames) {
+    const std::array<swim::metal::MetalFrameView, swim::core::kMaxCameras>& valid_frames) {
   swim::metal::MetalRenderResult missing_submission;
   try {
     renderer.wait_for_completion(missing_submission);
@@ -166,7 +166,7 @@ std::array<std::uint8_t, 3> render_full_range_nv12_sample(
       context->device, MTLPixelFormatR8Unorm, 2, 2, luma.data(), 2);
   id<MTLTexture> chroma_texture = make_constant_plane(
       context->device, MTLPixelFormatRG8Unorm, 1, 1, chroma.data(), 2);
-  std::array<swim::metal::MetalFrameView, 6> frames;
+  std::array<swim::metal::MetalFrameView, swim::core::kMaxCameras> frames;
   for (std::size_t index = 0; index < frames.size(); ++index) {
     frames[index].luma = luma_texture;
     frames[index].chroma = chroma_texture;
@@ -377,7 +377,7 @@ int main(int argc, const char* argv[]) {
       config.render_inflight = 2;
       config.output_pool = 2;
 
-      std::array<swim::metal::MetalFrameView, 6> frames;
+      std::array<swim::metal::MetalFrameView, swim::core::kMaxCameras> frames;
       for (std::size_t index = 0; index < frames.size(); ++index) {
         frames[index].rgba = load_rgba_texture(context->device, argv[index + 3]);
         frames[index].metadata.camera_index =

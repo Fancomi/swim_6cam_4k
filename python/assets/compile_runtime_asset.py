@@ -10,6 +10,7 @@ from typing import Sequence
 import numpy as np
 
 from python.assets.asset_format import CAMERA, HEADER, INDEX, MAGIC, VERSION, VERTEX
+from python.underwater.render import seam_weights
 from python.validation.reference_renderer import (
     build_remap,
     feather_weights,
@@ -69,15 +70,26 @@ def compile_asset(
     output: Path,
     camera_ids: Sequence[str],
     ppm: float,
+    neg_v: bool = True,
+    blend_px: float | None = None,
 ) -> None:
-    """Compile one baked mesh JSON file into runtime format v1."""
+    """Compile one baked mesh JSON file into runtime format v1.
+
+    `neg_v` flips world Y, matching the pool bake. The underwater panorama is
+    already upright, so it compiles with neg_v=False.
+
+    `blend_px` selects the blend used to bake per-camera weights. None keeps the
+    pool's distance-transform feather; a number uses the underwater renderer's
+    hard vertical seam with that transition width, so the GPU runtime reproduces
+    what python.underwater.render produces offline.
+    """
     source_bytes = Path(mesh_json).read_bytes()
     meshes = json.loads(source_bytes)["meshes"]
     if len(camera_ids) != len(meshes):
         raise ValueError(
             f"camera count mismatch: {len(camera_ids)} IDs for {len(meshes)} meshes"
         )
-    to_meters(meshes, unit_scale=1.0, neg_v=True)
+    to_meters(meshes, unit_scale=1.0, neg_v=neg_v)
     xmin, xmax, ymin, ymax = world_bounds(meshes)
     logical_width = int(round((xmax - xmin) * ppm)) + 1
     logical_height = int(round((ymax - ymin) * ppm)) + 1
@@ -90,7 +102,10 @@ def compile_asset(
             mesh, 1, 1, xmin, ymin, ppm, logical_width, logical_height
         )
         masks.append(mask)
-    weights = feather_weights(masks)
+    if blend_px is None:
+        weights = feather_weights(masks)
+    else:
+        weights = seam_weights(masks, blend_px)
 
     compiled = []
     for camera_id, mesh, weight in zip(camera_ids, meshes, weights):
@@ -173,8 +188,29 @@ def main() -> None:
     parser.add_argument("output_swasset", type=Path)
     parser.add_argument("--camera-ids", nargs="+", default=DEFAULT_CAMERA_IDS)
     parser.add_argument("--ppm", type=float, default=100.0)
+    parser.add_argument(
+        "--no-neg-v",
+        dest="neg_v",
+        action="store_false",
+        default=True,
+        help="keep world Y as-is (the underwater panorama is already upright)",
+    )
+    parser.add_argument(
+        "--blend-px",
+        type=float,
+        default=None,
+        help="bake hard vertical seams with this transition width instead of the "
+        "pool's distance feather; matches python.underwater.render --blend-px",
+    )
     args = parser.parse_args()
-    compile_asset(args.input_json, args.output_swasset, args.camera_ids, args.ppm)
+    compile_asset(
+        args.input_json,
+        args.output_swasset,
+        args.camera_ids,
+        args.ppm,
+        neg_v=args.neg_v,
+        blend_px=args.blend_px,
+    )
 
 
 if __name__ == "__main__":

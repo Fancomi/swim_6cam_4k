@@ -48,7 +48,7 @@ class MetalStitchRenderer final {
   MetalStitchRenderer(const MetalStitchRenderer&) = delete;
   MetalStitchRenderer& operator=(const MetalStitchRenderer&) = delete;
 
-  bool submit(const std::array<MetalFrameView, 6>& frames,
+  bool submit(const std::array<MetalFrameView, swim::core::kMaxCameras>& frames,
               MetalRenderResult& result) noexcept;
   bool submit(const swim::core::RenderSnapshot& snapshot,
               MetalRenderResult& result) noexcept;
