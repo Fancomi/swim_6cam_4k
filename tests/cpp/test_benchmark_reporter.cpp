@@ -11,11 +11,38 @@
 #include <fstream>
 #include <string>
 #include <thread>
+
+#if defined(_WIN32)
+#include <io.h>
+#else
 #include <unistd.h>
+#endif
 
 using namespace std::chrono_literals;
 
 namespace {
+
+// Descriptor write and a writable scratch path differ by platform; keep the
+// test bodies neutral by resolving both through these helpers.
+std::ptrdiff_t os_write(int fd, const void* bytes, std::size_t size) {
+#if defined(_WIN32)
+  return static_cast<std::ptrdiff_t>(
+      _write(fd, bytes, static_cast<unsigned int>(size)));
+#else
+  return static_cast<std::ptrdiff_t>(::write(fd, bytes, size));
+#endif
+}
+
+std::filesystem::path scratch_path(const char* name) {
+  return std::filesystem::temp_directory_path() / name;
+}
+
+// MSVC will not bind an empty braced temporary to the const MetricsSnapshot&
+// parameter, so materialize an all-zero snapshot from default counters.
+swim::core::MetricsSnapshot zero_snapshot() {
+  swim::core::RuntimeCounters counters;
+  return counters.sample_totals();
+}
 
 swim::core::BenchmarkReporterMetadata reporter_metadata() {
   swim::core::AppConfig config;
@@ -25,7 +52,7 @@ swim::core::BenchmarkReporterMetadata reporter_metadata() {
   config.stream_count = 6;
   config.preview = false;
   config.encode = true;
-  config.metrics_path = "/tmp/swim_benchmark_reporter_test.jsonl";
+  config.metrics_path = scratch_path("swim_benchmark_reporter_test.jsonl");
 
   swim::core::BenchmarkManifest manifest;
   manifest.run_id = "run\\id\nline";
@@ -72,8 +99,8 @@ TEST_CASE(benchmark_json_escapes_strings_and_contains_exact_schema_groups) {
   counters.preview_completions.store(20);
   counters.encode_completions.store(10);
   const auto line = swim::core::serialize_benchmark_record(
-      reporter_metadata(), counters.sample_totals(), {}, {123456}, 2.0,
-      false, 6, 987654);
+      reporter_metadata(), counters.sample_totals(), zero_snapshot(), {123456},
+      2.0, false, 6, 987654);
 
   CHECK(line.ends_with('\n'));
   CHECK(line.find("\"schema\":1") != std::string::npos);
@@ -96,7 +123,7 @@ TEST_CASE(benchmark_json_escapes_strings_and_contains_exact_schema_groups) {
 }
 
 TEST_CASE(reporter_uses_one_write_call_and_final_remains_cumulative) {
-  std::filesystem::remove("/tmp/swim_benchmark_reporter_test.jsonl");
+  std::filesystem::remove(scratch_path("swim_benchmark_reporter_test.jsonl"));
   swim::core::RuntimeCounters counters;
   SampleBackend backend;
   std::size_t writes = 0;
@@ -148,7 +175,8 @@ TEST_CASE(schema_keeps_unverified_hash_keys_and_final_rates_use_completion_span)
   counters.encode_last_completion_ns.store(4'000'000'000);
 
   const auto line = swim::core::serialize_benchmark_record(
-      metadata, counters.sample_totals(), {}, {}, 10.0, true, 6, 1);
+      metadata, counters.sample_totals(), zero_snapshot(), {}, 10.0, true, 6,
+      1);
   CHECK(line.find("\"render_fps\":30.000") != std::string::npos);
   CHECK(line.find("\"encode_fps\":30.000") != std::string::npos);
   CHECK(line.find("\"fingerprints_verified\":false") !=
@@ -161,12 +189,13 @@ TEST_CASE(schema_keeps_unverified_hash_keys_and_final_rates_use_completion_span)
 
 TEST_CASE(schema_reports_unavailable_process_and_gpu_resources_as_null) {
   const auto line = swim::core::serialize_benchmark_record(
-      reporter_metadata(), {}, {}, {}, 1.0, true, 0, std::nullopt);
+      reporter_metadata(), zero_snapshot(), zero_snapshot(), {}, 1.0, true, 0,
+      std::nullopt);
   CHECK(line.find("\"gpu_allocated_bytes\":null") != std::string::npos);
   CHECK(line.find("\"rss_bytes\":null") != std::string::npos);
 
   const auto measured_zero = swim::core::serialize_benchmark_record(
-      reporter_metadata(), {}, {}, {0}, 1.0, true, 0,
+      reporter_metadata(), zero_snapshot(), zero_snapshot(), {0}, 1.0, true, 0,
       std::optional<std::uint64_t>{0});
   CHECK(measured_zero.find("\"gpu_allocated_bytes\":0") !=
         std::string::npos);
@@ -174,7 +203,7 @@ TEST_CASE(schema_reports_unavailable_process_and_gpu_resources_as_null) {
 }
 
 TEST_CASE(background_partial_write_propagates_and_final_is_attempted_once) {
-  std::filesystem::remove("/tmp/swim_benchmark_reporter_test.jsonl");
+  std::filesystem::remove(scratch_path("swim_benchmark_reporter_test.jsonl"));
   swim::core::RuntimeCounters counters;
   std::atomic_uint32_t writes{};
   std::string partial;
@@ -208,14 +237,14 @@ TEST_CASE(background_partial_write_propagates_and_final_is_attempted_once) {
 
 TEST_CASE(partial_file_write_is_rolled_back_before_output_is_poisoned) {
   const auto path = std::filesystem::path{
-      "/tmp/swim_benchmark_reporter_partial_test.jsonl"};
+      scratch_path("swim_benchmark_reporter_partial_test.jsonl")};
   std::filesystem::remove(path);
   auto metadata = reporter_metadata();
   metadata.config.metrics_path = path;
   swim::core::RuntimeCounters counters;
   auto partial_writer = [](int fd, const void* bytes,
                            std::size_t size) -> std::ptrdiff_t {
-    return ::write(fd, bytes, size - 1);
+    return os_write(fd, bytes, size - 1);
   };
   {
     swim::core::BenchmarkReporter reporter{std::move(metadata), counters,
@@ -229,7 +258,7 @@ TEST_CASE(partial_file_write_is_rolled_back_before_output_is_poisoned) {
 }
 
 TEST_CASE(negative_final_write_is_propagated_and_never_retried) {
-  std::filesystem::remove("/tmp/swim_benchmark_reporter_test.jsonl");
+  std::filesystem::remove(scratch_path("swim_benchmark_reporter_test.jsonl"));
   swim::core::RuntimeCounters counters;
   std::uint32_t writes = 0;
   auto failed_writer = [&](int, const void*, std::size_t) -> std::ptrdiff_t {
@@ -248,7 +277,7 @@ TEST_CASE(negative_final_write_is_propagated_and_never_retried) {
 }
 
 TEST_CASE(reporter_can_drop_backend_borrow_before_backend_destruction) {
-  std::filesystem::remove("/tmp/swim_benchmark_reporter_test.jsonl");
+  std::filesystem::remove(scratch_path("swim_benchmark_reporter_test.jsonl"));
   swim::core::RuntimeCounters counters;
   std::uint32_t writes = 0;
   auto writer = [&](int, const void*, std::size_t size) -> std::ptrdiff_t {

@@ -50,6 +50,14 @@ add_library(swim_core
 target_include_directories(swim_core PUBLIC
   cpp/core/include
   "${CMAKE_CURRENT_BINARY_DIR}/generated")
+# Multi-config generators leave CMAKE_BUILD_TYPE empty; feed the per-config name
+# in through a generator expression so build evidence carries the real type.
+target_compile_definitions(swim_core PUBLIC
+  SWIM_BUILD_TYPE="$<CONFIG>")
+if(WIN32)
+  # GetProcessMemoryInfo for RSS reporting on Windows.
+  target_link_libraries(swim_core PUBLIC psapi)
+endif()
 swim_enable_warnings(swim_core)
 swim_enable_sanitizers(swim_core)
 
@@ -237,4 +245,96 @@ endif()
 
 if(NOT APPLE)
   target_link_libraries(swim_realtime PRIVATE swim_core)
+endif()
+
+if(WIN32)
+  # Native Windows backend: Media Foundation hardware H.264 decode + Direct3D 11
+  # stitch + DXGI swap-chain preview. Mirrors the Metal backend's structure.
+  add_library(swim_d3d11_backend
+    cpp/backends/d3d11/src/d3d11_frame.cpp
+    cpp/backends/d3d11/src/d3d11_renderer.cpp
+    cpp/backends/d3d11/src/d3d11_preview.cpp
+    cpp/backends/d3d11/src/mf_source.cpp
+    cpp/backends/d3d11/src/d3d11_backend.cpp)
+  target_include_directories(swim_d3d11_backend PUBLIC
+    cpp/backends/d3d11/include)
+  target_compile_definitions(swim_d3d11_backend PRIVATE
+    SWIM_D3D11_SHADER_SOURCE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/cpp/backends/d3d11/shaders/stitch.hlsl"
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+    UNICODE
+    _UNICODE)
+  target_link_libraries(swim_d3d11_backend PUBLIC
+    swim_core
+    d3d11
+    dxgi
+    d3dcompiler
+    mf
+    mfplat
+    mfreadwrite
+    mfuuid
+    dxva2)
+  swim_enable_warnings(swim_d3d11_backend)
+
+  target_compile_definitions(swim_realtime PRIVATE SWIM_HAS_D3D11_BACKEND=1)
+  target_link_libraries(swim_realtime PRIVATE swim_d3d11_backend winmm)
+endif()
+
+# Optional CUDA/GL backend: NVDEC (FFmpeg h264_cuvid) decode + CUDA-GL interop
+# upload + OpenGL stitch + GLFW preview. Enabled when CUDA, FFmpeg, and GLFW are
+# all discoverable. Prebuilt FFmpeg+GLFW live under third_party/ (see README).
+set(SWIM_FFMPEG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ffmpeg"
+    CACHE PATH "Prebuilt FFmpeg (shared, with cuvid)")
+set(SWIM_GLFW_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/glfw"
+    CACHE PATH "Prebuilt GLFW win64")
+
+option(SWIM_ENABLE_CUDAGL "Build the CUDA/GL backend" ON)
+
+# The CUDA/GL backend is pure C++ using the CUDA driver/runtime API (cuda.h,
+# cudaGL.h) — no .cu files — so we only need the toolkit's headers and import
+# libraries, not the CUDA language toolchain.
+set(SWIM_CUDA_DIR "$ENV{CUDA_PATH}" CACHE PATH "CUDA Toolkit root")
+if(NOT SWIM_CUDA_DIR AND EXISTS
+   "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.8")
+  set(SWIM_CUDA_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.8")
+endif()
+
+if(WIN32 AND SWIM_ENABLE_CUDAGL)
+  if(EXISTS "${SWIM_CUDA_DIR}/include/cuda.h" AND
+     EXISTS "${SWIM_FFMPEG_DIR}/include" AND
+     EXISTS "${SWIM_GLFW_DIR}/include")
+    add_library(swim_cudagl_backend
+      cpp/backends/cudagl/src/gl_loader.cpp
+      cpp/backends/cudagl/src/nvdec_source.cpp
+      cpp/backends/cudagl/src/cudagl_renderer.cpp
+      cpp/backends/cudagl/src/cudagl_preview.cpp
+      cpp/backends/cudagl/src/cudagl_backend.cpp)
+    target_include_directories(swim_cudagl_backend PUBLIC
+      cpp/backends/cudagl/include
+      "${SWIM_CUDA_DIR}/include"
+      "${SWIM_FFMPEG_DIR}/include"
+      "${SWIM_GLFW_DIR}/include")
+    target_compile_definitions(swim_cudagl_backend PRIVATE
+      WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_directories(swim_cudagl_backend PUBLIC
+      "${SWIM_CUDA_DIR}/lib/x64"
+      "${SWIM_FFMPEG_DIR}/lib"
+      "${SWIM_GLFW_DIR}/lib-vc2022")
+    target_link_libraries(swim_cudagl_backend PUBLIC
+      swim_core
+      cudart
+      cuda
+      avcodec
+      avformat
+      avutil
+      glfw3dll
+      opengl32)
+    swim_enable_warnings(swim_cudagl_backend)
+
+    target_compile_definitions(swim_realtime PRIVATE SWIM_HAS_CUDAGL_BACKEND=1)
+    target_link_libraries(swim_realtime PRIVATE swim_cudagl_backend)
+    message(STATUS "CUDA/GL backend: enabled")
+  else()
+    message(STATUS "CUDA/GL backend: skipped (need CUDA + third_party/ffmpeg + third_party/glfw)")
+  endif()
 endif()

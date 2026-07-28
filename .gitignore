@@ -15,3 +15,6 @@ __pycache__/
 # pool fixture already tracked at inputs/pool/models/pool.fbx).
 inputs/underwater/models/
 inputs/pool/models/*.fbx
+
+# Prebuilt CUDA/GL backend deps (FFmpeg+cuvid, GLFW) — large binaries, fetched locally
+/third_party/

@@ -366,6 +366,24 @@ AppConfig apply_cli_overrides(
       config.stream_count = count;
     } else if (name == "--metrics") {
       config.metrics_path = parse_cli_path(value, name);
+    } else if (name == "--fps") {
+      // Data-independent render cadence: sets the realtime pacing target
+      // directly (fps_num/1). The latest-frame mailbox reuses or drops source
+      // frames to meet it, so it is independent of the input clip's fps.
+      const auto fps = parse_unsigned(value, "--fps");
+      if (fps == 0) {
+        throw std::runtime_error("--fps must be a positive integer");
+      }
+      config.fps_num = fps;
+      config.fps_den = 1;
+    } else if (name == "--fps-num") {
+      config.fps_num = parse_unsigned(value, "--fps-num");
+    } else if (name == "--fps-den") {
+      const auto den = parse_unsigned(value, "--fps-den");
+      if (den == 0) {
+        throw std::runtime_error("--fps-den must be a positive integer");
+      }
+      config.fps_den = den;
     } else if (name == "--benchmark-manifest") {
       config.benchmark_manifest_path = parse_cli_path(value, name);
     } else {

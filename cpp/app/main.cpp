@@ -13,6 +13,25 @@
 #include <swim/metal/metal_backend.hpp>
 #endif
 
+#if defined(SWIM_HAS_D3D11_BACKEND)
+#include <swim/d3d11/d3d11_backend.hpp>
+#endif
+
+#if defined(SWIM_HAS_CUDAGL_BACKEND)
+#include <swim/cudagl/cudagl_backend.hpp>
+#endif
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <timeapi.h>
+#endif
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -166,6 +185,10 @@ class RuntimeFinalizer final {
     if (signal_monitor.joinable()) {
       signal_monitor.join();
     }
+    stats_monitor.request_stop();
+    if (stats_monitor.joinable()) {
+      stats_monitor.join();
+    }
     swim::core::stop_sources(sources_);
     std::exception_ptr cleanup_error = render_error;
     try {
@@ -227,6 +250,7 @@ class RuntimeFinalizer final {
 
   std::jthread render_thread;
   std::jthread signal_monitor;
+  std::jthread stats_monitor;
   std::exception_ptr render_error;
 
  private:
@@ -255,6 +279,12 @@ int run_runtime(const swim::core::AppConfig& config,
   try {
 #if defined(SWIM_HAS_METAL_BACKEND)
     swim::metal::register_metal_backend();
+#endif
+#if defined(SWIM_HAS_D3D11_BACKEND)
+    swim::d3d11::register_d3d11_backend();
+#endif
+#if defined(SWIM_HAS_CUDAGL_BACKEND)
+    swim::cudagl::register_cudagl_backend();
 #endif
     backend = swim::core::BackendRegistry::instance().create(config.backend);
     reporter.bind_backend(*backend);
@@ -304,6 +334,65 @@ int run_runtime(const swim::core::AppConfig& config,
       }
     });
 
+    // Live efficiency line: once a second, print render/decode/preview FPS to
+    // stderr on a single rewritten line so the operator sees realtime
+    // throughput without parsing the metrics JSONL. Suppressed for
+    // validate-only and benchmark manifests (those parse stdout/stderr).
+    if (renderer != nullptr && config.mode == swim::core::RunMode::realtime) {
+      finalizer.stats_monitor = std::jthread([&](std::stop_token token) {
+        using Clock = std::chrono::steady_clock;
+        // MetricsSnapshot has const members and is not assignable, so track the
+        // few cumulative counters we need as plain scalars across ticks.
+        auto previous_at = Clock::now();
+        std::uint64_t prev_render = metrics.render_completions.load(
+            std::memory_order_relaxed);
+        std::uint64_t prev_decode = metrics.decoded.load(
+            std::memory_order_relaxed);
+        std::uint64_t prev_preview = metrics.preview_presents.load(
+            std::memory_order_relaxed);
+        std::uint64_t prev_drops = metrics.render_drops.load(
+            std::memory_order_relaxed);
+        while (!token.stop_requested()) {
+          std::this_thread::sleep_for(std::chrono::milliseconds{500});
+          if (token.stop_requested()) {
+            break;
+          }
+          const auto now = Clock::now();
+          const auto elapsed =
+              std::chrono::duration<double>(now - previous_at).count();
+          if (elapsed < 0.99) {
+            continue;
+          }
+          const auto cur_render =
+              metrics.render_completions.load(std::memory_order_relaxed);
+          const auto cur_decode =
+              metrics.decoded.load(std::memory_order_relaxed);
+          const auto cur_preview =
+              metrics.preview_presents.load(std::memory_order_relaxed);
+          const auto cur_drops =
+              metrics.render_drops.load(std::memory_order_relaxed);
+          const auto rate = [elapsed](std::uint64_t a, std::uint64_t b) {
+            return elapsed > 0.0 ? static_cast<double>(a - b) / elapsed : 0.0;
+          };
+          std::fprintf(stderr,
+                       "\r[%s] render %5.1f fps | decode %5.1f fps/cam | "
+                       "preview %5.1f fps | drops %4.0f/s   ",
+                       config.backend.c_str(), rate(cur_render, prev_render),
+                       rate(cur_decode, prev_decode) / 6.0,
+                       rate(cur_preview, prev_preview),
+                       rate(cur_drops, prev_drops));
+          std::fflush(stderr);
+          prev_render = cur_render;
+          prev_decode = cur_decode;
+          prev_preview = cur_preview;
+          prev_drops = cur_drops;
+          previous_at = now;
+        }
+        std::fprintf(stderr, "\n");
+        std::fflush(stderr);
+      });
+    }
+
     backend->run_main_loop(finalizer.render_thread.get_stop_token());
     finalizer.finalize();
   } catch (...) {
@@ -349,6 +438,15 @@ int run(int argc, char* argv[]) {
 int main(int argc, char* argv[]) {
   std::signal(SIGINT, request_shutdown_from_signal);
   std::signal(SIGTERM, request_shutdown_from_signal);
+#if defined(_WIN32)
+  // The render coordinator paces on condition-variable timed waits. The default
+  // Windows timer granularity (~15.6 ms) would quantize a 33 ms cadence badly;
+  // request 1 ms resolution for the run and restore it on exit.
+  timeBeginPeriod(1);
+  struct TimePeriodGuard {
+    ~TimePeriodGuard() { timeEndPeriod(1); }
+  } time_period_guard;
+#endif
   try {
     return run(argc, argv);
   } catch (const std::exception& error) {

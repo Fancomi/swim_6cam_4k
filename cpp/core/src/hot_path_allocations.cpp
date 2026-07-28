@@ -7,7 +7,31 @@
 #include <limits>
 #include <new>
 
+#if defined(_WIN32)
+#include <malloc.h>
+#endif
+
 namespace {
+
+// Aligned allocation is spelled differently per toolchain: C11 std::aligned_alloc
+// on POSIX libc, _aligned_malloc/_aligned_free on the MSVC CRT (which does not
+// provide std::aligned_alloc). Aligned blocks must be released by the matching
+// free, so both the allocate and the aligned delete operators route here.
+void* platform_aligned_alloc(std::size_t alignment, std::size_t size) {
+#if defined(_WIN32)
+  return _aligned_malloc(size, alignment);
+#else
+  return std::aligned_alloc(alignment, size);
+#endif
+}
+
+void platform_aligned_free(void* pointer) noexcept {
+#if defined(_WIN32)
+  _aligned_free(pointer);
+#else
+  std::free(pointer);
+#endif
+}
 
 std::atomic_uint64_t hot_path_allocations{0};
 thread_local std::uint32_t hot_path_scope_depth = 0;
@@ -50,7 +74,7 @@ void* allocate_aligned(std::size_t requested_size,
   }
 
   for (;;) {
-    if (auto* allocation = std::aligned_alloc(alignment, size);
+    if (auto* allocation = platform_aligned_alloc(alignment, size);
         allocation != nullptr) {
       return allocation;
     }
@@ -151,20 +175,20 @@ void operator delete[](void* pointer, std::size_t) noexcept {
 }
 
 void operator delete(void* pointer, std::align_val_t) noexcept {
-  std::free(pointer);
+  platform_aligned_free(pointer);
 }
 
 void operator delete[](void* pointer, std::align_val_t) noexcept {
-  std::free(pointer);
+  platform_aligned_free(pointer);
 }
 
 void operator delete(void* pointer, std::size_t, std::align_val_t) noexcept {
-  std::free(pointer);
+  platform_aligned_free(pointer);
 }
 
 void operator delete[](void* pointer, std::size_t,
                        std::align_val_t) noexcept {
-  std::free(pointer);
+  platform_aligned_free(pointer);
 }
 
 void operator delete(void* pointer, const std::nothrow_t&) noexcept {
@@ -177,10 +201,10 @@ void operator delete[](void* pointer, const std::nothrow_t&) noexcept {
 
 void operator delete(void* pointer, std::align_val_t,
                      const std::nothrow_t&) noexcept {
-  std::free(pointer);
+  platform_aligned_free(pointer);
 }
 
 void operator delete[](void* pointer, std::align_val_t,
                        const std::nothrow_t&) noexcept {
-  std::free(pointer);
+  platform_aligned_free(pointer);
 }

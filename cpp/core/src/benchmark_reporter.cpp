@@ -13,8 +13,25 @@
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
+
+#if defined(_WIN32)
+// Windows provides the low-level descriptor calls under an underscore prefix in
+// <io.h> and reports host/memory identity through the Win32 API instead of the
+// POSIX headers. The rest of this file uses the swim_os_* shims below so the
+// serialization and write logic stays platform-neutral.
+#include <io.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <psapi.h>
+#else
 #include <sys/utsname.h>
 #include <unistd.h>
+#endif
 
 #if defined(__APPLE__)
 #include <libproc.h>
@@ -23,9 +40,51 @@
 namespace swim::core {
 namespace {
 
+#if defined(_WIN32)
+constexpr int kStdoutFileno = 1;
+int swim_os_write(int fd, const void* bytes, unsigned int size) {
+  return _write(fd, bytes, size);
+}
+int swim_os_close(int fd) { return _close(fd); }
+int swim_os_dup(int fd) { return _dup(fd); }
+long long swim_os_seek_end(int fd) { return _lseeki64(fd, 0, SEEK_END); }
+int swim_os_truncate(int fd, long long length) {
+  return _chsize_s(fd, length);
+}
+int swim_os_open_append(const std::filesystem::path& path) {
+  int fd = -1;
+  // _wsopen_s preserves the wide native path and opens in binary append mode so
+  // the JSONL records are written byte-for-byte like the POSIX O_APPEND path.
+  const auto error = _wsopen_s(&fd, path.wstring().c_str(),
+                               _O_WRONLY | _O_CREAT | _O_APPEND | _O_BINARY,
+                               _SH_DENYNO, _S_IREAD | _S_IWRITE);
+  if (error != 0) {
+    return -1;
+  }
+  return fd;
+}
+#else
+constexpr int kStdoutFileno = STDOUT_FILENO;
+int swim_os_write(int fd, const void* bytes, std::size_t size) {
+  return static_cast<int>(::write(fd, bytes, size));
+}
+int swim_os_close(int fd) { return ::close(fd); }
+int swim_os_dup(int fd) { return ::dup(fd); }
+long long swim_os_seek_end(int fd) {
+  return static_cast<long long>(::lseek(fd, 0, SEEK_END));
+}
+int swim_os_truncate(int fd, long long length) {
+  return ::ftruncate(fd, static_cast<off_t>(length));
+}
+int swim_os_open_append(const std::filesystem::path& path) {
+  return open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+}
+#endif
+
 std::ptrdiff_t system_write(int fd, const void* bytes,
                             std::size_t size) {
-  return static_cast<std::ptrdiff_t>(::write(fd, bytes, size));
+  return static_cast<std::ptrdiff_t>(
+      swim_os_write(fd, bytes, static_cast<unsigned int>(size)));
 }
 
 std::string json_escape(std::string_view value) {
@@ -117,7 +176,11 @@ std::string default_run_id() {
   const auto now = std::chrono::system_clock::now();
   const auto timestamp = std::chrono::system_clock::to_time_t(now);
   std::tm utc{};
+#if defined(_WIN32)
+  gmtime_s(&utc, &timestamp);
+#else
   gmtime_r(&timestamp, &utc);
+#endif
   char buffer[32]{};
   static_cast<void>(std::strftime(buffer, sizeof(buffer), "%Y%m%dT%H%M%SZ",
                                   &utc));
@@ -133,22 +196,55 @@ std::optional<std::uint64_t> resident_bytes() noexcept {
                       reinterpret_cast<rusage_info_t*>(&info)) == 0) {
     return info.ri_resident_size;
   }
+#elif defined(_WIN32)
+  PROCESS_MEMORY_COUNTERS counters{};
+  counters.cb = sizeof(counters);
+  if (GetProcessMemoryInfo(GetCurrentProcess(), &counters,
+                           sizeof(counters)) != 0) {
+    return static_cast<std::uint64_t>(counters.WorkingSetSize);
+  }
 #endif
   return std::nullopt;
 }
 
 std::array<std::string, 3> machine_identity() {
+#if defined(_WIN32)
+  char hostname[MAX_COMPUTERNAME_LENGTH + 1] = "unavailable";
+  DWORD length = sizeof(hostname);
+  if (GetComputerNameA(hostname, &length) == 0) {
+    return {"unavailable", "unavailable", "unavailable"};
+  }
+  std::string machine = "unknown";
+  SYSTEM_INFO system_info{};
+  GetNativeSystemInfo(&system_info);
+  switch (system_info.wProcessorArchitecture) {
+    case PROCESSOR_ARCHITECTURE_AMD64:
+      machine = "x86_64";
+      break;
+    case PROCESSOR_ARCHITECTURE_ARM64:
+      machine = "arm64";
+      break;
+    case PROCESSOR_ARCHITECTURE_INTEL:
+      machine = "x86";
+      break;
+    default:
+      machine = "unknown";
+      break;
+  }
+  return {std::string(hostname), "Windows", machine};
+#else
   utsname value{};
   if (uname(&value) != 0) {
     return {"unavailable", "unavailable", "unavailable"};
   }
   return {value.nodename, std::string(value.sysname) + " " + value.release,
           value.machine};
+#endif
 }
 
 int open_output(const std::filesystem::path& path) {
   if (path.empty()) {
-    const auto duplicate = dup(STDOUT_FILENO);
+    const auto duplicate = swim_os_dup(kStdoutFileno);
     if (duplicate < 0) {
       throw std::runtime_error("cannot duplicate benchmark stdout descriptor");
     }
@@ -158,7 +254,7 @@ int open_output(const std::filesystem::path& path) {
   if (!parent.empty()) {
     std::filesystem::create_directories(parent);
   }
-  const auto fd = open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+  const auto fd = swim_os_open_append(path);
   if (fd < 0) {
     throw std::runtime_error("cannot open metrics output: " + path.string());
   }
@@ -500,7 +596,7 @@ BenchmarkReporter::~BenchmarkReporter() {
     }
   }
   if (output_fd_ >= 0) {
-    static_cast<void>(close(output_fd_));
+    static_cast<void>(swim_os_close(output_fd_));
   }
 }
 
@@ -613,14 +709,14 @@ void BenchmarkReporter::write_record(const MetricsSnapshot& current,
   const auto line = serialize_benchmark_record(
       metadata_, current, previous, backend, elapsed_seconds, final,
       healthy_sources, resident_bytes());
-  const auto record_start = lseek(output_fd_, 0, SEEK_END);
+  const auto record_start = swim_os_seek_end(output_fd_);
   const auto written = writer_(output_fd_, line.data(), line.size());
   if (written < 0) {
     const auto write_error = errno;
     if (record_start >= 0) {
-      static_cast<void>(ftruncate(output_fd_, record_start));
+      static_cast<void>(swim_os_truncate(output_fd_, record_start));
     }
-    static_cast<void>(close(output_fd_));
+    static_cast<void>(swim_os_close(output_fd_));
     output_fd_ = -1;
     auto error = std::make_exception_ptr(std::runtime_error(
         "benchmark metrics write failed: " + std::to_string(write_error)));
@@ -629,9 +725,9 @@ void BenchmarkReporter::write_record(const MetricsSnapshot& current,
   }
   if (static_cast<std::size_t>(written) != line.size()) {
     if (record_start >= 0) {
-      static_cast<void>(ftruncate(output_fd_, record_start));
+      static_cast<void>(swim_os_truncate(output_fd_, record_start));
     }
-    static_cast<void>(close(output_fd_));
+    static_cast<void>(swim_os_close(output_fd_));
     output_fd_ = -1;
     auto error = std::make_exception_ptr(
         std::runtime_error("benchmark metrics write was partial"));

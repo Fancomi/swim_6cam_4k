@@ -6,11 +6,47 @@
 
 本文所有命令都假定当前目录是项目根目录 `swim_fbx_demo/`。
 
+## Windows 实时路径（Direct3D 11 + Media Foundation）
+
+仓库也包含与 Metal 平级的 Windows 原生后端 `cpp/backends/d3d11/`：六路 H.264 由 Media Foundation（`IMFSourceReader` + `IMFDXGIDeviceManager`）做 D3D11 硬件解码为 GPU 常驻 NV12 纹理，Direct3D 11 以同一套固定六网格 + FP16 加性累加 shader（`cpp/backends/d3d11/shaders/stitch.hlsl`，从 `stitch.metal` 逐字段移植）合成 `5002x2102`，再经 DXGI 交换链窗口实时预览。与 Metal 路径一致：不依赖 OpenCV/FFmpeg，不把解码像素读回 CPU，各路输入走容量有界的 latest-frame 交换。第一阶段覆盖 `解码 → GPU 拼接 → 预览` 端到端实时；硬件 HEVC 编码与 benchmark 矩阵为后续阶段。
+
+构建前置：需要一个装有 `numpy` 与 `opencv-python` 的 Python 3.10+（用于把 `outputs/data/pool_mesh.json` 编译成 `assets/generated/pool_4k.swasset`），以及 Visual Studio 2022（MSVC，C++20）和 Windows 10 SDK。统一入口是 `scripts/run_win.ps1`：
+
+```powershell
+# 可视化 demo：DXGI 预览窗口 + 六路实时拼接（默认 30 秒）
+pwsh scripts/run_win.ps1 demo
+
+# 无窗口（仍执行真实 GPU 拼接与 present 计量）
+pwsh scripts/run_win.ps1 demo -NoWindow
+```
+
+该脚本在缺少 `.swasset` 时自动编译，随后用 `-G "Visual Studio 17 2022"` 配置并构建 Release，再运行 `swim_realtime --backend d3d11`。六路真实输入路径写在 `configs/windows_20260629.conf`。
+
+## Windows 实时路径（CUDA/GL：NVDEC + OpenGL）
+
+另有一个与 D3D11 平级的 Windows 后端 `cpp/backends/cudagl/`，对齐 `rtsp-h264-stitcher` 的 NVDEC/CUDA/GL 技术栈，为后续接 RTSP 网络流与 NVENC 推流铺路：六路 H.264 由 FFmpeg 的 `h264_cuvid`（NVDEC）解码，帧直接落在 CUDA 设备内存（`AV_PIX_FMT_CUDA` NV12，无 host copy）；`cuGraphicsGLRegisterImage` + `cuMemcpy2D` 把 NV12 双平面上传到 CUDA 注册的 GL 纹理，OpenGL 3.3 用同一套六网格 + 羽化 GLSL（从 `stitch.metal` 移植）做 FP16 加性累加与归一化，GLFW 窗口呈现。GL 函数通过 `glfwGetProcAddress` 手动加载，不依赖 GLEW。
+
+依赖（预编译，放在 `third_party/`，已 gitignore）：BtbN 的 FFmpeg shared 构建（含 cuvid/nvenc）、GLFW 3.4 win64，以及本机 CUDA Toolkit（头文件与 `cuda.lib`/`cudart.lib`）。CMake 通过 `SWIM_FFMPEG_DIR` / `SWIM_GLFW_DIR` / `SWIM_CUDA_DIR` 定位；三者齐备时自动启用 `swim_cudagl_backend`（配置日志打印 `CUDA/GL backend: enabled`）。
+
+两个后端共用同一个入口脚本 `scripts\run_win.bat`，第一个参数选后端；运行时 stderr 每秒刷新一行 render / decode / preview 实时 FPS：
+
+```bat
+scripts\run_win.bat                     :: d3d11 后端（默认），预览窗口，30 秒
+scripts\run_win.bat cudagl              :: CUDA/GL（NVDEC+OpenGL）后端
+scripts\run_win.bat cudagl 60           :: 跑 60 秒
+scripts\run_win.bat cudagl 30 nowindow  :: 无窗口（仍执行真实 GPU 拼接）
+scripts\run_win.bat cudagl fps:60       :: 指定渲染帧率 60fps（与输入帧率无关）
+```
+
+渲染帧率可用 `fps:N` 指定（底层 `--fps=N`，等价 `fps_num=N fps_den=1`），与输入视频帧率无关：latest-frame 邮箱按该节奏重复或丢弃源帧来满足目标 cadence。也可在 config 用 `fps_num`/`fps_den` 或 CLI `--fps-num`/`--fps-den` 设非整数帧率（如 30000/1001）。
+
+CUDA/GL 的六路真实输入路径写在 `configs/windows_cudagl.conf`（`backend=cudagl`）。运行时需要 FFmpeg（`avcodec/avformat/avutil/swresample/swscale`）、`glfw3.dll`、`cudart64_12.dll` 与 exe 同目录。
+
 ## 实时 Metal 路径
 
 仓库同时包含独立的 macOS 实时实现：六路 H.264 由 VideoToolbox 解码为 GPU 可见表面，Metal 以固定六网格合成 `5002x2102` 输出，并可分流到 preview 与硬件 HEVC。该运行路径不依赖 OpenCV 或 FFmpeg，不把解码像素读回 CPU；各路输入采用容量有界的 latest-frame 交换，接收端只消费当下最新完整帧。
 
-代码按语言隔离：实时核心位于 `cpp/core/`，Apple 原生后端位于 `cpp/backends/metal/`，离线资产与验证工具位于 `python/`，运行入口位于 `scripts/`。默认现场数据集仍是：
+代码按语言隔离：实时核心位于 `cpp/core/`，Apple 原生后端位于 `cpp/backends/metal/`，Windows 原生后端位于 `cpp/backends/d3d11/`，离线资产与验证工具位于 `python/`，运行入口位于 `scripts/`。默认现场数据集仍是：
 
 ```text
 /Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K
