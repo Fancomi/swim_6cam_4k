@@ -365,17 +365,35 @@ SWIMMING_DATASET_DIR="/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K" \
 
 ## 水下拼接（underwater stitch）
 
-`python/underwater/` 是一个**与六路 pool 流程任务隔离**的新任务，用 `inputs/underwater/models/01d.fbx` 验证「N 块平面水平依次连接」的拼接通路（当前 2 块，后续可扩展到 16 块）。它不复制算法，而是 import 复用 pool 的提取与渲染函数（`python.assets.extract_fbx`、`python.validation.reference_renderer`），产物独立写入 `outputs/underwater/`，不与 pool 交叉。
+`python/underwater/` 是一个**与六路 pool 流程任务隔离**的新任务，实现「N 块平面水平依次连接」的拼接通路（当前 16 块，早期用 `01d.fbx` 的 2 块验证）。它不复制算法，而是 import 复用 pool 的提取与渲染函数（`python.assets.extract_fbx`、`python.validation.reference_renderer`），产物独立写入 `outputs/underwater/`，不与 pool 交叉。
 
-提取 FBX 网格为 JSON（默认 `inputs/underwater/models/01d.fbx` + 纹理目录 `inputs/underwater/models/01d.fbm`，输出 `outputs/underwater/01d_mesh.json`）：
+### 一键实时拼接（macOS + Windows）
+
+给 16 路 `.ts` 片段目录，一条命令跑完「提取网格 → 编译 .swasset → 构建 C++ → 实时渲染」。产物已是最新的步骤会自动跳过，加 `--force` 强制重做。
 
 ```bash
-.venv/bin/python -m python.underwater.extract
+# macOS / Linux
+./scripts/run_underwater.sh /path/to/swb_20260727-174520_10 --seconds 30 --encode
+
+# Windows
+pwsh scripts/run_underwater.ps1 D:\SWIM\swb_20260727-174520_10 -Seconds 30 -Encode
 ```
 
-网格按每块世界 X 最小值升序排列（左→右），不依赖 FBX 节点声明顺序，为 16 块扩展提供稳定顺序。
+两个包装脚本都只是转发到同一份跨平台逻辑 `python/underwater/run.py`，也可以直接调用：
 
-**16 块真实数据（`all.fbx`）**：`inputs/underwater/models/all.fbx` 含全部 16 块平面，但同时夹带无纹理的支架框、泳道标记条与重复网格。加 `--planes-only` 只保留「每个纹理一块、位于泳池 Y 带内的全高平面」：
+```bash
+.venv/bin/python -m python.underwater.run --video-dir DIR --seconds 30 --encode
+```
+
+平台差异全部由 `run.py` 处理：macOS 用 Ninja + `metal` 后端 + `build/metal-release/swim_realtime`；Windows 用 Visual Studio 17 2022 (x64) + `d3d11` 后端 + `build/win-d3d11/Release/swim_realtime.exe`（有 CUDA/FFmpeg/GLFW 时可 `--backend cudagl`）。运行时 config 每次按片段目录重新生成到 `inputs/configs/underwater_16_<backend>.conf`，`source.underAi=` 的声明顺序即通道顺序。
+
+常用参数：`--seconds N`、`--encode`、`--no-window`（离屏）、`--fps N`（覆盖渲染帧率）、`--steps asset,run`（只跑部分步骤）、`--config PATH`（用现成 config，不再生成）。
+
+macOS/Metal 实测：16 路 1280×720 MPEG-TS → 6002×722，渲染 30.1fps、解码 4848 帧零 malformed、HEVC 硬件编码 30.1fps、预览零丢帧。相机数量、相机 ID、输出尺寸、解码分辨率全部来自 config 与 `.swasset`，三个后端（Metal / D3D11 / CUDA-GL）共用同一套 `swim_core` 逻辑。
+
+### 分步骤运行
+
+提取 FBX 网格为 JSON。`all.fbx` 含全部 16 块平面，但同时夹带无纹理的支架框、泳道标记条与重复网格；`--planes-only` 只保留「每个纹理一块、位于泳池 Y 带内的全高平面」：
 
 ```bash
 .venv/bin/python -m python.underwater.extract \
@@ -385,7 +403,21 @@ SWIMMING_DATASET_DIR="/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K" \
   --planes-only
 ```
 
-渲染静态拼接图与网格诊断图（默认输出 `outputs/underwater/01d_stitch.png`、`01d_grid.png`）：
+网格按每块世界 X 最小值升序排列（左→右），不依赖 FBX 节点声明顺序。
+
+编译 GPU 运行时资产。`--no-neg-v` 因为水下画面本就正立；`--blend-px` 让烘焙的权重与离线渲染的硬缝一致：
+
+```bash
+.venv/bin/python -m python.assets.compile_runtime_asset \
+  outputs/underwater/all_mesh.json build/assets/generated/underwater_16.swasset \
+  --camera-ids underA16 underA15 underA14 underA13 underA12 underA11 underA10 \
+               underA9 underA8 underA7 underA6 underA5 underA4 underA3 underA2 underA1 \
+  --ppm 240 --no-neg-v --blend-px 120
+```
+
+### 离线渲染（静图 / 视频）
+
+渲染静态拼接图与网格诊断图：
 
 ```bash
 .venv/bin/python -m python.underwater.render
@@ -394,9 +426,9 @@ SWIMMING_DATASET_DIR="/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K" \
 - `--ppm` 默认按世界 X 跨度自适应到约 `--target-width`（默认 640）像素宽，避免对 640×360 源纹理无意义放大；可显式覆盖 `--ppm`。
 - `--full-res` 输出高度对齐源图高度、宽度等比缩放；缩放前会**自动砍掉最下方存在黑色（无纹理）像素的整行**（矮平面的透视地面缺口），再等比缩放，避免把黑边拉伸进画面。需要固定裁剪行数时用 `--crop-bottom-px N` 覆盖。
 - 默认按正立朝向合成；如需翻转 Y（世界 V）可加 `--neg-v`。
-- 重叠区由羽化权重平滑混合，无重叠处保持硬边（与 pool 中线接缝同机制）。
+- `--blend-px N` 控制竖直接缝的过渡带宽度，0 为硬切。
 
-**用原图（无网格标注）拼接**：`all.fbm` 里的 `underAi-grid.png` 是标注网格叠加图；每块的「原图像」是各相机的代表帧。`export_real_tex` 复用 `annotation_preview` 的代表帧选择，把干净原图按同一 basename 导出到 `outputs/underwater/real_tex_all/`，随后只需把 `--tex-dir` 指过去即可用真实影像拼接（网格与原图取的是同一帧，逐像素对齐）：
+**用原图（无网格标注）拼接**：`all.fbm` 里的 `underAi-grid.png` 是标注网格叠加图；每块的「原图像」是各相机的第一帧。`export_real_tex` 复用 `annotation_preview` 的数据集索引，把干净原图按同一 basename 导出到 `outputs/underwater/real_tex_all/`，随后只需把 `--tex-dir` 指过去：
 
 ```bash
 .venv/bin/python -m python.underwater.export_real_tex
@@ -405,6 +437,16 @@ SWIMMING_DATASET_DIR="/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K" \
   --tex-dir outputs/underwater/real_tex_all \
   --still outputs/underwater/all_real_stitch_fullres.png --full-res
 ```
+
+**离线拼接视频（带墙钟时间对齐）**：各路 `.ts` 的第 0 帧不是同一时刻——录制器把关键帧放在 lookback 窗口内的任意位置，GOP 粒度使各路偏差可达数秒。`render_video` 按 manifest 的 `align_start_ms` 与各路 `keyframe_timestamp_ms` 换算每路起始帧，与前端播放器同一套公式：
+
+```bash
+.venv/bin/python -m python.underwater.render_video DIR \
+  --data outputs/underwater/all_mesh.json \
+  --out outputs/underwater/all_sync_stitch.mp4 --blend-px 120
+```
+
+manifest 缺失或没有 align 窗口会直接报错退出，不会静默退化；确实需要「各路都从第 0 帧读」时显式加 `--no-align`。文件时长、帧数、大小只作质检，不参与对齐。
 
 ## 入水检测机位（water entry）
 

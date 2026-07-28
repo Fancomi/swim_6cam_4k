@@ -22,3 +22,5 @@ inputs/pool/models/*.fbx
 # Agent worktrees and downloaded model weights are local scratch
 .claude/worktrees/
 *.pt
+# Runtime configs generated per machine by python.underwater.run
+inputs/configs/underwater_16_*.conf

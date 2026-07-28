@@ -382,3 +382,72 @@ class RenderStillTest(unittest.TestCase):
             grid = td / "out_grid.png"
             with self.assertRaises(SystemExit):
                 render_stills(bad_path, td, still, grid)
+
+
+class OneClickRunnerTest(unittest.TestCase):
+    """The one-command runner must pick the right platform toolchain and emit a
+    config whose lane order matches the compiled asset."""
+
+    def test_platform_selects_backend_build_dir_and_executable(self):
+        import python.underwater.run as runner
+
+        original = runner.platform.system
+        try:
+            runner.platform.system = lambda: "Darwin"
+            self.assertEqual(runner.default_backend(), "metal")
+            self.assertEqual(runner.build_dir_for("metal").name, "metal-release")
+            self.assertEqual(
+                runner.executable_for(runner.build_dir_for("metal")).name,
+                "swim_realtime")
+
+            runner.platform.system = lambda: "Windows"
+            self.assertEqual(runner.default_backend(), "d3d11")
+            self.assertEqual(runner.build_dir_for("d3d11").name, "win-d3d11")
+            self.assertEqual(
+                runner.executable_for(runner.build_dir_for("d3d11")).name,
+                "swim_realtime.exe")
+        finally:
+            runner.platform.system = original
+
+    def test_generated_config_declares_sixteen_lanes_right_to_left(self):
+        import tempfile
+        import python.underwater.run as runner
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            for index in range(1, 17):
+                (td / f"swb_test_underA{index}.ts").write_bytes(b"")
+            config = td / "generated.conf"
+            runner.write_config(config, td, "metal", td / "out.h265")
+
+            lines = config.read_text().splitlines()
+            sources = [line.split("=", 1)[0].removeprefix("source.")
+                       for line in lines if line.startswith("source.")]
+            # extract orders meshes left-to-right, which is underA16 -> underA1
+            self.assertEqual(sources, [f"underA{i}" for i in range(16, 0, -1)])
+            self.assertIn("backend=metal", lines)
+
+    def test_missing_clip_is_reported_not_silently_skipped(self):
+        import tempfile
+        import python.underwater.run as runner
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            for index in range(1, 16):          # underA16 absent
+                (td / f"swb_test_underA{index}.ts").write_bytes(b"")
+            with self.assertRaises(runner.StepError):
+                runner.write_config(td / "c.conf", td, "metal", td / "o.h265")
+
+    def test_newer_than_treats_missing_target_as_stale(self):
+        import tempfile
+        import python.underwater.run as runner
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            source = td / "src"
+            source.write_text("x")
+            self.assertFalse(runner.newer_than(td / "absent", source))
+
+            target = td / "target"
+            target.write_text("y")
+            self.assertTrue(runner.newer_than(target, source))
