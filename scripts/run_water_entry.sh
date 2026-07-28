@@ -50,13 +50,13 @@ else
   "$PY" -m python.water_entry.predict
 fi
 
-step "2/4 难例筛选（kp=$KP_MEAN_NORM min-gap=$MIN_GAP max-offset=$MAX_OFFSET）"
+step "2/4 难例筛选（kp=${KP_MEAN_NORM} min-gap=${MIN_GAP} max-offset=${MAX_OFFSET}）"
 "$PY" -m python.water_entry.select_frames \
   --kp-mean-norm "$KP_MEAN_NORM" \
   --min-gap "$MIN_GAP" \
   --max-offset "$MAX_OFFSET"
 
-step "3/4 质检页（前 $PREVIEW_LIMIT 帧）"
+step "3/4 质检页（前 ${PREVIEW_LIMIT} 帧）"
 "$PY" -m python.water_entry.annotate_preview --limit "$PREVIEW_LIMIT"
 
 if ((DO_PACKAGE)); then
