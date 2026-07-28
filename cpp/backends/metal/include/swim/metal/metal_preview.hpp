@@ -166,6 +166,14 @@ class PreviewPresentationAccounting final {
   std::atomic_uint64_t value_{0};
 };
 
+// Preview target size for a composite of `width` x `height`: the nominal
+// 1280-wide target scaled to the composite's own aspect ratio, so the presenter
+// never letterboxes an untouched window. Very wide panoramas would derive an
+// illegibly short height, so those trade width for the minimum height instead.
+// Exposed for tests; the presenter applies exactly this rule.
+std::pair<std::uint32_t, std::uint32_t> preview_target_size(
+    std::uint32_t width, std::uint32_t height);
+
 // Main-thread Cocoa/CAMetalLayer presenter. offer() is a non-blocking serial
 // producer entry point; all AppKit work remains inside run_main_loop() and
 // close_and_drain() on the process main thread.
