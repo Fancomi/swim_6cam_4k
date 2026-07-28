@@ -5,7 +5,7 @@
 #   ./scripts/run_python.sh still
 #   ./scripts/run_python.sh 4k [SECONDS] [OUTPUT_MP4]
 #   ./scripts/run_python.sh keypoint [--dataset-root PATH] [...]
-#   ./scripts/run_python.sh oh-merge [--cameras ...] [--scale N]
+#   ./scripts/run_python.sh oh-merge [--cameras ...] [--thresh N]
 #   ./scripts/run_python.sh extract [SRC_FBX] [DST_JSON]
 #   ./scripts/run_python.sh bake SRC_FBX DST_FBX [--ext-px N]
 #   ./scripts/run_python.sh asset [INPUT_JSON] [OUTPUT_SWASSET]

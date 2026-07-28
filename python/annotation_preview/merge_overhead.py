@@ -3,16 +3,13 @@
 
 50 帧逐像素中值作背景帧；每帧与背景的 RGB 欧氏距离超阈判为前景；
 按时间顺序把前景叠到背景上，后帧覆盖前帧。中值与差分按水平条带计算，
-避免 4K 尺寸下 float32 中间量吃满内存。
+避免 4K 尺寸下 float32 中间量吃满内存。输出始终是相机原始分辨率。
 """
 import argparse
-import colorsys
-import datetime
 import os
-import re
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from python.annotation_preview import common as C
 
@@ -27,14 +24,6 @@ def bands(height, band_rows):
     return [(y, min(y + step, height)) for y in range(0, height, step)]
 
 
-def weighted_median(hist):
-    """直方图加权下中位数；空直方图返回 None。"""
-    total = int(hist.sum())
-    if total == 0:
-        return None
-    return int(np.searchsorted(np.cumsum(hist), (total + 1) // 2))
-
-
 def median_background(stack, band_rows=BAND_ROWS):
     """逐像素取时间轴中值，得到干净空池背景帧。"""
     _n, h, w, _c = stack.shape
@@ -45,17 +34,10 @@ def median_background(stack, band_rows=BAND_ROWS):
 
 
 def merge_frames(stack, background, thresh=C.DIST_THRESH, band_rows=BAND_ROWS):
-    """按时间顺序把每帧前景叠到背景上（后帧覆盖前帧）。
-
-    返回 (合成图, 每帧锚点)。锚点是该帧前景像素坐标的分量下中位数 (x, y)，
-    由行/列直方图累加得到——直方图与条带切分无关，内存也只有 O(H + W)。
-    无前景的帧锚点为 None。
-    """
-    n, h, w, _c = stack.shape
+    """按时间顺序把每帧前景叠到背景上（后帧覆盖前帧），返回合成图。"""
+    n, h, _w, _c = stack.shape
     merged = background.copy()
     base = background.astype(np.float32)
-    row_hist = np.zeros((n, h), dtype=np.int64)
-    col_hist = np.zeros((n, w), dtype=np.int64)
     limit = float(thresh) ** 2
     for y0, y1 in bands(h, band_rows):
         band_base = base[y0:y1]
@@ -67,82 +49,7 @@ def merge_frames(stack, background, thresh=C.DIST_THRESH, band_rows=BAND_ROWS):
             if not mask.any():
                 continue
             band_out[mask] = frame[mask]
-            ys, xs = np.nonzero(mask)
-            row_hist[i] += np.bincount(ys + y0, minlength=h)
-            col_hist[i] += np.bincount(xs, minlength=w)
-    anchors = []
-    for i in range(n):
-        x = weighted_median(col_hist[i])
-        y = weighted_median(row_hist[i])
-        anchors.append(None if x is None or y is None else (x, y))
-    return merged, anchors
-
-
-LEGEND_PAD = 8                                      # 图例带内边距
-
-
-def snapshot_time_label(snapshot_id):
-    """raw_<毫秒时间戳>_<序号> -> 本地时间 HH:MM:SS；解析失败原样返回。"""
-    m = re.match(r"raw_(\d+)_", snapshot_id)
-    if not m:
-        return snapshot_id
-    return datetime.datetime.fromtimestamp(int(m.group(1)) / 1000.0).strftime("%H:%M:%S")
-
-
-HUE_SPAN = 0.9                                      # 色相环只走到 0.9，避免首尾颜色因环绕而撞色
-
-
-def frame_color(index, total):
-    """按帧序取色，色相从 0 到 HUE_SPAN 线性推进（不绕回红色），便于看出时间方向。"""
-    hue = HUE_SPAN * (index % max(1, total)) / float(max(1, total))
-    r, g, b = colorsys.hsv_to_rgb(hue, 0.95, 1.0)
-    return (int(r * 255), int(g * 255), int(b * 255))
-
-
-def annotate(merged, anchors, labels):
-    """在合成图上标帧号，并在下方追加 f<NN> -> 时间 的图例带。
-
-    锚点可能被池边人群拉偏，个别标签会落在非线位置；图例带是兜底，
-    即使锚点不准也能按线的空间顺序对上编号。
-    """
-    h, w, _c = merged.shape
-    total = len(labels)
-    size = max(12, w // 120)
-    font = C.load_font(size)
-    line_h = size + 6
-    swatch = size
-
-    # 按最宽条目算列宽，列数取图宽装得下的最大值：50 条在 4K 下排 4 列，
-    # 在低分辨率的 orbbec 上自动收窄，不会互相压字。
-    entries = ["f%02d  %s" % (n, t) for n, t in labels]
-    measure = ImageDraw.Draw(Image.new("RGB", (1, 1)))
-    text_w = max([int(measure.textlength(e, font=font)) for e in entries] or [size])
-    col_w = swatch + LEGEND_PAD + text_w + 2 * LEGEND_PAD
-    cols = max(1, min(total, w // col_w)) if total else 1
-    rows = (total + cols - 1) // cols if total else 0
-    legend_h = 2 * LEGEND_PAD + rows * line_h
-
-    canvas = Image.new("RGB", (w, h + legend_h), (16, 16, 16))
-    canvas.paste(Image.fromarray(merged), (0, 0))
-    draw = ImageDraw.Draw(canvas)
-
-    radius = max(3, size // 3)
-    for i, entry in enumerate(entries):
-        color = frame_color(i, total)
-        anchor = anchors[i] if i < len(anchors) else None
-        if anchor is not None:
-            x, y = anchor
-            draw.ellipse((x - radius, y - radius, x + radius, y + radius),
-                         fill=color, outline=(0, 0, 0))
-            # 图上只标帧号，时间放图例带；否则 50 个时间戳会糊成一片。
-            draw.text((x + radius + 2, y - line_h), "f%02d" % labels[i][0],
-                      fill=color, font=font, stroke_width=1, stroke_fill=(0, 0, 0))
-        col, row = divmod(i, max(1, rows))
-        lx = LEGEND_PAD + col * col_w
-        ly = h + LEGEND_PAD + row * line_h
-        draw.rectangle((lx, ly + 2, lx + swatch, ly + swatch), fill=color)
-        draw.text((lx + swatch + LEGEND_PAD, ly), entry, fill=(235, 235, 235), font=font)
-    return np.asarray(canvas, dtype=np.uint8)
+    return merged
 
 
 OUT_DIR = os.path.join(C.OUTPUT_ROOT, "overhead-merge")
@@ -152,8 +59,8 @@ class FrameSizeError(Exception):
     """同一相机各帧尺寸不一致；静默缩放会产出错误的参考图，所以直接失败。"""
 
 
-def load_stack(paths, scale=1):
-    """解码一组同尺寸图像进 (N, H, W, 3) uint8 栈；scale>1 时整数降采样。"""
+def load_stack(paths):
+    """解码一组同尺寸图像进 (N, H, W, 3) uint8 栈，保持原始分辨率。"""
     frames, size = [], None
     for path in paths:
         im = Image.open(path).convert("RGB")
@@ -163,31 +70,25 @@ def load_stack(paths, scale=1):
             raise FrameSizeError(
                 "帧尺寸不一致：%s 为 %dx%d，期望 %dx%d"
                 % (os.path.basename(path), im.size[0], im.size[1], size[0], size[1]))
-        if scale > 1:
-            im = im.resize((im.width // scale, im.height // scale), Image.BILINEAR)
         frames.append(np.asarray(im, dtype=np.uint8))
     return np.stack(frames, axis=0)
 
 
-def run_camera(cam, out_dir=OUT_DIR, thresh=C.DIST_THRESH, band_rows=BAND_ROWS, scale=1):
-    """跑完一台相机：中值背景 -> 前景叠加 -> 标注，写出三张 PNG。"""
+def run_camera(cam, out_dir=OUT_DIR, thresh=C.DIST_THRESH, band_rows=BAND_ROWS):
+    """跑完一台相机：中值背景 -> 前景叠加，写出两张原始分辨率 PNG。"""
     frames = C.frames_for_camera(cam)
     if not frames:
         print("%-16s 无匹配帧，跳过" % cam)
         return []
 
-    stack = load_stack([p for _sid, p in frames], scale=scale)
+    stack = load_stack([p for _sid, p in frames])
     print("%-16s frames=%d  %dx%d" % (cam, len(stack), stack.shape[2], stack.shape[1]))
     background = median_background(stack, band_rows=band_rows)
-    merged, anchors = merge_frames(stack, background, thresh=thresh, band_rows=band_rows)
-    labels = [(i + 1, snapshot_time_label(sid)) for i, (sid, _p) in enumerate(frames)]
-    labeled = annotate(merged, anchors, labels)
+    merged = merge_frames(stack, background, thresh=thresh, band_rows=band_rows)
 
     os.makedirs(out_dir, exist_ok=True)
     written = []
-    for suffix, image in (("background", background),
-                          ("merged", merged),
-                          ("merged_labeled", labeled)):
+    for suffix, image in (("background", background), ("merged", merged)):
         path = os.path.join(out_dir, "%s_%s.png" % (cam, suffix))
         Image.fromarray(image).save(path)
         written.append(path)
@@ -203,8 +104,6 @@ def main(argv=None):
                     help="前景判定的 RGB 距离阈值（默认 %(default)s）")
     ap.add_argument("--band-rows", type=int, default=BAND_ROWS,
                     help="分带高度，越小越省内存（默认 %(default)s）")
-    ap.add_argument("--scale", type=int, default=1,
-                    help="整数降采样倍数，仅调试提速用（默认 %(default)s）")
     ap.add_argument("--out-dir", default=OUT_DIR,
                     help="输出目录（默认 %(default)s）")
     args = ap.parse_args(argv)
@@ -214,14 +113,11 @@ def main(argv=None):
             "缺少快照目录：%s（请通过 ANNOTATION_PREVIEW_DATASET_ROOT 指向有效数据集）"
             % C.SNAP_DIR)
 
-    if args.scale < 1:
-        raise SystemExit("--scale 必须 >= 1（收到 %s）" % args.scale)
-
     total = 0
     try:
         for cam in args.cameras:
             total += len(run_camera(cam, out_dir=args.out_dir, thresh=args.thresh,
-                                    band_rows=args.band_rows, scale=args.scale))
+                                    band_rows=args.band_rows))
     except FrameSizeError as exc:
         raise SystemExit(str(exc)) from None
     print("\n共写出 %d 个文件 -> %s" % (total, args.out_dir))

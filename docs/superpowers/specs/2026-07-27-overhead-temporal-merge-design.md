@@ -47,42 +47,37 @@
 
 `orbbec_camera_1` 的栈只有 0.14 GB，走完全相同的代码路径，无需特例。
 
-## 编号标注
+## 不做编号标注
 
-设计师需要知道每条线对应第几个时刻（即第几个 0.5 米站位），否则数错一条线会导致 UV 整体错一格。标注**不引入任何检测**：
+早期版本在合成图上按帧序画过锚点圆点与 `f01` 帧号，并在图下方追加过一条 `f01 → 时间` 的图例带。**该功能已整体移除**：锚点是前景像素坐标的中位数，会被池边人群拉偏，标签落点不可靠；图例带还会把产物撑高到非原始分辨率，交给 Maya 做 UV 时反而添乱。设计师按线的空间顺序从池的一端数过去即可。
 
-- 每帧的标签锚点 = 该帧前景像素坐标的**分量下中位数**（行/列直方图各取中位，比均值抗散点）；
-- 在锚点画一个圆点，旁边只写帧号 `f01`（50 个完整时间戳挤在一起会糊成一片，时间放到图例带）；
-- 圆点与文本颜色按帧序在色相环上均匀取值（HSV 色相 `i / N`，饱和度与明度固定），便于看出时间方向。
-
-**已知局限**：前景不只包含白线，还包含池中两人与岸边人群，锚点可能被拉偏，个别标签会落在非线位置。作为兜底，在合成图**下方追加**一条图例带（高度按字号与条目数推算，因此标注版比主图高若干像素），分多列列出 `f01 → 时间` 与该帧的标注颜色；列数按图宽能装下的最大值自适应。即使锚点不准，设计师仍可按线的空间顺序对上编号。标注版是主图之外的**附加**产物，主图与背景帧尺寸等于原始相机分辨率，不含任何叠加绘制。
+产物中不含任何叠加绘制，尺寸严格等于相机原始分辨率。
 
 ## 产出
 
-落在 `outputs/annotation_preview/overhead-merge/`（`common.OUTPUT_ROOT` 之下，已被 .gitignore 忽略），每台相机三张 PNG：
+落在 `outputs/annotation_preview/overhead-merge/`（`common.OUTPUT_ROOT` 之下，已被 .gitignore 忽略），每台相机两张 PNG，尺寸均为相机原始分辨率：
 
 | 文件 | 内容 |
 | --- | --- |
 | `<cam>_background.png` | 中值背景帧 |
 | `<cam>_merged.png` | 合成图（**主交付**，无叠加绘制） |
-| `<cam>_merged_labeled.png` | 合成图 + 帧号锚点 + 底部图例条 |
 
 ## 代码结构
 
 新模块 `python/annotation_preview/merge_overhead.py`，单一职责：把一台相机的全部快照合成为一张图。
 
-复用 `common.py`：`SNAP_DIR` / `OUTPUT_ROOT` 路径常量、`frames_for_camera`、`DIST_THRESH`、`load_font`。
+复用 `common.py`：`SNAP_DIR` / `OUTPUT_ROOT` 路径常量、`frames_for_camera`、`DIST_THRESH`。
 
 **不修改 `common.py`**：`median_dist` 的全量加载不适用于 4K 尺寸，分带版本在新模块内实现。两者并存，各自服务于尺寸不同的场景。
 
 模块内的函数边界：
 
 - `median_background(stack, band_rows)` → 背景帧，分带计算，不涉及 IO；
-- `merge_frames(stack, background, thresh, band_rows)` → `(合成图, 每帧锚点列表)`，分带计算，不涉及 IO；锚点在同一次分带遍历中累积各帧前景像素坐标后取中位数，无前景的帧锚点为 `None`；
-- `annotate(merged, anchors, labels)` → 标注版；`labels` 为 `[(帧号, 本地时间字符串)]`，锚点为 `None` 的帧只出现在图例带里，不在图上画点；
+- `merge_frames(stack, background, thresh, band_rows)` → 合成图，分带计算，不涉及 IO；
+- `load_stack(paths)` → `(N, H, W, 3) uint8` 栈，保持原始分辨率，不缩放；
 - `run_camera(cam, ...)` → 编排 IO 与上述三者，是唯一接触文件系统的函数。
 
-`--scale` 为整数降采样倍数，仅供调试提速：非 1 时全部三张产物按该倍数缩小，不影响算法逻辑。
+**没有降采样开关**。输出必须是原始分辨率，任何缩放都会让 UV 参考失去意义，所以模块不提供缩放路径。
 
 CLI 参数：
 
@@ -91,7 +86,6 @@ CLI 参数：
 | `--cameras` | 三台全跑 | 指定相机 |
 | `--thresh` | 40 | 前景判定的 RGB 距离阈值 |
 | `--band-rows` | 256 | 分带高度 |
-| `--scale` | 1 | 整数降采样倍数，调试用 |
 | `--out-dir` | `outputs/annotation_preview/overhead-merge` | 输出目录 |
 
 Shell 入口：`./scripts/run_python.sh oh-merge [...]`，转发全部参数给模块。
@@ -105,10 +99,13 @@ Shell 入口：`./scripts/run_python.sh oh-merge [...]`，转发全部参数给�
 
 ## 测试
 
-`tests/python/test_merge_overhead.py`，用 `tmp_path` 构造若干假快照目录与小尺寸图像（命名遵循真实模式），断言：
+`tests/python/test_merge_overhead.py`，用 `tempfile.TemporaryDirectory` 构造若干假快照目录与小尺寸图像（命名遵循真实模式），断言：
 
 1. 中值背景帧的像素值等于各帧对应像素的中值；
 2. 超阈像素被**时间上最后**一个超阈帧覆盖；
 3. 亚阈位置保留背景帧的值；
 4. 分带计算结果与一次性全量计算**逐位相同**（`band_rows` 取 1、素数、大于图高三种情形）；
-5. `run_camera` 生成三个预期文件。
+5. `run_camera` 只生成 `_background` 与 `_merged` 两个文件，输出目录里不存在标注版；
+6. 两个产物的尺寸都等于源图分辨率；
+7. `--scale` 已被移除，传入该参数时报错退出；
+8. 帧尺寸不一致时 CLI 干净退出并带上「帧尺寸不一致」信息，而不是抛裸 traceback。
