@@ -145,7 +145,7 @@ class ClipWindowTest(unittest.TestCase):
         self.assertEqual(clip.window(pre=5, post=1)[0], 0)
 
 
-THRESH = {"iou": 0.4, "kp_mean_norm": 0.10}
+THRESH = {"iou": S.DEFAULT_IOU, "kp_mean_norm": S.DEFAULT_KP_MEAN_NORM}
 
 
 def _pose(sho_y, hip_y, offset=0.0, torso_conf=0.9, box=(100, 100, 200, 300)):
@@ -347,6 +347,36 @@ class ExportPackageTest(unittest.TestCase):
         self.assertEqual(len(pairs), len(C.SKELETON))
         self.assertEqual(pairs[0], [C.SKELETON[0][0] + 1, C.SKELETON[0][1] + 1])
         self.assertTrue(all(1 <= a <= 17 and 1 <= b <= 17 for a, b in pairs))
+
+
+class DefaultsTest(unittest.TestCase):
+    """筛选口径只有一个来源：CLI 默认值与 run_water_entry.sh 都读 DEFAULT_*。"""
+
+    def test_cli_references_the_constants_instead_of_copying_literals(self):
+        with open(S.__file__) as f:
+            src = f.read()
+        for name in ("DEFAULT_IOU", "DEFAULT_KP_MEAN_NORM",
+                     "DEFAULT_MIN_GAP", "DEFAULT_MAX_OFFSET"):
+            self.assertIn("default=%s" % name, src,
+                          "%s 应作为 argparse 默认值被引用，而不是复制字面量" % name)
+
+    def test_pipeline_script_reads_the_constants(self):
+        script = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__)))),
+            "scripts", "run_water_entry.sh")
+        with open(script) as f:
+            text = f.read()
+        self.assertIn("S.DEFAULT_KP_MEAN_NORM", text)
+        self.assertIn("S.DEFAULT_MIN_GAP", text)
+        self.assertIn("S.DEFAULT_MAX_OFFSET", text)
+
+    def test_min_gap_default_keeps_adjacent_frames(self):
+        """默认不去重：训练时相邻帧的姿态差异有价值，去重只为人工翻页。"""
+        self.assertEqual(S.DEFAULT_MIN_GAP, 1)
+
+    def test_kp_threshold_sits_above_the_disagreement_median(self):
+        """阈值必须高于分歧值中位数 0.0497，否则「一半的帧都算难例」。"""
+        self.assertGreater(S.DEFAULT_KP_MEAN_NORM, 0.0497)
 
 
 if __name__ == "__main__":

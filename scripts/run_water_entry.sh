@@ -4,6 +4,9 @@
 # 新增片段后重跑这一个脚本即可全量刷新：predict 会把新片段一并纳入（manifest.csv
 # 是唯一的片段清单来源），后续每一步都从 predict 的产物重算，没有增量状态。
 #
+# 筛选阈值的默认值来自 python/water_entry/select_frames.py 的 DEFAULT_* 常量，
+# 本脚本不复制它们——要改口径就改那里，两个入口同时生效。
+#
 # 用法:
 #   ./scripts/run_water_entry.sh                    # 全流程，默认参数
 #   ./scripts/run_water_entry.sh --skip-predict     # 复用已有预测，只重跑筛选与出包
@@ -13,19 +16,22 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
 PY="$ROOT/.venv/bin/python"
 [[ -x "$PY" ]] || PY="$(command -v python3)"
 
-# 与 select_frames / annotate_preview 的默认值保持一致；改这里等于改全流程口径。
-KP_MEAN_NORM=0.055      # 关键点分歧阈值：越小选出越多（0.10 约 320 帧，0.055 约 1160 帧）
-MIN_GAP=1               # 同片段候选帧最小间隔：1 = 不去重（训练用相邻帧有价值）
-MAX_OFFSET=6            # 只取入水后 6 帧内：再往后运动员没入水面，人工也标不出
-PREVIEW_LIMIT=120       # 质检页渲染帧数：0 = 全部
+# 筛选口径不在这里写死：select_frames 的 DEFAULT_* 是唯一来源，脚本读取它，
+# 这样「走流程脚本」与「直接调 we-select」永远给出同一批候选帧。
+read -r KP_MEAN_NORM MIN_GAP MAX_OFFSET <<<"$(
+  "$PY" -c 'from python.water_entry import select_frames as S
+print(S.DEFAULT_KP_MEAN_NORM, S.DEFAULT_MIN_GAP, S.DEFAULT_MAX_OFFSET)'
+)"
+PREVIEW_LIMIT=120       # 质检页渲染帧数：0 = 全部（仅影响人工翻页，不影响候选集）
 SKIP_PREDICT=0
 DO_PACKAGE=1
 
 usage() {
-  sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while (($#)); do

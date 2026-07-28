@@ -114,6 +114,13 @@ REASON_SCORE = {
 # 阶段权重：入水前后是业务量角的时刻，飞行段是已知短板，起跳前的扶壁段价值最低。
 PHASE_WEIGHT = {"entry": 1.6, "flight": 1.25, "post": 1.0, "pre": 0.5}
 
+# 筛选口径的唯一来源：CLI 默认值与 scripts/run_water_entry.sh 都取自这里，
+# 避免「走流程脚本」和「直接调模块」给出不同的候选量。
+DEFAULT_IOU = 0.4               # 低于此 IoU 视为两模型指向不同的人
+DEFAULT_KP_MEAN_NORM = 0.055    # 关键点分歧 / 框对角线；0.10 约 320 帧，0.055 约 1160 帧
+DEFAULT_MIN_GAP = 1             # 相邻候选帧最小间隔；1 = 不去重（训练用相邻帧有价值）
+DEFAULT_MAX_OFFSET = 6          # 只取入水后 6 帧内；再往后运动员没入水面，人工也标不出
+
 
 def analyze_frame(rec_a, rec_b, frame, jump_frame, entry_frame, thresholds):
     """比较同一帧的两模型记录，返回 (reasons, 度量字典)。"""
@@ -307,13 +314,15 @@ def main():
     ap.add_argument("--include-false-positive", action="store_true",
                     help="把 note=suspected_false_positive 的片段也纳入（默认排除，"
                          "它们多半没有真实出发动作，标了对增量训练没帮助）")
-    ap.add_argument("--iou", type=float, default=0.4,
+    ap.add_argument("--iou", type=float, default=DEFAULT_IOU,
                     help="低于该 IoU 视为两模型指向不同的人（默认 %(default)s）")
-    ap.add_argument("--kp-mean-norm", type=float, default=0.10,
-                    help="关键点平均分歧 / 框对角线，超过即判分歧大（默认 %(default)s）")
-    ap.add_argument("--min-gap", type=int, default=3,
-                    help="同片段内相邻候选帧的最小间隔（默认 %(default)s，1 = 不去重）")
-    ap.add_argument("--max-offset", type=int, default=6,
+    ap.add_argument("--kp-mean-norm", type=float, default=DEFAULT_KP_MEAN_NORM,
+                    help="关键点平均分歧 / 框对角线，超过即判分歧大（默认 %(default)s；"
+                         "分歧值中位数为 0.0497，再往下等于「一半的帧都算难例」）")
+    ap.add_argument("--min-gap", type=int, default=DEFAULT_MIN_GAP,
+                    help="同片段内相邻候选帧的最小间隔（默认 %(default)s = 不去重；"
+                         "训练时相邻帧的姿态差异有价值，去重只为人工翻页方便）")
+    ap.add_argument("--max-offset", type=int, default=DEFAULT_MAX_OFFSET,
                     help="只取 frame - entry_frame <= N 的帧（默认 %(default)s；"
                          "再往后运动员已没入水面，两模型各自锁住不同的水花伪影，"
                          "那种分歧人工也标不出来）")
