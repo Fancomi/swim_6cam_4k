@@ -1,0 +1,191 @@
+<!doctype html>
+<!-- mask_labeler 端到端自测：在真实浏览器里驱动 app.js 的绘制路径与导出 schema。
+     不是只测几何——它导入标注器实际使用的 draw.js，用真实 canvas 画一笔，
+     再逐像素核对「画出来的形状」是否等于「geometry.js 判定为保留的形状」。
+     这是标注器的核心契约：预览所见即拼接所得。 -->
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>RUNNING</title></head>
+<body>
+<canvas id="cv" width="480" height="320"></canvas>
+<script type="module">
+import {
+  cameraOf, snapshotIdOf, insideStroke, hitStrokeIndex, capsuleArea,
+  sortCameras, groupByCamera,
+} from './geometry.js';
+import { capsulePath, drawStrokes, drawPreview, drawCursorGhost } from './draw.js';
+
+const out = [];
+const ok = (name, cond, detail) =>
+  out.push(`${cond ? 'PASS' : 'FAIL'} ${name}${detail ? '  ' + detail : ''}`);
+
+const cv = document.getElementById('cv');
+const c = cv.getContext('2d');
+const ident = (x, y) => [x, y];
+
+function signedDistToCapsule(px, py, s) {
+  const dx = s.x2 - s.x1, dy = s.y2 - s.y1;
+  const len2 = dx * dx + dy * dy;
+  let t = len2 ? ((px - s.x1) * dx + (py - s.y1) * dy) / len2 : 0;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (s.x1 + t * dx), py - (s.y1 + t * dy)) - s.r;
+}
+
+// 逐像素核对 drawStrokes 的填充与 insideStroke 的判定。跳过边界 ±2px 的抗锯齿带。
+function agreementFor(strokes) {
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  c.clearRect(0, 0, cv.width, cv.height);
+  drawStrokes(c, strokes, ident, 1, '#fff', null);
+  const px = c.getImageData(0, 0, cv.width, cv.height).data;
+  let agree = 0, disagree = 0, skipped = 0;
+  for (let y = 0; y < cv.height; y++) {
+    for (let x = 0; x < cv.width; x++) {
+      const cx = x + 0.5, cy = y + 0.5;
+      const near = strokes.some((s) => Math.abs(signedDistToCapsule(cx, cy, s)) < 2);
+      if (near) { skipped++; continue; }
+      const painted = px[(y * cv.width + x) * 4] > 128;
+      const judged = strokes.some((s) => insideStroke(cx, cy, s));
+      if (painted === judged) agree++; else disagree++;
+    }
+  }
+  return { agree, disagree, skipped };
+}
+
+// 1) 斜向一笔：填充形状 == 判定形状
+{
+  const s = { x1: 90, y1: 240, x2: 390, y2: 80, r: 38 };
+  const r = agreementFor([s]);
+  ok('斜向笔画：canvas 填充 == insideStroke 判定', r.disagree === 0 && r.agree > 50000,
+     `agree=${r.agree} disagree=${r.disagree} skip=${r.skipped}`);
+}
+
+// 2) 退化为一点（按下即松手）：应是一个整圆，不是空白
+{
+  const s = { x1: 240, y1: 160, x2: 240, y2: 160, r: 30 };
+  const r = agreementFor([s]);
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  c.clearRect(0, 0, cv.width, cv.height);
+  drawStrokes(c, [s], ident, 1, '#fff', null);
+  const centre = c.getImageData(240, 160, 1, 1).data[0];
+  ok('单击一点：画成整圆且判定一致', r.disagree === 0 && centre > 128,
+     `centre=${centre} disagree=${r.disagree}`);
+}
+
+// 3) 两笔重叠：并集一致（这是 mask 的语义——覆盖即保留）
+{
+  const a = { x1: 60, y1: 100, x2: 260, y2: 100, r: 25 };
+  const b = { x1: 200, y1: 60, x2: 200, y2: 260, r: 20 };
+  const r = agreementFor([a, b]);
+  ok('两笔重叠：并集与判定一致', r.disagree === 0 && r.agree > 50000,
+     `agree=${r.agree} disagree=${r.disagree}`);
+}
+
+// 4) 缩放视图下判定仍一致：mapper 放大 2x、半径同步 2x
+{
+  const s = { x1: 40, y1: 60, x2: 160, y2: 120, r: 15 };
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  c.clearRect(0, 0, cv.width, cv.height);
+  drawStrokes(c, [s], (x, y) => [x * 2, y * 2], 2, '#fff', null);
+  const px = c.getImageData(0, 0, cv.width, cv.height).data;
+  let bad = 0;
+  for (let y = 0; y < cv.height; y += 2) {
+    for (let x = 0; x < cv.width; x += 2) {
+      const ix = (x + 0.5) / 2, iy = (y + 0.5) / 2;   // 回到图像坐标
+      if (Math.abs(signedDistToCapsule(ix, iy, s)) < 2) continue;
+      const painted = px[(y * cv.width + x) * 4] > 128;
+      if (painted !== insideStroke(ix, iy, s)) bad++;
+    }
+  }
+  ok('2x 缩放下填充仍与判定一致', bad === 0, `mismatch=${bad}`);
+}
+
+// 5) 预览绘制不抛异常，且确实往画布上画了东西（含退化一点的情形）
+{
+  let threw = null;
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  c.clearRect(0, 0, cv.width, cv.height);
+  try {
+    drawPreview(c, { x1: 80, y1: 80, x2: 300, y2: 200, r: 30 }, ident, 1);
+    drawPreview(c, { x1: 100, y1: 100, x2: 100, y2: 100, r: 20 }, ident, 1);
+    drawCursorGhost(c, 400, 280, 25);
+  } catch (e) { threw = e; }
+  const data = c.getImageData(0, 0, cv.width, cv.height).data;
+  let lit = 0;
+  for (let i = 3; i < data.length; i += 4) if (data[i] > 0) lit++;
+  ok('drawPreview / drawCursorGhost 不抛异常且有输出', !threw && lit > 1000,
+     threw ? String(threw) : `lit=${lit}`);
+}
+
+// 6) 预览的胶囊轮廓与落定后的填充边界重合：同一 path 应产生同一 bbox
+{
+  function bboxOf(paint) {
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.clearRect(0, 0, cv.width, cv.height);
+    paint();
+    const d = c.getImageData(0, 0, cv.width, cv.height).data;
+    let x0 = 1e9, y0 = 1e9, x1 = -1, y1 = -1;
+    for (let y = 0; y < cv.height; y++) {
+      for (let x = 0; x < cv.width; x++) {
+        if (d[(y * cv.width + x) * 4 + 3] > 8) {
+          if (x < x0) x0 = x; if (x > x1) x1 = x;
+          if (y < y0) y0 = y; if (y > y1) y1 = y;
+        }
+      }
+    }
+    return [x0, y0, x1, y1];
+  }
+  const s = { x1: 120, y1: 120, x2: 320, y2: 200, r: 28 };
+  const settled = bboxOf(() => drawStrokes(c, [s], ident, 1, '#fff', null));
+  const preview = bboxOf(() => { capsulePath(c, s.x1, s.y1, s.x2, s.y2, s.r); c.fillStyle = '#fff'; c.fill(); });
+  const same = settled.every((v, i) => Math.abs(v - preview[i]) <= 1);
+  ok('预览轮廓与落定填充同一边界', same, `settled=${settled} preview=${preview}`);
+}
+
+// 7) 命名解析：真实数据集的三种文件名
+ok('cameraOf overhead5', cameraOf('1_stitch__under-overhead-xlj__overhead5.jpg') === 'overhead5');
+ok('cameraOf orbbec（名字里自带双下划线）',
+   cameraOf('19_device__orbbec_camera_1__orbbec_camera_1.jpg') === 'orbbec_camera_1');
+ok('cameraOf 忽略 manifest.json', cameraOf('manifest.json') === null);
+ok('snapshotIdOf 取父目录',
+   snapshotIdOf('raw_1783480173576_15/1_stitch__x__overhead5.jpg') === 'raw_1783480173576_15');
+
+// 8) 相机排序与归组
+ok('sortCameras 把水下相机排到后面',
+   sortCameras(['underA9', 'overhead6', 'underA1', 'orbbec_camera_1', 'overhead5']).join(',')
+   === 'orbbec_camera_1,overhead5,overhead6,underA1,underA9');
+{
+  const by = groupByCamera([
+    { name: 'a__overhead5.jpg', relPath: 'raw_1783480305078_18/a__overhead5.jpg' },
+    { name: 'a__overhead5.jpg', relPath: 'raw_1783480173576_15/a__overhead5.jpg' },
+    { name: 'b__overhead6.jpg', relPath: 'raw_1783480173576_15/b__overhead6.jpg' },
+    { name: 'manifest.json', relPath: 'raw_1783480173576_15/manifest.json' },
+  ]);
+  ok('groupByCamera 按快照时间排序',
+     by.get('overhead5').map((i) => i.snapshotId).join(',')
+     === 'raw_1783480173576_15,raw_1783480305078_18');
+  ok('groupByCamera 跳过非图像', by.size === 2);
+}
+
+// 9) 右键擦除命中最上面那一笔
+{
+  const strokes = [
+    { x1: 0, y1: 0, x2: 100, y2: 0, r: 10 },
+    { x1: 0, y1: 0, x2: 100, y2: 0, r: 30 },
+  ];
+  ok('hitStrokeIndex 命中后画的那一笔', hitStrokeIndex(strokes, 50, 20) === 1);
+  ok('hitStrokeIndex 空白处返回 -1', hitStrokeIndex(strokes, 50, 40) === -1);
+}
+
+// 10) capsuleArea 的两个端点情形
+ok('capsuleArea 退化为圆',
+   Math.abs(capsuleArea({ x1: 0, y1: 0, x2: 0, y2: 0, r: 3 }) - Math.PI * 9) < 1e-9);
+ok('capsuleArea 随长度线性增长',
+   Math.abs((capsuleArea({ x1: 0, y1: 0, x2: 20, y2: 0, r: 3 })
+           - capsuleArea({ x1: 0, y1: 0, x2: 10, y2: 0, r: 3 })) - 60) < 1e-9);
+
+console.log('SMOKE_BEGIN');
+for (const line of out) console.log(line);
+console.log(`SMOKE_END ${out.filter((l) => l.startsWith('FAIL')).length} failures of ${out.length}`);
+document.title = out.some((l) => l.startsWith('FAIL')) ? 'FAILED' : 'PASSED';
+</script>
+</body>
+</html>

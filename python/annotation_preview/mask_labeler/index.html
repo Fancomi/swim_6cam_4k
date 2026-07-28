@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>保留区域 mask 标注器</title>
+<style>
+  html,body{height:100%;margin:0;background:#12161d;color:#e6ebf2;font:12px/1.5 system-ui,monospace}
+  body{display:flex}
+  #side{width:250px;background:#171b23;border-right:1px solid #2a3140;display:flex;flex-direction:column;gap:8px;padding:10px;overflow-y:auto}
+  h2{font-size:14px;color:#5cd0ff;margin:0}
+  h3{font-size:11px;color:#8aa;margin:0 0 3px;text-transform:uppercase;letter-spacing:.5px}
+  .card{border-top:1px solid #262d3a;padding-top:8px;display:flex;flex-direction:column;gap:5px}
+  button{padding:6px 8px;background:#232a35;border:1px solid #39424f;color:#e6ebf2;border-radius:5px;cursor:pointer;font:inherit}
+  button:hover{background:#2e3644}
+  button.primary{background:#1f6f43;border-color:#2e9e60}
+  select,input[type=range]{width:100%;font:inherit;background:#20262f;color:#e6ebf2;border:1px solid #39424f;border-radius:5px;padding:4px}
+  .hint{color:#9fb0c3;background:#1b2029;padding:6px 8px;border-radius:5px;font-size:11px}
+  /* kbd 必须留在块级容器里：.card 是 flex column，直接塞进去会被拉成整行宽 */
+  .keys{border-top:1px solid #262d3a;padding-top:8px}
+  kbd{display:inline-block;min-width:12px;padding:0 4px;border:1px solid #4a5566;border-radius:3px;background:#20262f;color:#a9b7c6;font-size:10px}
+  #stage{position:relative;flex:1;background:#0c0f14;overflow:hidden;min-width:0}
+  canvas{position:absolute;inset:0;cursor:crosshair}
+  #status{position:absolute;left:8px;bottom:8px;background:rgba(0,0,0,.6);padding:4px 9px;border-radius:4px;color:#ffd479}
+  #hud{position:absolute;left:8px;top:8px;background:rgba(0,0,0,.55);padding:5px 9px;border-radius:4px;white-space:pre}
+  #flist{display:flex;flex-direction:column;gap:2px;max-height:34vh;overflow-y:auto}
+  #flist .row{display:flex;justify-content:space-between;gap:4px;padding:3px 6px;border:1px solid #2a3140;border-radius:4px;cursor:pointer}
+  #flist .row.on{background:#0e5aa7;border-color:#3aa0ff}
+  #flist .row.has{border-color:#2e9e60}
+  #flist .row b{color:#7de8a8}
+  .dot{width:8px;height:8px;border-radius:50%;background:#ffd479;display:inline-block;margin-left:6px;visibility:hidden}
+  .dot.on{visibility:visible}
+  label.row{display:flex;justify-content:space-between;align-items:center;gap:6px}
+</style>
+</head>
+<body>
+<div id="side">
+  <h2>保留区域 mask 标注器</h2>
+  <button id="open" class="primary">📂 选择 snapshots 目录</button>
+  <div class="hint">按 <code>raw_*/…__&lt;相机&gt;.jpg</code> 归组，选一台相机后逐帧标注。<br>拖拽画出的胶囊区域＝该帧<b>要保留</b>的部分，拼接时只取这些区域。</div>
+  <div class="card">
+    <h3>相机</h3>
+    <select id="cam"></select>
+  </div>
+  <div class="card">
+    <h3>帧 <span class="dot" id="dirty"></span></h3>
+    <div style="display:flex;gap:5px"><button id="prev" style="flex:1">◀ 上一帧</button><button id="next" style="flex:1">下一帧 ▶</button></div>
+    <div id="fname" class="hint" style="word-break:break-all">—</div>
+    <div id="flist"></div>
+  </div>
+  <div class="card">
+    <h3>笔刷</h3>
+    <label class="row"><span>半径</span><span id="rval">40 px</span></label>
+    <input type="range" id="radius" min="2" max="400" value="40">
+    <label class="row"><span>叠加不透明度</span><span id="aval">45%</span></label>
+    <input type="range" id="alpha" min="10" max="100" value="45">
+    <button id="viewmask">👁 只看 mask <kbd>M</kbd></button>
+  </div>
+  <div class="card">
+    <h3>笔画 <span id="scount">0</span></h3>
+    <button id="undo">↶ 撤销上一笔 <kbd>Ctrl+Z</kbd></button>
+    <button id="clear">清空本帧</button>
+  </div>
+  <div class="card">
+    <h3>保存</h3>
+    <button id="save" class="primary">🗂 写回工程 json <kbd>S</kbd></button>
+    <div class="hint" id="saveinfo">未保存</div>
+  </div>
+  <div class="keys hint">
+    <b>鼠标</b> 左键按下拖动=画一笔（松手落定）· 右键=擦掉命中的笔<br>
+    <b>键盘</b> <kbd>←</kbd><kbd>→</kbd>切帧 · <kbd>[</kbd><kbd>]</kbd>笔刷 · <kbd>M</kbd>只看 mask<br>
+    <kbd>Space</kbd>拖拽=平移 · 滚轮=缩放 · <kbd>F</kbd>复位视图 · <kbd>Esc</kbd>取消当前笔
+  </div>
+</div>
+<div id="stage">
+  <canvas id="cv"></canvas>
+  <div id="hud"></div>
+  <div id="status">未加载</div>
+</div>
+<script type="module" src="./app.js"></script>
+</body>
+</html>
