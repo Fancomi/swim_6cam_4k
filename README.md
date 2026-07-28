@@ -157,10 +157,11 @@ swim_fbx_demo/
 │   ├── validation/
 │   │   ├── __init__.py
 │   │   └── reference_renderer.py
-│   ├── water_entry/               # 入水检测机位：YOLO-pose 预测与复核
+│   ├── water_entry/               # 入水检测机位：YOLO-pose 预测、复核与选帧
 │   │   ├── __init__.py
 │   │   ├── annotate_preview.py
 │   │   ├── common.py
+│   │   ├── export_package.py
 │   │   ├── predict.py
 │   │   ├── review.py
 │   │   └── select_frames.py
@@ -170,7 +171,12 @@ swim_fbx_demo/
 │       └── test_layout.py
 ├── scripts/
 │   ├── run_metal.sh              # demo / benchmarks / soak
-│   └── run_python.sh             # still / 4k / keypoint / extract / bake / asset / uw-* / we-*
+│   ├── run_python.sh             # still / 4k / keypoint / extract / bake / asset / uw-* / we-*
+│   ├── run_underwater.sh         # 水下 16 路实时拼接一键（macOS / Linux）
+│   ├── run_underwater.ps1        # 同上（Windows）
+│   ├── run_win.ps1               # Windows 六路实时启动器
+│   ├── run_win.bat               # 同上（cmd 包装）
+│   └── run_water_entry.sh        # 入水检测机位难例筛选全流程
 └── docs/
     └── superpowers/
         ├── plans/
@@ -541,6 +547,31 @@ MPS 后端偶发把整窗推理返回全零检测（实测复现 1 次，重跑�
 
 分数最高的 100 帧组成：`sign_flip` 66、`one_miss` 29、`kp_disagree` 25，覆盖 71 条片段，77 帧落在入水 ±3 帧内，阶段分布 entry 54 / flight 23 / post 23。
 
+`--kp-mean-norm` 是控制产出量的主要旋钮（其余六类信号是离散判定、无阈值）。分歧值本身的中位数是 0.0497，所以阈值压到 0.05 以下等于「一半的帧都算难例」，不再是筛选：
+
+| `--kp-mean-norm` | 候选帧 | 占窗口内 2613 帧 |
+| ---: | ---: | ---: |
+| 0.10 | 323 | 12.4% |
+| 0.06 | 936 | 35.8% |
+| **0.055（当前默认）** | **1163** | **44.5%** |
+| 0.05 | 1486 | 56.9% |
+
+当前 1163 帧覆盖全部 94 条片段，每片段中位 10 帧、p90 20 帧。抽帧核对过新纳入的两个分歧带：`0.06~0.08`（439 帧）质量良好，多为一侧模型把肢体关键点画成麻花；`0.05~0.06`（550 帧）开始出现两骨架肉眼近乎重合、仅框大小不同的帧，边际价值较低。
+
+### 交付包与全流程脚本
+
+`python.water_entry.export_package` 把候选帧导出成可直接交付标注的数据包：**无叠加原始帧** + `manifest.csv` + COCO keypoints 格式的模型预标注 + 交付说明。质检页那套骨架叠加只用于我们自己判断该不该标，真送标注时叠加线条会干扰标注员。预标注优先取 `swimup_bk`、缺检时退回 `swimup`；置信度低于 `KP_CONF` 的点写成 COCO 的 `v=0`，标注工具会显示为「待补」而不是一个错误的既有点。
+
+```bash
+./scripts/run_water_entry.sh                  # 全流程：预测 -> 选帧 -> 质检页 -> 交付包
+./scripts/run_water_entry.sh --skip-predict   # 复用已有预测，只重跑后续
+./scripts/run_water_entry.sh --kp 0.10        # 收紧阈值，选出更少
+```
+
+**新增片段后重跑这一个脚本即可全量刷新**：`manifest.csv` 是唯一的片段清单来源，`predict` 会把新片段一并纳入，后续每步都从 `predict` 的产物重算，流程内没有增量状态，不存在只更新一半的可能。
+
+本次产出 `outputs/water_entry/annotate_package.zip`：1163 张图、94 条片段、286 MB，1160 帧带 `swimup_bk` 预标注（每框可用关键点中位 15 个），3 帧两模型都没检出、需从零标注。
+
 ## 已知限制
 
 - 视频渲染会读取各路源 FPS，以最低源 FPS 作为输出帧率，并对较高帧率输入按最近目标帧位置抽帧。这只对齐帧率，不会同步各路视频的采集起始时间。
@@ -548,7 +579,8 @@ MPS 后端偶发把整窗推理返回全零检测（实测复现 1 次，重跑�
 - 六路输入数量必须与六块网格一致，且必须保持 `cam3 cam2 cam1 cam4 cam5 cam6` 的固定位置顺序。
 - H.264 的 `yuv420p` 要求偶数宽高，视频编码阶段可能在静态画布右侧或底部补一个像素。
 - 默认外部数据集路径是本机绝对路径。换机器或移动数据集后，必须设置 `SWIMMING_DATASET_DIR`（入水检测机位另用 `WATER_ENTRY_DATASET_ROOT`）。
-- 入水检测机位的选人只用位移与轨迹长度，未接入 `res.json` 的 ROI 泳道约束。实测选人错误只有 2 例（`20260713-173110`、`20260727-101601`，`swimup_bk` 选中岸上走动的人），且两条片段的窗口内本就没有出发动作、已被 `select_frames` 默认排除；但两模型对同一人给出差异极大的框（`diff_person`）在入水 +6 帧之后很常见，那属于水下伪影而非选人缺陷。
+- 入水检测机位的选人只用位移与轨迹长度，未接入 `res.json` 的 ROI 泳道约束。实测选人错误只有 2 例（`20260713-173110`、`20260727-101601`，`swimup_bk` 选中岸上走动的人），且两条片段窗口内本就没有出发动作、已被 `select_frames` 默认排除；但两模型对同一人给出差异极大的框在入水 +6 帧之后很常见，那属于水下伪影而非选人缺陷。
+- `link_tracks` 的匹配半径固定为画宽的 15%，刻意不随断裂帧数放大。放大版实测让 `swimup` 的 12 条片段空中段检出下降、10 条归零（轨迹跨缺口接到画面里的静止目标）。改这个参数前请先用 `predict` 全量复跑对比 `flight_rate`。
 - `select_frames` 的信号是模型间分歧，只是错误的**代理**而非错误本身：两模型一致犯错的帧不会被选出。
 - `suspected_false_positive` 这个标记不能用来解释坏结果：15/17 条的选人几何完全正常（位移 +322~+470 px），说明那些片段里确实有人跳水，上游为何判为误触发在选人层面看不出来。
 - `.venv/` 只保证当前 macOS / Python 3.10 组合；其他平台需要准备兼容的 Python、FBX SDK、NumPy、OpenCV 和 FFmpeg 环境。

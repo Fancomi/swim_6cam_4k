@@ -203,7 +203,8 @@ cmd_uw_video() {
 }
 
 # --- water-entry camera (underwater plane 0 上方机位) -------------------------
-# 入水检测机位的 YOLO-pose 预测与复核；数据集根用 WATER_ENTRY_DATASET_ROOT 覆盖。
+# 入水检测机位的 YOLO-pose 预测、复核与增量标注选帧；
+# 数据集根用 WATER_ENTRY_DATASET_ROOT 覆盖。
 cmd_we_predict() {
   "$PY" -m python.water_entry.predict "$@"
 }
