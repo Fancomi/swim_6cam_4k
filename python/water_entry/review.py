@@ -173,12 +173,6 @@ figure.miss img{border-color:#e03131}
 figcaption{color:#8d97a5;font-size:11px;text-align:center}
 """
 
-PAGE_JS = """
-const io=new IntersectionObserver((es)=>{for(const e of es){if(e.isIntersecting){
-const i=e.target;if(i.dataset.src){i.src=i.dataset.src;delete i.dataset.src;}io.unobserve(i);}}},
-{rootMargin:'600px'});
-document.querySelectorAll('img[data-src]').forEach(i=>io.observe(i));
-"""
 
 
 def write_page(path, sections, models, radius, cell_width):
@@ -202,7 +196,7 @@ def write_page(path, sections, models, radius, cell_width):
                            % ("miss" if miss else "", rel,
                               html.escape(model), frame, html.escape(model)))
             out.append("</div>")
-    out.append("<script>%s</script></body></html>" % PAGE_JS)
+    out.append("<script>%s</script></body></html>" % C.lazy_img_js(600))
     with open(path, "w") as f:
         f.write("\n".join(out))
 

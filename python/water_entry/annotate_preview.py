@@ -121,12 +121,6 @@ figure.raw img{border-color:#4a5361}
 figcaption{color:#8d97a5;font-size:11px;text-align:center}
 """
 
-PAGE_JS = """
-const io=new IntersectionObserver((es)=>{for(const e of es){if(e.isIntersecting){
-const i=e.target;if(i.dataset.src){i.src=i.dataset.src;delete i.dataset.src;}io.unobserve(i);}}},
-{rootMargin:'700px'});
-document.querySelectorAll('img[data-src]').forEach(i=>io.observe(i));
-"""
 
 
 def write_page(path, items, cell_width, source_csv, total):
@@ -164,7 +158,7 @@ def write_page(path, items, cell_width, source_csv, total):
                        % ("raw" if label == "raw" else "", rel,
                           html.escape(label), html.escape(label)))
         out.append("</div></div>")
-    out.append("<script>%s</script></body></html>" % PAGE_JS)
+    out.append("<script>%s</script></body></html>" % C.lazy_img_js(700))
     with open(path, "w") as f:
         f.write("\n".join(out))
 

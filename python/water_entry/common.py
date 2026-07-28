@@ -310,3 +310,18 @@ def resolve_device(name=None):
         return name
     import torch
     return "mps" if torch.backends.mps.is_available() else "cpu"
+
+
+def lazy_img_js(margin_px):
+    """复核页共用的图片懒加载脚本：千级裁剪图一次性加载会卡死浏览器。
+
+    review 与 annotate_preview 的页面布局各不相同（多模型横排 vs 候选帧序列），
+    共用的只有「一堆 <img data-src> 进视口再取图」，预加载距离各自给。
+    """
+    return ("\nconst io=new IntersectionObserver((es)=>{for(const e of es){"
+            "if(e.isIntersecting){\nconst i=e.target;if(i.dataset.src){"
+            "i.src=i.dataset.src;delete i.dataset.src;}io.unobserve(i);}}},\n"
+            "{rootMargin:'%dpx'});\n"
+            "document.querySelectorAll('img[data-src]').forEach(i=>io.observe(i));\n"
+            % margin_px)
+
