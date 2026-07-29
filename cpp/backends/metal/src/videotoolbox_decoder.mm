@@ -424,7 +424,8 @@ class VideoToolboxDecoder::Impl final {
   }
 
   DecodeSubmitResult decode(CMSampleBufferRef sample,
-                            std::uint64_t decoder_generation) noexcept {
+                            std::uint64_t decoder_generation,
+                            bool emit_frame) noexcept {
     if (sample == nullptr || !CMSampleBufferDataIsReady(sample) ||
         CMSampleBufferGetNumSamples(sample) != 1 ||
         decoder_generation != generation_.load(std::memory_order_acquire)) {
@@ -468,11 +469,14 @@ class VideoToolboxDecoder::Impl final {
       if (session_ != nullptr &&
           decoder_generation == generation_.load(std::memory_order_acquire)) {
         VTDecodeInfoFlags info_flags{};
-        status = VTDecompressionSessionDecodeFrame(
-            session_, sample,
+        VTDecodeFrameFlags decode_flags =
             kVTDecodeFrame_EnableAsynchronousDecompression |
-                kVTDecodeFrame_EnableTemporalProcessing,
-            ticket, &info_flags);
+            kVTDecodeFrame_EnableTemporalProcessing;
+        if (!emit_frame) {
+          decode_flags |= kVTDecodeFrame_DoNotOutputFrame;
+        }
+        status = VTDecompressionSessionDecodeFrame(
+            session_, sample, decode_flags, ticket, &info_flags);
       }
     }
     {
@@ -840,8 +844,9 @@ void VideoToolboxDecoder::configure(
 }
 
 DecodeSubmitResult VideoToolboxDecoder::decode(
-    CMSampleBufferRef sample, std::uint64_t decoder_generation) noexcept {
-  return impl_->decode(sample, decoder_generation);
+    CMSampleBufferRef sample, std::uint64_t decoder_generation,
+    bool emit_frame) noexcept {
+  return impl_->decode(sample, decoder_generation, emit_frame);
 }
 
 void VideoToolboxDecoder::wait_for_asynchronous_frames() { impl_->wait(); }

@@ -6,6 +6,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -130,6 +131,16 @@ std::string_view source_camera_id(std::string_view key) {
   return key.substr(kSourcePrefix.size());
 }
 
+// Returns the camera id in `source.<id>.start_ms` keys, or empty otherwise.
+std::string_view start_offset_camera_id(std::string_view key) {
+  constexpr std::string_view suffix{".start_ms"};
+  const auto camera_id = source_camera_id(key);
+  if (!camera_id.ends_with(suffix)) {
+    return {};
+  }
+  return camera_id.substr(0, camera_id.size() - suffix.size());
+}
+
 // Manifest hashes are keyed by the same camera ids as the config, so the lane
 // is resolved against the config's declared order rather than a fixed table.
 std::string_view manifest_camera_id(std::string_view key) {
@@ -232,6 +243,9 @@ AppConfig load_config(const std::filesystem::path& path) {
   // Lanes are filled in the order the config declares them, so the file defines
   // both the camera ids and their left-to-right order.
   std::vector<SourceConfig> declared_sources;
+  // (camera id, line, offset) collected as encountered; matched to lanes below.
+  std::vector<std::tuple<std::string, std::size_t, std::chrono::milliseconds>>
+      start_offsets;
   std::string storage;
   std::size_t line_number = 0;
   while (std::getline(input, storage)) {
@@ -255,15 +269,25 @@ AppConfig load_config(const std::filesystem::path& path) {
                    "duplicate key '" + std::string(key) + "'");
     }
 
-    const auto camera_id = source_camera_id(key);
-    if (!camera_id.empty()) {
+    const auto offset_camera_id = start_offset_camera_id(key);
+    const auto camera_id =
+        offset_camera_id.empty() ? source_camera_id(key) : std::string_view{};
+    if (!offset_camera_id.empty()) {
+      // Recorded once per lane, in whatever order relative to its `source.<id>`
+      // line; resolved after the whole file is read so either order works.
+      start_offsets.emplace_back(
+          std::string(offset_camera_id), line_number,
+          std::chrono::milliseconds{
+              parse_config_unsigned(path, line_number, key, value)});
+    } else if (!camera_id.empty()) {
       if (declared_sources.size() >= kMaxCameras) {
         config_error(path, line_number,
                      "at most " + std::to_string(kMaxCameras) +
                          " source keys are supported");
       }
       declared_sources.push_back(
-          {std::string(camera_id), parse_config_path(path, line_number, value)});
+          {std::string(camera_id), parse_config_path(path, line_number, value),
+           std::chrono::milliseconds{0}});
     } else if (key == "backend") {
       config.backend = value;
     } else if (key == "mode") {
@@ -324,6 +348,22 @@ AppConfig load_config(const std::filesystem::path& path) {
     config.sources[index] = std::move(declared_sources[index]);
   }
   config.source_count = static_cast<std::uint32_t>(declared_sources.size());
+  for (const auto& [camera_id, line, offset] : start_offsets) {
+    bool matched = false;
+    for (std::uint32_t index = 0; index < config.source_count; ++index) {
+      if (config.sources[index].camera_id == camera_id) {
+        config.sources[index].start_offset = offset;
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) {
+      config_error(path, line,
+                   "'source." + camera_id +
+                       ".start_ms' names a camera with no 'source." +
+                       camera_id + "' key");
+    }
+  }
   // stream_count defaults to every declared lane; an explicit --stream-count
   // override may still narrow it for benchmark sweeps.
   config.stream_count = config.source_count;

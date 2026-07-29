@@ -293,6 +293,29 @@ class Mp4VideoToolboxSource::Impl final {
     }
   }
 
+  // True once `pts` reaches the lane's aligned start. `first_sample_pts` is
+  // latched on the first call so the offset is relative to the file, matching
+  // how the manifest's keyframe timestamp anchors frame 0.
+  bool past_start_offset(CMTime pts, CMTime& first_sample_pts) const noexcept {
+    if (source_.start_offset.count() <= 0) {
+      return true;
+    }
+    if (!valid_pts(pts)) {
+      return true;
+    }
+    if (!valid_pts(first_sample_pts)) {
+      first_sample_pts = pts;
+    }
+    const auto seconds =
+        CMTimeGetSeconds(CMTimeSubtract(pts, first_sample_pts));
+    if (!std::isfinite(seconds)) {
+      return true;
+    }
+    const auto offset_seconds =
+        std::chrono::duration<double>(source_.start_offset).count();
+    return seconds >= offset_seconds;
+  }
+
   ReaderOutcome run_reader_once(VideoToolboxDecoder& decoder,
                                 swim::core::CameraHealthTracker& health) {
     @autoreleasepool {
@@ -387,6 +410,8 @@ class Mp4VideoToolboxSource::Impl final {
 
       RetainedVideoFormat submitted_format{initial_format};
       CMTime first_pts = kCMTimeInvalid;
+      // The clip's own first PTS; the aligned start is measured from it.
+      CMTime first_sample_pts = kCMTimeInvalid;
       std::chrono::steady_clock::time_point first_wall{};
       while (!termination_requested(std::chrono::steady_clock::now())) {
         CMSampleBufferRef sample = [output copyNextSampleBuffer];
@@ -432,7 +457,14 @@ class Mp4VideoToolboxSource::Impl final {
             1, std::memory_order_relaxed);
         health.on_frame(std::chrono::steady_clock::now());
         const auto pts = CMSampleBufferGetPresentationTimeStamp(sample);
-        pace(pts, first_pts, first_wall);
+        // Skip forward to this lane's aligned start before publishing. The
+        // samples before it still decode (suppressed output) so the reference
+        // chain stays intact, and pacing starts at the aligned frame so the
+        // realtime cadence is not charged for the skipped span.
+        const bool emit = past_start_offset(pts, first_sample_pts);
+        if (emit) {
+          pace(pts, first_pts, first_wall);
+        }
         auto format = static_cast<CMVideoFormatDescriptionRef>(
             CMSampleBufferGetFormatDescription(sample));
         if (format == nullptr ||
@@ -452,7 +484,8 @@ class Mp4VideoToolboxSource::Impl final {
           CFRelease(sample);
           throw_decoder_error(decoder);
         }
-        const auto submit_result = decoder.decode(sample, decoder.generation());
+        const auto submit_result =
+            decoder.decode(sample, decoder.generation(), emit);
         CFRelease(sample);
         if (submit_result == DecodeSubmitResult::recoverable_error ||
             decoder.has_recoverable_error()) {

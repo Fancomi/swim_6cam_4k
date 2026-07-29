@@ -19,6 +19,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from python.underwater import render_video as RV
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 OUTPUTS = PROJECT_ROOT / "outputs" / "underwater"
 MODELS = PROJECT_ROOT / "inputs" / "underwater" / "models"
@@ -26,10 +28,14 @@ CONFIGS = PROJECT_ROOT / "inputs" / "configs"
 
 MESH_JSON = OUTPUTS / "all_mesh.json"
 ASSET = PROJECT_ROOT / "build" / "assets" / "generated" / "underwater_16.swasset"
+# Records the asset-shaping options the current .swasset was built with, so
+# changing any of them re-compiles even though the mesh JSON is untouched.
+ASSET_STAMP = ASSET.with_suffix(".stamp")
 # Left-to-right, matching the mesh order the extractor produces.
 CAMERA_IDS = [f"underA{index}" for index in range(16, 0, -1)]
 ASSET_PPM = 240.0
 ASSET_BLEND_PX = 120.0
+SOURCE_SIZE = (1280, 720)
 
 STEPS = ("extract", "asset", "build", "run")
 
@@ -100,17 +106,29 @@ def step_extract(args):
          "--tex-dir", tex_dir, "--planes-only"])
 
 
+def asset_options(args):
+    """The asset-shaping arguments, plus a stamp string identifying them."""
+    options = ["--ppm", str(args.asset_ppm), "--no-neg-v",
+               "--blend-px", str(args.blend_px),
+               "--crop-bottom", str(args.crop_bottom),
+               "--source-size", str(SOURCE_SIZE[0]), str(SOURCE_SIZE[1])]
+    if args.clip_uv:
+        options.append("--clip-uv")
+    return options, " ".join(options)
+
+
 def step_asset(args):
     if not MESH_JSON.is_file():
         raise StepError(f"mesh JSON missing (run the extract step): {MESH_JSON}")
-    if newer_than(ASSET, MESH_JSON) and not args.force:
+    options, stamp = asset_options(args)
+    current = ASSET_STAMP.read_text() if ASSET_STAMP.is_file() else None
+    if (newer_than(ASSET, MESH_JSON) and current == stamp and not args.force):
         print(f"asset up to date: {ASSET}")
         return
     ASSET.parent.mkdir(parents=True, exist_ok=True)
     run([python_bin(), "-m", "python.assets.compile_runtime_asset",
-         MESH_JSON, ASSET, "--camera-ids", *CAMERA_IDS,
-         "--ppm", str(ASSET_PPM), "--no-neg-v",
-         "--blend-px", str(ASSET_BLEND_PX)])
+         MESH_JSON, ASSET, "--camera-ids", *CAMERA_IDS, *options])
+    ASSET_STAMP.write_text(stamp)
 
 
 def step_build(args):
@@ -138,7 +156,40 @@ def step_build(args):
     run(build)
 
 
-def write_config(path, video_dir, backend, encode_path):
+def lane_start_offsets(video_dir):
+    """Per-camera milliseconds into each clip where the common time axis starts.
+
+    Recorded clips do not share a t=0: each stream begins at its own decodable
+    keyframe, placed inside the lookback window with GOP granularity, so the
+    per-lane skew reaches seconds. The sample manifest carries the wall-clock
+    truth; this reuses render_video's reading of it so the realtime path aligns
+    by exactly the same formula the offline renderer and the player use.
+
+    Returns {} when the sample has no usable manifest — live sources have none,
+    and the runtime treats a missing offset as "read from the first frame"."""
+    try:
+        align_start, align_end, fps, cams = RV.load_manifest(video_dir)
+    except SystemExit as error:
+        print(f"  no wall-clock alignment: {error}")
+        return {}
+    order = [camera for camera in CAMERA_IDS if camera in cams]
+    starts, report = RV.alignment_plan(align_start, align_end, fps, cams, order)
+    offsets = {}
+    for camera, entry in zip(order, report):
+        # A negative skew means the clip begins after align_start; that lane has
+        # no coverage at t=0 and its offset clamps to zero.
+        offsets[camera] = max(0, entry["skew_ms"])
+    skews = [entry["skew_ms"] for entry in report]
+    print(f"  wall-clock align window {(align_end - align_start) / 1000:.3f}s; "
+          f"lane skew {min(skews)}..{max(skews)}ms")
+    for entry in report:
+        if entry["late_start"]:
+            print(f"  QC {entry['cam']}: starts {-entry['skew_ms']}ms after "
+                  "align_start (no coverage at t=0)")
+    return offsets
+
+
+def write_config(path, video_dir, backend, encode_path, align=True):
     """Emit a runtime config naming the 16 lanes in left-to-right order.
 
     Written fresh each run so the clip directory and backend always match what
@@ -154,10 +205,14 @@ def write_config(path, video_dir, backend, encode_path):
                 f"ambiguous clips for {camera}: {[m.name for m in matches]}")
         clips[camera] = matches[0]
 
+    offsets = lane_start_offsets(video_dir) if align else {}
+
     lines = [f"backend={backend}", "mode=realtime", "stage=full",
              f"asset={ASSET.as_posix()}"]
-    lines += [f"source.{camera}={clips[camera].as_posix()}"
-              for camera in CAMERA_IDS]
+    for camera in CAMERA_IDS:
+        lines.append(f"source.{camera}={clips[camera].as_posix()}")
+        if offsets.get(camera):
+            lines.append(f"source.{camera}.start_ms={offsets[camera]}")
     lines += ["fps_num=30000", "fps_den=1001",
               "preview=true", "encode=false", "diagnostic_replacement=false",
               f"encode_path={Path(encode_path).as_posix()}",
@@ -168,7 +223,9 @@ def write_config(path, video_dir, backend, encode_path):
               f"metrics={(OUTPUTS / 'realtime.jsonl').as_posix()}"]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"wrote config {path} ({len(CAMERA_IDS)} lanes)")
+    aligned = sum(1 for camera in CAMERA_IDS if offsets.get(camera))
+    print(f"wrote config {path} ({len(CAMERA_IDS)} lanes, "
+          f"{aligned} with a start offset)")
 
 
 def step_run(args):
@@ -183,7 +240,8 @@ def step_run(args):
     config = Path(args.config) if args.config else (
         CONFIGS / f"underwater_16_{args.backend}.conf")
     if args.config is None:
-        write_config(config, args.video_dir, args.backend, encode_path)
+        write_config(config, args.video_dir, args.backend, encode_path,
+                     align=args.align)
     elif not config.is_file():
         raise StepError(f"config does not exist: {config}")
 
@@ -234,6 +292,30 @@ def parse_args(argv=None):
                         help="use this runtime config instead of generating one")
     parser.add_argument("--force", action="store_true",
                         help="redo steps even when their outputs look current")
+
+    shaping = parser.add_argument_group(
+        "composite shaping",
+        "These control how the .swasset is baked, so the realtime stitch "
+        "matches what python.underwater.render_video produces offline. "
+        "Changing any of them recompiles the asset.")
+    shaping.add_argument("--asset-ppm", type=float, default=ASSET_PPM,
+                         help="output pixels per metre (default: %(default)s)")
+    shaping.add_argument("--blend-px", type=float, default=ASSET_BLEND_PX,
+                         help="vertical seam transition width in pixels; "
+                              "0 is a hard cut (default: %(default)s)")
+    shaping.add_argument("--no-clip-uv", dest="clip_uv", action="store_false",
+                         default=True,
+                         help="keep pixels whose UV falls outside the source "
+                              "image (the GPU mirror-samples them); clipping "
+                              "is on by default to match the offline renderer")
+    shaping.add_argument("--crop-bottom", default="auto",
+                         metavar="auto|none|N",
+                         help="drop bottom rows the shorter planes leave "
+                              "uncovered (default: %(default)s)")
+    shaping.add_argument("--no-align", dest="align", action="store_false",
+                         default=True,
+                         help="ignore the manifest wall clocks and read every "
+                              "clip from its first frame")
     return parser.parse_args(argv)
 
 

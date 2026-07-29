@@ -322,6 +322,29 @@ TEST_CASE(rejects_config_without_any_source_key) {
                     "'source.<camera-id>' key"));
 }
 
+TEST_CASE(loads_per_lane_start_offsets_in_either_key_order) {
+  // Recorded clips do not share a t=0, so each lane carries how far into its
+  // file the common time axis begins. The key may precede or follow its
+  // `source.<id>` line.
+  const auto config =
+      swim::core::load_config(fixture("underwater_start_ms.conf"));
+  CHECK_EQ(config.source_count, 16u);
+  CHECK_EQ(config.sources[0].camera_id, "underA16");
+  CHECK_EQ(config.sources[0].start_offset, 100ms);
+  CHECK_EQ(config.sources[15].camera_id, "underA1");
+  CHECK_EQ(config.sources[15].start_offset, 1600ms);
+  // lanes without the key stay at the live-source default of zero
+  CHECK_EQ(config.sources[8].start_offset, 0ms);
+}
+
+TEST_CASE(rejects_start_ms_for_an_undeclared_camera) {
+  CHECK_THROWS_WITH(
+      swim::core::load_config(fixture("start-ms-unknown.conf")),
+      fixture_error("start-ms-unknown.conf", 4,
+                    "'source.underA9.start_ms' names a camera with no "
+                    "'source.underA9' key"));
+}
+
 TEST_CASE(loads_sixteen_underwater_sources_in_declared_order) {
   const auto config = swim::core::load_config(fixture("underwater.conf"));
   CHECK_EQ(config.source_count, 16u);

@@ -183,6 +183,22 @@ class NvdecSource::Impl final {
            (lifecycle_ != nullptr && lifecycle_->should_stop(now));
   }
 
+  // True once `pts` reaches the lane's aligned start, measured from the clip's
+  // own first frame in the stream's time base.
+  bool past_start_offset(std::int64_t pts, AVRational tb,
+                         std::int64_t& first_sample_pts) const noexcept {
+    if (source_.start_offset.count() <= 0 || pts == AV_NOPTS_VALUE) {
+      return true;
+    }
+    if (first_sample_pts == AV_NOPTS_VALUE) {
+      first_sample_pts = pts;
+    }
+    const double seconds =
+        static_cast<double>(pts - first_sample_pts) * av_q2d(tb);
+    return seconds >=
+           std::chrono::duration<double>(source_.start_offset).count();
+  }
+
   void pace(std::int64_t pts, AVRational tb, std::int64_t& first_pts,
             std::chrono::steady_clock::time_point& first_wall) const {
     if (mode_ != swim::core::RunMode::realtime || pts == AV_NOPTS_VALUE) {
@@ -338,6 +354,7 @@ class NvdecSource::Impl final {
     } pf_guard{packet, frame};
 
     std::int64_t first_pts = AV_NOPTS_VALUE;
+    std::int64_t first_sample_pts = AV_NOPTS_VALUE;
     std::chrono::steady_clock::time_point first_wall{};
     std::uint64_t sequence = 0;
     const AVRational tb = stream->time_base;
@@ -395,6 +412,11 @@ class NvdecSource::Impl final {
               1, std::memory_order_relaxed);
           throw LaneFailure{LaneFailureKind::fatal,
                             "decoder did not produce CUDA frames"};
+        }
+        // Skip forward to this lane's aligned start; see mf_source.cpp.
+        if (!past_start_offset(frame->pts, tb, first_sample_pts)) {
+          av_frame_unref(frame);
+          continue;
         }
         pace(frame->pts, tb, first_pts, first_wall);
         publish_frame(frame, sequence++);

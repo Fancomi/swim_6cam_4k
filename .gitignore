@@ -24,3 +24,5 @@ inputs/pool/models/*.fbx
 *.pt
 # Runtime configs generated per machine by python.underwater.run
 inputs/configs/underwater_16_*.conf
+inputs/*.fbx
+inputs/*.fbm/

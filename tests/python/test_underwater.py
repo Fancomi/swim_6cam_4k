@@ -451,3 +451,128 @@ class OneClickRunnerTest(unittest.TestCase):
             target = td / "target"
             target.write_text("y")
             self.assertTrue(runner.newer_than(target, source))
+
+
+class AssetShapingTest(unittest.TestCase):
+    """clip_uv and crop_bottom must reproduce the offline renderer's geometry
+    while leaving the pool defaults byte-identical."""
+
+    def _tiny_mesh(self, td):
+        """A two-plane mesh whose UVs run past the source image, so clipping and
+        the ragged bottom both have something to act on."""
+        import json
+
+        def plane(node, x0, uv_lo, uv_hi):
+            quad = [
+                [{"pos": [x0, 0.0], "uv": [uv_lo, uv_lo]},
+                 {"pos": [x0 + 1.0, 0.0], "uv": [uv_hi, uv_lo]},
+                 {"pos": [x0 + 1.0, 1.0], "uv": [uv_hi, uv_hi]}],
+                [{"pos": [x0, 0.0], "uv": [uv_lo, uv_lo]},
+                 {"pos": [x0 + 1.0, 1.0], "uv": [uv_hi, uv_hi]},
+                 {"pos": [x0, 1.0], "uv": [uv_lo, uv_hi]}],
+            ]
+            return {"node": node, "texture_basename": f"{node}.png",
+                    "uvset": "map1", "const_axis": 2, "kept_axes": [0, 1],
+                    "spans": [1, 1, 0], "triangles": quad}
+
+        path = td / "mesh.json"
+        path.write_text(json.dumps({"source": "x", "meshes": [
+            plane("left", 0.0, -0.2, 0.9),
+            plane("right", 0.8, 0.1, 1.2),
+        ]}))
+        return path
+
+    def test_clip_uv_shrinks_coverage_without_moving_geometry(self):
+        import tempfile
+        from python.assets.compile_runtime_asset import compile_asset
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            mesh = self._tiny_mesh(td)
+            plain = compile_asset(mesh, td / "plain.swasset", ["a", "b"], 64.0,
+                                  neg_v=False, blend_px=0.0, clip_uv=False)
+            clipped = compile_asset(mesh, td / "clip.swasset", ["a", "b"], 64.0,
+                                    neg_v=False, blend_px=0.0, clip_uv=True,
+                                    source_size=(32, 32))
+            # clipping only removes coverage; the canvas is unchanged
+            self.assertEqual(plain["logical_width"], clipped["logical_width"])
+            self.assertEqual(plain["logical_height"], clipped["logical_height"])
+            self.assertLess((td / "clip.swasset").stat().st_size,
+                            (td / "plain.swasset").stat().st_size)
+
+    def test_crop_bottom_shortens_the_canvas(self):
+        import tempfile
+        from python.assets.compile_runtime_asset import compile_asset
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            mesh = self._tiny_mesh(td)
+            full = compile_asset(mesh, td / "full.swasset", ["a", "b"], 64.0,
+                                 neg_v=False, blend_px=0.0, crop_bottom="none")
+            cropped = compile_asset(mesh, td / "crop.swasset", ["a", "b"], 64.0,
+                                    neg_v=False, blend_px=0.0, crop_bottom=8)
+            self.assertEqual(cropped["crop_rows"], 8)
+            self.assertEqual(cropped["logical_height"],
+                             full["logical_height"] - 8)
+            self.assertEqual(cropped["canvas_height"], full["canvas_height"])
+            # encoded stays the logical size rounded up to even
+            self.assertEqual(cropped["encoded_height"],
+                             cropped["logical_height"] +
+                             (cropped["logical_height"] & 1))
+
+    def test_crop_bottom_rejects_removing_the_whole_canvas(self):
+        import tempfile
+        from python.assets.compile_runtime_asset import compile_asset
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            mesh = self._tiny_mesh(td)
+            with self.assertRaises(ValueError):
+                compile_asset(mesh, td / "x.swasset", ["a", "b"], 64.0,
+                              neg_v=False, crop_bottom=100000)
+
+    def test_defaults_keep_the_pool_bake_unchanged(self):
+        # The pool asset predates these options; its defaults must stay off so
+        # the committed 5002x2102 geometry is reproduced exactly.
+        import inspect
+        from python.assets.compile_runtime_asset import compile_asset
+
+        defaults = inspect.signature(compile_asset).parameters
+        self.assertIs(defaults["clip_uv"].default, False)
+        self.assertIsNone(defaults["crop_bottom"].default)
+        self.assertIs(defaults["neg_v"].default, True)
+
+
+class LaneAlignmentConfigTest(unittest.TestCase):
+    def test_start_offsets_come_from_the_manifest_skew(self):
+        import python.underwater.run as runner
+
+        # alignment_plan reports skew per lane; run.py turns each into ms and
+        # clamps lanes that begin after align_start to zero.
+        align_start, align_end, fps = 1_000_000, 1_012_000, 30.0
+        cams = {
+            "underA16": {"keyframe_ms": align_start - 3083,
+                         "last_decodable_ms": align_end, "frames": 400},
+            "underA1": {"keyframe_ms": align_start + 250,
+                        "last_decodable_ms": align_end, "frames": 400},
+        }
+        order = ["underA16", "underA1"]
+        starts, report = runner.RV.alignment_plan(
+            align_start, align_end, fps, cams, order)
+        offsets = {entry["cam"]: max(0, entry["skew_ms"]) for entry in report}
+
+        self.assertEqual(offsets["underA16"], 3083)
+        self.assertEqual(offsets["underA1"], 0)      # starts after align_start
+        self.assertTrue(report[1]["late_start"])
+
+    def test_config_omits_start_ms_when_alignment_is_disabled(self):
+        import tempfile
+        import python.underwater.run as runner
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            for index in range(1, 17):
+                (td / f"swb_test_underA{index}.ts").write_bytes(b"")
+            config = td / "c.conf"
+            runner.write_config(config, td, "metal", td / "o.h265", align=False)
+            self.assertNotIn("start_ms", config.read_text())

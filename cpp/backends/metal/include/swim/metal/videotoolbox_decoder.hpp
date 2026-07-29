@@ -94,8 +94,14 @@ class VideoToolboxDecoder final {
 
   // The sample and format description remain owned by the caller. VideoToolbox
   // retains everything needed after this function returns.
+  //
+  // `emit_frame == false` decodes the sample for reference only and suppresses
+  // its output frame (kVTDecodeFrame_DoNotOutputFrame). Skipping the samples
+  // outright would break the reference chain, so seeking to a lane's aligned
+  // start decodes through them with output suppressed instead.
   DecodeSubmitResult decode(CMSampleBufferRef sample,
-                            std::uint64_t decoder_generation) noexcept;
+                            std::uint64_t decoder_generation,
+                            bool emit_frame = true) noexcept;
 
   void wait_for_asynchronous_frames();
   void drain();

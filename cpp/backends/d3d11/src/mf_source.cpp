@@ -423,6 +423,22 @@ class MfSource::Impl final {
     frame_height_ = height;
   }
 
+  // True once `pts_100ns` reaches the lane's aligned start, measured from the
+  // clip's own first sample (MF timestamps are in 100ns units).
+  bool past_start_offset(LONGLONG pts_100ns,
+                         LONGLONG& first_sample_pts) const noexcept {
+    if (source_.start_offset.count() <= 0) {
+      return true;
+    }
+    if (first_sample_pts < 0) {
+      first_sample_pts = pts_100ns;
+    }
+    const auto elapsed_100ns = pts_100ns - first_sample_pts;
+    const auto offset_100ns =
+        static_cast<LONGLONG>(source_.start_offset.count()) * 10000;
+    return elapsed_100ns >= offset_100ns;
+  }
+
   void pace(LONGLONG pts_100ns, LONGLONG& first_pts,
             std::chrono::steady_clock::time_point& first_wall) const {
     if (mode_ != swim::core::RunMode::realtime || pts_100ns < 0) {
@@ -533,6 +549,7 @@ class MfSource::Impl final {
         pool_->capacity(), std::memory_order_relaxed);
 
     LONGLONG first_pts = -1;
+    LONGLONG first_sample_pts = -1;
     std::chrono::steady_clock::time_point first_wall{};
     std::uint64_t sequence = 0;
     while (!termination_requested(std::chrono::steady_clock::now())) {
@@ -571,6 +588,12 @@ class MfSource::Impl final {
       counters_.received.fetch_add(1, std::memory_order_relaxed);
       counters_.camera_received[camera_index_].fetch_add(
           1, std::memory_order_relaxed);
+      // Skip forward to this lane's aligned start: recorded clips do not share
+      // a t=0, so the caller supplies how far into this file the common time
+      // axis begins. Pacing starts at the aligned sample.
+      if (!past_start_offset(timestamp, first_sample_pts)) {
+        continue;
+      }
       pace(timestamp, first_pts, first_wall);
       slot_pts_ = timestamp;
       publish_sample(sample.Get(), sequence++);

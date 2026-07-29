@@ -35,6 +35,12 @@ enum class EncodeSink : std::uint8_t {
 struct SourceConfig {
   std::string camera_id;
   std::filesystem::path path;
+  // How far into this clip the common time axis starts. Recorded files do not
+  // share a t=0 — each stream begins at its own decodable keyframe, placed
+  // somewhere inside the lookback window with GOP granularity — so the caller
+  // derives this from the sample manifest's wall clocks. Zero means "read from
+  // the file's first frame", which is right for live sources.
+  std::chrono::milliseconds start_offset{0};
 };
 
 struct BenchmarkManifest final {
