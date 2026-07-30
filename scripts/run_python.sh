@@ -168,7 +168,7 @@ cmd_uw_extract() {
 }
 
 cmd_uw_tex() {
-  "$PY" -m python.stitch.export_real_tex "$@"
+  "$PY" -m python.stitch.export_ref_tex "$@"
 }
 
 # Render one full-res stitch + fusion heatmap. $1 = blend-px (default 0).

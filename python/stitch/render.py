@@ -171,7 +171,7 @@ def fusion_heatmap(weights, out_h, out_w):
 def render_stills(data_path, tex_dir, still_path, grid_path,
                   ppm=None, unit_scale=1.0, neg_v=False, target_width=640, margin=2,
                   blend_px=0.0, full_res=False, heatmap_path=None,
-                  crop_bottom_px=0):
+                  crop_bottom_px=0, tex_names=None):
     data_path = Path(data_path)
     tex_dir = Path(tex_dir)
     if not data_path.is_file():
@@ -182,9 +182,19 @@ def render_stills(data_path, tex_dir, still_path, grid_path,
         raise SystemExit(f"data file missing 'meshes' key: {data_path}")
     meshes = loaded["meshes"]
 
+    # By default each mesh names its own texture; `tex_names` overrides that
+    # positionally, which is how the camera-named reference exports are read
+    # (their filenames come from the profile, not from the FBX).
+    if tex_names is None:
+        names = [m["texture_basename"] for m in meshes]
+    else:
+        names = list(tex_names)
+        if len(names) != len(meshes):
+            raise SystemExit(f"texture count mismatch: {len(names)} names for "
+                             f"{len(meshes)} meshes in {data_path}")
     texs = []
-    for m in meshes:
-        path = tex_dir / m["texture_basename"]
+    for name in names:
+        path = tex_dir / name
         texture = cv2.imread(str(path))
         if texture is None:
             raise SystemExit(f"cannot read texture: {path}")
@@ -291,12 +301,15 @@ def main(argv=None):
     ap.add_argument("--crop-bottom-px", type=int, default=0,
                     help="after compositing, remove this many bottom rows and "
                          "scale proportionally back to source height; requires --full-res")
+    ap.add_argument("--tex-names", nargs="+", default=None,
+                    help="texture basenames in mesh order, overriding each "
+                         "mesh's own texture_basename")
     args = ap.parse_args(argv)
     render_stills(args.data, args.tex_dir, args.still, args.grid_still,
                   ppm=args.ppm, unit_scale=args.unit_scale, neg_v=args.neg_v,
                   target_width=args.target_width, blend_px=args.blend_px,
                   full_res=args.full_res, heatmap_path=args.heatmap,
-                  crop_bottom_px=args.crop_bottom_px)
+                  crop_bottom_px=args.crop_bottom_px, tex_names=args.tex_names)
 
 
 if __name__ == "__main__":

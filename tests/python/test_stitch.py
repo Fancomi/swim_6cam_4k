@@ -769,15 +769,17 @@ class LoopPeriodTest(unittest.TestCase):
             td = Path(td)
             for index in range(1, 17):
                 (td / f"swb_test_underA{index}.ts").write_bytes(b"")
+            # looping is the default; --no-loop ends the run at EOF instead
+            on = td / "on.conf"
+            runner.write_config(on, td, "metal", td / "o.h265", align=False)
+            self.assertIn("loop_sources=true", on.read_text())
+            self.assertIn("stop_at_eof=false", on.read_text())
+
             off = td / "off.conf"
             runner.write_config(off, td, "metal", td / "o.h265", align=False,
                                 loop=False)
             self.assertIn("loop_sources=false", off.read_text())
-
-            on = td / "on.conf"
-            runner.write_config(on, td, "metal", td / "o.h265", align=False,
-                               loop=True)
-            self.assertIn("loop_sources=true", on.read_text())
+            self.assertIn("stop_at_eof=true", off.read_text())
 
 
 class VideoCameraOrderTest(unittest.TestCase):
@@ -830,3 +832,115 @@ class VideoCameraOrderTest(unittest.TestCase):
 
         self.assertFalse(hasattr(rv, "camera_of"))
         self.assertFalse(hasattr(rv, "video_for_camera"))
+
+
+class RefTexTest(unittest.TestCase):
+    """Reference textures are named after the camera, not after the mesh's
+    texture basename: the overhead basenames (05-02.jpg, C06.jpg) say nothing
+    about which camera they came from, and reusing a .jpg name would re-encode
+    a lossless frame as JPEG."""
+
+    def test_tex_names_follow_camera_ids(self):
+        from python.stitch import export_ref_tex, profiles
+
+        self.assertEqual(export_ref_tex.tex_names(profiles.get("overhead")),
+                         ["cam5.png", "cam6.png"])
+        names = export_ref_tex.tex_names(profiles.get("underwater"))
+        self.assertEqual(names[0], "underA16.png")
+        self.assertEqual(names[-1], "underA1.png")
+        self.assertEqual(len(names), 16)
+
+    def test_video_source_requires_a_video_dir(self):
+        from python.stitch import export_ref_tex, profiles
+
+        with self.assertRaises(profiles.StepError):
+            export_ref_tex.export(profiles.get("overhead"), video_dir=None)
+
+    def test_video_source_writes_one_png_per_camera(self):
+        import tempfile
+        import cv2
+        import numpy as np
+        from python.stitch import export_ref_tex, profiles
+
+        overhead = profiles.get("overhead")
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            clips = td / "clips"
+            clips.mkdir()
+            # two one-frame mp4s, distinguishable by colour
+            for index, camera in enumerate(overhead.camera_ids):
+                frame = np.full((16, 32, 3), 40 * (index + 1), np.uint8)
+                writer = cv2.VideoWriter(
+                    str(clips / f"sess_{camera}.mp4"),
+                    cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (32, 16))
+                writer.write(frame)
+                writer.release()
+
+            out = td / "ref_tex"
+            written = export_ref_tex.export(overhead, out_dir=out, video_dir=clips)
+
+            self.assertEqual([p.name for p in written], ["cam5.png", "cam6.png"])
+            for path in written:
+                self.assertTrue(path.is_file())
+                self.assertEqual(cv2.imread(str(path)).shape, (16, 32, 3))
+
+    def test_unreadable_clip_is_reported(self):
+        # OpenCV prints "moov atom not found" to stderr here; the point is that
+        # export raises instead of writing a black frame.
+        import tempfile
+        from python.stitch import export_ref_tex, profiles
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            for camera in profiles.get("overhead").camera_ids:
+                (td / f"sess_{camera}.mp4").write_bytes(b"not a video")
+            with self.assertRaises(profiles.StepError):
+                export_ref_tex.export(profiles.get("overhead"),
+                                      out_dir=td / "out", video_dir=td)
+
+
+class RenderTexNamesTest(unittest.TestCase):
+    """render_stills reads texture_basename by default and positional names when
+    asked, so one renderer serves both the designer's calibration frames and the
+    camera-named reference exports."""
+
+    def test_positional_names_render_the_same_as_basenames(self):
+        import tempfile
+        import cv2
+        import numpy as np
+        from python.stitch.render import render_stills
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            data = _two_plane_json(td, [_plane("a", "05-02.jpg", 0.0),
+                                        _plane("b", "C06.jpg", 0.9)])
+            left = np.full((16, 32, 3), 90, np.uint8)
+            right = np.full((16, 32, 3), 180, np.uint8)
+            # same pixels under both naming schemes, both lossless
+            cv2.imwrite(str(td / "05-02.jpg"), left)
+            cv2.imwrite(str(td / "C06.jpg"), right)
+            cv2.imwrite(str(td / "cam5.png"), left)
+            cv2.imwrite(str(td / "cam6.png"), right)
+
+            by_basename = td / "a.png"
+            by_position = td / "b.png"
+            render_stills(data, td, by_basename, None, ppm=64.0)
+            render_stills(data, td, by_position, None, ppm=64.0,
+                          tex_names=["cam5.png", "cam6.png"])
+
+            self.assertTrue(np.array_equal(cv2.imread(str(by_basename)),
+                                           cv2.imread(str(by_position))))
+
+    def test_tex_names_length_must_match_mesh_count(self):
+        import tempfile
+        from python.stitch.render import render_stills
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            data = _two_plane_json(td, [_plane("a", "05-02.jpg", 0.0),
+                                        _plane("b", "C06.jpg", 0.9)])
+            with self.assertRaises(SystemExit) as caught:
+                render_stills(data, td, td / "out.png", None, ppm=64.0,
+                              tex_names=["cam5.png"])
+            self.assertIn("1", str(caught.exception))
+            self.assertIn("2", str(caught.exception))
