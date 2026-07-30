@@ -576,3 +576,136 @@ class LaneAlignmentConfigTest(unittest.TestCase):
             config = td / "c.conf"
             runner.write_config(config, td, "metal", td / "o.h265", align=False)
             self.assertNotIn("start_ms", config.read_text())
+
+
+class ProfileTest(unittest.TestCase):
+    """A profile is the single place a stitch line's differences live."""
+
+    def test_registry_holds_both_lines(self):
+        from python.stitch import profiles
+
+        self.assertEqual(profiles.names(), ["underwater", "overhead"])
+
+    def test_underwater_values_match_the_shipped_pipeline(self):
+        # These are the numbers the committed underwater artefacts were made
+        # with; a profile that drifts from them silently changes the bake.
+        from python.stitch import profiles
+
+        p = profiles.get("underwater")
+        self.assertEqual(p.camera_ids, tuple(f"underA{i}" for i in range(16, 0, -1)))
+        self.assertEqual(p.clip_suffix, ".ts")
+        self.assertEqual(p.ppm, 240.0)
+        self.assertEqual(p.blend_px, 120.0)
+        self.assertTrue(p.full_res)
+        self.assertEqual(p.crop_bottom, "auto")
+        self.assertTrue(p.clip_uv)
+        self.assertTrue(p.planes_only)
+        self.assertEqual(p.sync, "manifest")
+        self.assertEqual(p.source_size, (1280, 720))
+        self.assertEqual(p.ref_tex, "snapshot")
+        self.assertEqual(p.asset.name, "underwater.swasset")
+
+    def test_overhead_values_match_the_design(self):
+        from python.stitch import profiles
+
+        p = profiles.get("overhead")
+        self.assertEqual(p.camera_ids, ("cam5", "cam6"))
+        self.assertEqual(p.clip_suffix, ".mp4")
+        self.assertEqual(p.ppm, 170.0)
+        self.assertEqual(p.blend_px, 85.0)
+        self.assertFalse(p.full_res)
+        self.assertEqual(p.crop_bottom, "none")
+        self.assertTrue(p.clip_uv)
+        self.assertFalse(p.planes_only)
+        self.assertEqual(p.sync, "none")
+        self.assertEqual(p.source_size, (3840, 2160))
+        self.assertEqual(p.ref_tex, "video")
+        self.assertEqual(p.fbx.name, "002.fbx")
+        self.assertEqual(p.asset.name, "overhead.swasset")
+
+    def test_unknown_name_lists_the_registered_ones(self):
+        from python.stitch import profiles
+
+        with self.assertRaises(SystemExit) as caught:
+            profiles.get("pool")
+        message = str(caught.exception)
+        self.assertIn("pool", message)
+        self.assertIn("underwater", message)
+        self.assertIn("overhead", message)
+
+    def test_profile_is_immutable(self):
+        import dataclasses
+        from python.stitch import profiles
+
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            profiles.get("overhead").ppm = 1.0
+
+    def test_overhead_still_tex_dir_is_the_designer_fbm(self):
+        # underwater renders stills from the dataset's annotation-grids, not the
+        # grids baked into the .fbm; overhead has no such split.
+        from python.stitch import profiles
+
+        p = profiles.get("overhead")
+        self.assertEqual(p.still_tex_dir, p.tex_dir)
+        self.assertEqual(p.tex_dir.name, "002.fbm")
+
+    def test_grid_dir_honours_the_explicit_override(self):
+        import os
+        from unittest.mock import patch
+        from python.stitch import profiles
+
+        with patch.dict(os.environ, {"STITCH_GRID_DIR": "/tmp/grids-xyz"}):
+            self.assertEqual(str(profiles.grid_dir()), "/tmp/grids-xyz")
+
+    def test_grid_dir_falls_back_to_the_dataset_root(self):
+        import os
+        from unittest.mock import patch
+        from python.stitch import profiles
+
+        env = {"ANNOTATION_PREVIEW_DATASET_ROOT": "/tmp/ds-xyz"}
+        with patch.dict(os.environ, env, clear=False):
+            os.environ.pop("STITCH_GRID_DIR", None)
+            self.assertEqual(str(profiles.grid_dir()),
+                             "/tmp/ds-xyz/annotation-grids")
+
+    def test_every_profile_has_a_distinct_out_dir_and_asset(self):
+        from python.stitch import profiles
+
+        all_profiles = [profiles.get(name) for name in profiles.names()]
+        out_dirs = [p.out_dir for p in all_profiles]
+        assets = [p.asset for p in all_profiles]
+        self.assertEqual(len(set(out_dirs)), len(out_dirs))
+        self.assertEqual(len(set(assets)), len(assets))
+
+    def test_clip_for_matches_the_profile_suffix(self):
+        import tempfile
+        from python.stitch import profiles
+
+        overhead = profiles.get("overhead")
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            (td / "20260629_172532_cam5.mp4").write_bytes(b"")
+            (td / "20260629_172532_cam5.ts").write_bytes(b"")   # wrong suffix
+            found = overhead.clip_for(td, "cam5")
+            self.assertEqual(found.name, "20260629_172532_cam5.mp4")
+
+    def test_clip_for_reports_a_missing_clip(self):
+        import tempfile
+        from python.stitch import profiles
+
+        overhead = profiles.get("overhead")
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(profiles.StepError):
+                overhead.clip_for(Path(td), "cam5")
+
+    def test_clip_for_refuses_to_guess_between_two_matches(self):
+        import tempfile
+        from python.stitch import profiles
+
+        overhead = profiles.get("overhead")
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            (td / "a_cam5.mp4").write_bytes(b"")
+            (td / "b_cam5.mp4").write_bytes(b"")
+            with self.assertRaises(profiles.StepError):
+                overhead.clip_for(td, "cam5")
