@@ -38,9 +38,6 @@ from python.validation import reference_renderer as rr
 from python.stitch import render as R
 from python.stitch import profiles as P
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-OUTPUTS_DIR = PROJECT_ROOT / "outputs"
-
 
 def load_manifest(video_dir):
     """Read the sample manifest: the common wall-clock window + per-camera anchors.
