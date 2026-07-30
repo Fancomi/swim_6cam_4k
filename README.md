@@ -2,7 +2,9 @@
 
 ## 项目简介
 
-本项目把泳池 FBX 中的平面网格与 UV 映射提取为 JSON，再使用六路相机的合成纹理或视频帧生成俯视泳池拼接图像和 H.264 视频。FBX SDK 只参与 UV 烘焙和网格提取；常规渲染由 NumPy、OpenCV 和 FFmpeg 完成。
+本项目把泳池 FBX 中的平面网格与 UV 映射提取为 JSON，再使用相机的合成纹理或视频帧生成拼接图像与视频，并在 Metal / D3D11 / CUDA-GL 上做实时拼接。FBX SDK 只参与 UV 烘焙和网格提取；离线渲染由 NumPy、OpenCV 和 FFmpeg 完成。
+
+仓库覆盖四类机位：六路 4K 俯视泳池（`python/validation` + `CMakeLists.txt` 的 `pool_4k.swasset`）、水下 16 块平面与俯视 2 块水道（两者共用 `python/stitch/`，见「平面拼接」）、以及入水检测单机位（`python/water_entry/`）。
 
 本文所有命令都假定当前目录是项目根目录 `swim_fbx_demo/`。
 
@@ -49,7 +51,7 @@ CUDA/GL 的六路真实输入路径写在 `configs/windows_cudagl.conf`（`backe
 代码按语言隔离：实时核心位于 `cpp/core/`，Apple 原生后端位于 `cpp/backends/metal/`，Windows 原生后端位于 `cpp/backends/d3d11/`，离线资产与验证工具位于 `python/`，运行入口位于 `scripts/`。默认现场数据集仍是：
 
 ```text
-/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K
+/Users/penghaotian/Downloads/DATAS/SWIMMING/swim-6cam-4k/20260629-4K-raw
 ```
 
 统一入口是 `scripts/run_metal.sh`：
@@ -116,6 +118,7 @@ soak 按每条 interval 的真实 `elapsed_s` 累加时间轴，报告 RSS 与 M
 5. `./scripts/run_python.sh keypoint` 生成 2D 关键点裁剪复核页。
 6. `./scripts/run_python.sh oh-merge` 把 `overhead5` / `overhead6` / `orbbec_camera_1` 各自全时段快照合成为一张原始分辨率的 UV 参考图（另附中值背景帧），输出到 `outputs/annotation_preview/overhead-merge/`。
 7. `./scripts/run_python.sh label mask` 起本地服务打开保留区域 mask 标注器：选一台相机、逐帧翻、拖拽画胶囊笔画标出该帧要保留的区域，存为数据集根目录下的 `mask_label_project.json`。`label dot` 打开打点标注器。加 `--selftest` 打开该标注器的浏览器自测页。
+8. `./scripts/run_stitch.sh <profile> <steps>` 跑平面拼接线路（underwater / overhead），见「平面拼接（stitch）」一节。
 
 两个标注器都用 ES module，`file://` 下会被浏览器按 CORS 拦截（origin 为 `null`）导致白屏，所以必须经 `label` 子命令走 http 打开，不要双击 html。
 
@@ -126,15 +129,12 @@ swim_fbx_demo/
 ├── README.md
 ├── .venv/                         # 现有 macOS / Python 3.10 虚拟环境
 ├── inputs/
-│   ├── models/
-│   │   └── pool.fbx
-│   └── textures/
-│       ├── camera_1_composite.png
-│       ├── camera_2_composite.png
-│       ├── camera_3_composite.png
-│       ├── camera_4_composite.png
-│       ├── camera_5_composite.png
-│       └── camera_6_composite.png
+│   ├── pool/
+│   │   ├── models/pool.fbx
+│   │   └── textures/camera_[1-6]_composite.png
+│   ├── underwater/models/          # all.fbx + all.fbm/（本地，未入库）
+│   ├── overhead/models/            # 002.fbx + 002.fbm/（本地，未入库）
+│   └── configs/                    # 每机器生成的运行时 config
 ├── outputs/
 │   ├── data/
 │   │   └── pool_mesh.json
@@ -161,7 +161,17 @@ swim_fbx_demo/
 │   ├── validation/
 │   │   ├── __init__.py
 │   │   └── reference_renderer.py
-│   ├── water_entry/               # 入水检测机位：YOLO-pose 预测、复核与选帧
+│   ├── stitch/                     # N 块平面横向拼接：两条 profile 共用一套代码
+│   │   ├── __init__.py
+│   │   ├── __main__.py             # 步骤 dispatcher
+│   │   ├── profiles.py             # underwater / overhead 的差异声明
+│   │   ├── extract.py
+│   │   ├── render.py
+│   │   ├── render_video.py
+│   │   ├── export_ref_tex.py
+│   │   └── run.py
+│   ├── annotation_preview/         # 数据集快照分析与浏览器标注器
+│   ├── water_entry/                # 入水检测机位：YOLO-pose 预测、复核与选帧
 │   │   ├── __init__.py
 │   │   ├── annotate_preview.py
 │   │   ├── common.py
@@ -169,15 +179,15 @@ swim_fbx_demo/
 │   │   ├── predict.py
 │   │   ├── review.py
 │   │   └── select_frames.py
-│   └── tests/
-│       ├── __init__.py
-│       ├── test_keypoint_preview.py
-│       └── test_layout.py
+│   └── assets/
+├── tests/
+│   ├── python/                     # unittest：test_stitch.py 等
+│   └── cpp/
 ├── scripts/
 │   ├── run_metal.sh              # demo / benchmarks / soak
-│   ├── run_python.sh             # still / 4k / keypoint / extract / bake / asset / uw-* / we-*
-│   ├── run_underwater.sh         # 水下 16 路实时拼接一键（macOS / Linux）
-│   ├── run_underwater.ps1        # 同上（Windows）
+│   ├── run_python.sh             # still / 4k / keypoint / extract / bake / asset / we-*
+│   ├── run_stitch.sh             # 平面拼接统一入口（macOS / Linux）
+│   ├── run_stitch.ps1            # 同上（Windows）
 │   ├── run_win.ps1               # Windows 六路实时启动器
 │   ├── run_win.bat               # 同上（cmd 包装）
 │   └── run_water_entry.sh        # 入水检测机位难例筛选全流程
@@ -230,7 +240,7 @@ Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统�
 默认外部 4K 数据集目录是：
 
 ```text
-/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K
+/Users/penghaotian/Downloads/DATAS/SWIMMING/swim-6cam-4k/20260629-4K-raw
 ```
 
 该目录应包含会话 `20260629_172532` 的六个 `camN.mp4` 文件。默认生成 10 秒测试片：
@@ -308,7 +318,7 @@ Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统�
 用 `SWIMMING_DATASET_DIR` 覆盖默认数据集目录：
 
 ```bash
-SWIMMING_DATASET_DIR="/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K" \
+SWIMMING_DATASET_DIR="/Users/penghaotian/Downloads/DATAS/SWIMMING/swim-6cam-4k/20260629-4K-raw" \
   ./scripts/run_python.sh 4k 10 outputs/videos/pool_4k_test10s.mp4
 ```
 
@@ -372,91 +382,128 @@ SWIMMING_DATASET_DIR="/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K" \
   --padding-ratio 0.8 \
   --minimum-side 200
 ```
+## 平面拼接（stitch）
 
-## 水下拼接（underwater stitch）
+`python/stitch/` 实现「N 块平面横向一字排开」的拼接通路。它不复制算法，而是 import 复用
+pool 的提取与渲染函数（`python.assets.extract_fbx`、`python.validation.reference_renderer`），
+产物按线路分目录写入 `outputs/<profile>/`，互不交叉。
 
-`python/underwater/` 是一个**与六路 pool 流程任务隔离**的新任务，实现「N 块平面水平依次连接」的拼接通路（当前 16 块，早期用 `01d.fbx` 的 2 块验证）。它不复制算法，而是 import 复用 pool 的提取与渲染函数（`python.assets.extract_fbx`、`python.validation.reference_renderer`），产物独立写入 `outputs/underwater/`，不与 pool 交叉。
+两条线路的差异全部是 `python/stitch/profiles.py` 里的数据，代码不分叉：
 
-### 一键实时拼接（macOS + Windows）
+| | underwater | overhead |
+| --- | --- | --- |
+| 模型 | `all.fbx`（16 块，含杂物需过滤） | `002.fbx`（2 块，干净） |
+| 相机 | `underA16` … `underA1` | `overhead5`、`overhead6` |
+| 片段 | `*_underAi.ts` | `*_overheadN.ts` |
+| 源尺寸 | 1280×720 | 3840×2160 |
+| 每米像素 | 240 | 170 |
+| 接缝过渡 | 120 px（0.5 m） | 85 px（0.5 m） |
+| 静图 | 缩回源高 360（3278×360） | 原生 ppm（4255×515） |
+| 资产 | `underwater.swasset`（6001×656） | `overhead.swasset`（4251×511） |
 
-给 16 路 `.ts` 片段目录，一条命令跑完「提取网格 → 编译 .swasset → 构建 C++ → 实时渲染」。产物已是最新的步骤会自动跳过，加 `--force` 强制重做。
+两条线路覆盖的是**同一条 25.000 m × 3.000 m 水道**，一个从水下看、一个从水上看 ——
+这是同一套几何代码能服务两者的原因，也是 overhead 变体存在的目的：让水上视角与水下
+16 路关注同一名运动员。数据集里每组 overhead 样本都与一组水下样本的 `align_start_ms`
+相差 1~2 ms（例如 overhead 的 `swb_20260730-161710_7` 对水下的 `swb_20260730-161710_8`）。
 
-```bash
-# macOS / Linux
-./scripts/run_underwater.sh /path/to/swb_20260727-174520_10 --seconds 30 --encode
+`overhead` 的两张贴图 `05-02.jpg` / `C06.jpg` 是设计师在 overhead5 / overhead6 机位标定
+的帧。用 SIFT + RANSAC 与实际片段首帧配准，内点 68 / 166、单应近似恒等（四角位移均值
+4.2 px / 0.6 px），确认为同一对物理相机。
 
-# Windows
-pwsh scripts/run_underwater.ps1 D:\SWIM\swb_20260727-174520_10 -Seconds 30 -Encode
-```
-
-两个包装脚本都只是转发到同一份跨平台逻辑 `python/underwater/run.py`，也可以直接调用：
-
-```bash
-.venv/bin/python -m python.underwater.run --video-dir DIR --seconds 30 --encode
-```
-
-平台差异全部由 `run.py` 处理：macOS 用 Ninja + `metal` 后端 + `build/metal-release/swim_realtime`；Windows 用 Visual Studio 17 2022 (x64) + `d3d11` 后端 + `build/win-d3d11/Release/swim_realtime.exe`（有 CUDA/FFmpeg/GLFW 时可 `--backend cudagl`）。运行时 config 每次按片段目录重新生成到 `inputs/configs/underwater_16_<backend>.conf`，`source.underAi=` 的声明顺序即通道顺序。
-
-常用参数：`--seconds N`、`--encode`、`--no-window`（离屏）、`--fps N`（覆盖渲染帧率）、`--steps asset,run`（只跑部分步骤）、`--config PATH`（用现成 config，不再生成）。
-
-macOS/Metal 实测：16 路 1280×720 MPEG-TS → 6002×722，渲染 30.1fps、解码 4848 帧零 malformed、HEVC 硬件编码 30.1fps、预览零丢帧。相机数量、相机 ID、输出尺寸、解码分辨率全部来自 config 与 `.swasset`，三个后端（Metal / D3D11 / CUDA-GL）共用同一套 `swim_core` 逻辑。
-
-### 分步骤运行
-
-提取 FBX 网格为 JSON。`all.fbx` 含全部 16 块平面，但同时夹带无纹理的支架框、泳道标记条与重复网格；`--planes-only` 只保留「每个纹理一块、位于泳池 Y 带内的全高平面」：
+### 统一入口
 
 ```bash
-.venv/bin/python -m python.underwater.extract \
-  inputs/underwater/models/all.fbx \
-  outputs/underwater/all_mesh.json \
-  --tex-dir inputs/underwater/models/all.fbm \
-  --planes-only
+./scripts/run_stitch.sh PROFILE STEPS [选项…]      # macOS / Linux
+pwsh scripts/run_stitch.ps1 PROFILE STEPS [选项…]  # Windows
 ```
 
-网格按每块世界 X 最小值升序排列（左→右），不依赖 FBX 节点声明顺序。
+七个步骤，逗号分隔、按给出顺序执行：
 
-编译 GPU 运行时资产。`--no-neg-v` 因为水下画面本就正立；`--blend-px` 让烘焙的权重与离线渲染的硬缝一致：
+| 步骤 | 作用 |
+| --- | --- |
+| `extract` | FBX → `outputs/<profile>/mesh.json` |
+| `tex` | 导出每台相机的参考贴图 `ref_tex/<camera>.png`（首帧，无标定线） |
+| `still` | 静图 + 网格诊断图 + 融合热图；`--real` 用参考贴图，产物加 `_real` 后缀 |
+| `video` | 每路片段 → 全景 mp4 |
+| `asset` | mesh JSON → GPU `.swasset` |
+| `build` | 构建 `swim_realtime` |
+| `live` | 实时拼接（预览 / HEVC / 指标） |
+
+`extract` / `tex` / `asset` 的产物比输入新时跳过（`asset` 另比对 shaping 参数的 stamp），
+`--force` 强制重做；`still` / `video` 每次都渲 —— 它们的口径可从命令行覆盖，按 mtime
+跳过会让人看到一张过期却像是新的图。
 
 ```bash
-.venv/bin/python -m python.assets.compile_runtime_asset \
-  outputs/underwater/all_mesh.json build/assets/generated/underwater_16.swasset \
-  --camera-ids underA16 underA15 underA14 underA13 underA12 underA11 underA10 \
-               underA9 underA8 underA7 underA6 underA5 underA4 underA3 underA2 underA1 \
-  --ppm 240 --no-neg-v --blend-px 120
+# 水下 16 路：一条命令跑完提取 → 编译 → 构建 → 实时
+./scripts/run_stitch.sh underwater extract,asset,build,live \
+  --video-dir /path/to/swb_20260730-161710_8 --seconds 12 --encode
+
+# 俯视两路：离线静图（设计师标定图）与真实首帧
+./scripts/run_stitch.sh overhead extract,still
+./scripts/run_stitch.sh overhead tex,still --real \
+  --video-dir /path/to/swb_20260730-161710_7
+
+# 俯视两路：离线拼接视频与实时
+./scripts/run_stitch.sh overhead video --video-dir /path/to/swb_20260730-161710_7
+./scripts/run_stitch.sh overhead extract,asset,build,live \
+  --video-dir /path/to/swb_20260730-161710_7 --seconds 12
 ```
 
-### 离线渲染（静图 / 视频）
+常用选项：`--seconds N`（live 时长）、`--seconds-float N`（video 时长）、`--encode`、
+`--no-window`（离屏）、`--fps N`、`--blend-px N`、`--ppm N`、`--real`、`--force`、
+`--no-loop`、`--config PATH`（用现成 config）、`--backend metal|d3d11|cudagl`。
 
-渲染静态拼接图与网格诊断图：
+平台差异全部由 Python 处理：macOS 用 Ninja + `metal` 后端 + `build/metal-release/swim_realtime`；
+Windows 用 Visual Studio 17 2022 (x64) + `d3d11` 后端 +
+`build/win-d3d11/Release/swim_realtime.exe`（有 CUDA/FFmpeg/GLFW 时可 `--backend cudagl`）。
+运行时 config 每次按片段目录重新生成到 `inputs/configs/<profile>_<backend>.conf`，
+`source.<camera>=` 的声明顺序即通道顺序。
 
-```bash
-.venv/bin/python -m python.underwater.render
-```
+### 分步细节
 
-- `--ppm` 默认按世界 X 跨度自适应到约 `--target-width`（默认 640）像素宽，避免对 640×360 源纹理无意义放大；可显式覆盖 `--ppm`。
-- `--full-res` 输出高度对齐源图高度、宽度等比缩放；缩放前会**自动砍掉最下方存在黑色（无纹理）像素的整行**（矮平面的透视地面缺口），再等比缩放，避免把黑边拉伸进画面。需要固定裁剪行数时用 `--crop-bottom-px N` 覆盖。
-- 默认按正立朝向合成；如需翻转 Y（世界 V）可加 `--neg-v`。
-- `--blend-px N` 控制竖直接缝的过渡带宽度，0 为硬切。
+网格按每块世界 X 最小值升序排列（左→右），不依赖 FBX 节点声明顺序。相机身份由此**按位置**
+对应 —— profile 的 `camera_ids` 与 mesh 顺序一一配对，不解析贴图文件名（overhead 的
+`05-02.jpg` / `C06.jpg` 无从解析出 `overhead5` / `overhead6`）。
 
-**用原图（无网格标注）拼接**：`all.fbm` 里的 `underAi-grid.png` 是标注网格叠加图；每块的「原图像」是各相机的第一帧。`export_real_tex` 复用 `annotation_preview` 的数据集索引，把干净原图按同一 basename 导出到 `outputs/underwater/real_tex_all/`，随后只需把 `--tex-dir` 指过去：
+`all.fbx` 含全部 16 块平面，但同时夹带无纹理的支架框、泳道标记条与重复网格，所以
+underwater 的 profile 打开 `planes_only`：只保留「每个纹理一块、位于泳池 Y 带内的全高
+平面」。`002.fbx` 恰好只有两块平面，且它跨世界 Y `[20.47, 23.47]`（俯视机位在池上方），
+不在 `planes_only` 判据的泳池 Y 带 `(-11.6, -8.0)` 内 —— 对它开这个开关会滤掉全部两块。
 
-```bash
-.venv/bin/python -m python.underwater.export_real_tex
-.venv/bin/python -m python.underwater.render \
-  --data outputs/underwater/all_mesh.json \
-  --tex-dir outputs/underwater/real_tex_all \
-  --still outputs/underwater/all_real_stitch_fullres.png --full-res
-```
+静图默认用标注网格图（underwater 取数据集的 `annotation-grids/`，可用 `STITCH_GRID_DIR`
+或 `ANNOTATION_PREVIEW_DATASET_ROOT` 覆盖；overhead 取 `002.fbm` 里设计师的标定图）。
+`--real` 换成 `tex` 导出的相机首帧。参考贴图按 `<camera_id>.png` 命名而非沿用 mesh 的
+`texture_basename`：后者对 overhead 是设计师的工作文件名（看不出哪台相机），且把无损解码
+写回 `.jpg` 会二次编码（实测 overhead5 最大通道误差 35）。
 
-**离线拼接视频（带墙钟时间对齐）**：各路 `.ts` 的第 0 帧不是同一时刻——录制器把关键帧放在 lookback 窗口内的任意位置，GOP 粒度使各路偏差可达数秒。`render_video` 按 manifest 的 `align_start_ms` 与各路 `keyframe_timestamp_ms` 换算每路起始帧，与前端播放器同一套公式：
+`--full-res`（underwater 默认开）输出高度对齐源图高度、宽度等比缩放；缩放前会**自动砍掉
+最下方存在黑色（无纹理）像素的整行**（矮平面的透视地面缺口），再等比缩放。overhead 两块
+都是全高平面、`ppm` 已是原生密度，所以关掉。注意静图画布比资产画布各维大 4 px：`render.py`
+加了 `margin=2` 的边缘 padding 防浮点舍入越界，`compile_runtime_asset` 不加。
 
-```bash
-.venv/bin/python -m python.underwater.render_video DIR \
-  --data outputs/underwater/all_mesh.json \
-  --out outputs/underwater/all_sync_stitch.mp4 --blend-px 120
-```
+两条线路的 `.ts` 第 0 帧都不是同一时刻 —— 录制器把关键帧放在 lookback 窗口内的任意位置，
+GOP 粒度使各路偏差可达数秒。两者的 profile 都声明 `sync="manifest"`：按 manifest 的
+`align_start_ms` 与各路 `keyframe_timestamp_ms` 换算每路起始帧，与前端播放器同一套公式；
+manifest 缺失或没有 align 窗口会直接报错退出。实时侧把同一批偏移写成 config 的
+`source.<camera>.start_ms=`。确实需要「各路都从第 0 帧读」时显式加 `--no-align`。
 
-manifest 缺失或没有 align 窗口会直接报错退出，不会静默退化；确实需要「各路都从第 0 帧读」时显式加 `--no-align`。文件时长、帧数、大小只作质检，不参与对齐。
+片段短于运行时长时各路会回卷重播而不是走黑帧替换（`loop_sources` / `loop_period_ms`）。
+回卷周期取各路可用跨度的最小值，否则各路会在每一轮回卷上累积漂移。`--no-loop` 恢复
+「播完即止」。
+
+### 能力边界
+
+pool 六路**不在** profile 注册表里，这是有意的：它的网格是**两排**（`01/02/03` 一排、
+`u/Plane004/Plane007` 另一排），相机顺序 `cam3 cam2 cam1 cam4 cam5 cam6` 不是 world-X
+升序，且用距离变换羽化而非竖直硬缝。把它塞进来会让 profile 长出三个只为一条线路存在的
+字段。pool 继续走 `python.validation.reference_renderer` 与 `CMakeLists.txt` 里的
+`pool_4k.swasset` 规则。
+
+macOS/Metal 实测：underwater 16 路 1280×720 → 6002×656，渲染 30.1 fps、解码 4848 帧零
+malformed、HEVC 硬件编码 30.1 fps、预览零丢帧；overhead 2 路 3840×2160 → 4252×512，
+渲染 30.0 fps（单路解码约 10 fps，warm-up 后无丢帧）。相机数量、相机 ID、输出尺寸、
+解码分辨率全部来自 config 与 `.swasset`，三个后端（Metal / D3D11 / CUDA-GL）共用同一套
+`swim_core` 逻辑。
 
 ## 入水检测机位（water entry）
 
@@ -581,6 +628,15 @@ MPS 后端偶发把整窗推理返回全零检测（实测复现 1 次，重跑�
 - 视频渲染会读取各路源 FPS，以最低源 FPS 作为输出帧率，并对较高帧率输入按最近目标帧位置抽帧。这只对齐帧率，不会同步各路视频的采集起始时间。
 - 渲染器不会读取外部数据集中的 sync map，也不会补偿相机时钟偏移；需要时间同步时，应在渲染前准备好已经对齐的六路输入。
 - 六路输入数量必须与六块网格一致，且必须保持 `cam3 cam2 cam1 cam4 cam5 cam6` 的固定位置顺序。
+- 拼接线路（`python/stitch/`）的相机身份是**位置**对应：profile 的 `camera_ids` 按顺序配
+  mesh（world-X 升序）。改动 FBX 里平面的相对位置、或改 profile 的 id 顺序，会把相机错配
+  到别的平面上，症状是接缝处错位而不是报错。
+- overhead 的 7 组样本每组只有 12 秒（水下早期样本有 30 秒的）。`live --seconds` 超过 12
+  时各路会在 `loop_period_ms` 处回卷重播；需要「播完即止」加 `--no-loop`。
+- overhead 两路 4K 的解码负载明显高于 16 路 720p（像素总量约 2.4 倍），实测单路解码约
+  10 fps、渲染仍达 30.0 fps；指标见 `outputs/overhead/realtime.jsonl`。
+- 每组 overhead 样本与一组水下样本的 `align_start_ms` 相差 1~2 ms，但两条线路各自按自己的
+  manifest 对齐，**没有**做跨线路的画面级同步。要让水上水下严格同帧需要另一层时间轴换算。
 - H.264 的 `yuv420p` 要求偶数宽高，视频编码阶段可能在静态画布右侧或底部补一个像素。
 - 默认外部数据集路径是本机绝对路径。换机器或移动数据集后，必须设置 `SWIMMING_DATASET_DIR`（入水检测机位另用 `WATER_ENTRY_DATASET_ROOT`）。
 - 入水检测机位的选人只用位移与轨迹长度，未接入 `res.json` 的 ROI 泳道约束。实测选人错误只有 2 例（`20260713-173110`、`20260727-101601`，`swimup_bk` 选中岸上走动的人），且两条片段窗口内本就没有出发动作、已被 `select_frames` 默认排除；但两模型对同一人给出差异极大的框在入水 +6 帧之后很常见，那属于水下伪影而非选人缺陷。

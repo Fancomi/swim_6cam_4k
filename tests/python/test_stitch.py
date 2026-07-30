@@ -1277,3 +1277,20 @@ class OverheadAssetTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DocsTest(unittest.TestCase):
+    """The README must not point at commands that no longer exist."""
+
+    def test_readme_has_no_retired_commands(self):
+        readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+        for retired in ("uw-extract", "uw-tex", "uw-render", "uw-real",
+                        "uw-video", "run_underwater.sh", "run_underwater.ps1",
+                        "python.underwater", "underwater_16.swasset"):
+            self.assertNotIn(retired, readme, f"README still mentions {retired}")
+
+    def test_readme_documents_both_stitch_lines(self):
+        readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("run_stitch.sh", readme)
+        self.assertIn("overhead5", readme)
+        self.assertIn("002.fbx", readme)
