@@ -25,7 +25,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="$ROOT/.venv/bin/python"
 [[ -x "$PY" ]] || PY="$(command -v python3)"
 
-DATASET_DIR="${SWIMMING_DATASET_DIR:-/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K}"
+DATASET_DIR="${SWIMMING_DATASET_DIR:-/Users/penghaotian/Downloads/DATAS/SWIMMING/swim-6cam-4k/20260629-4K-raw}"
 SESSION="20260629_172532"
 
 usage() {
@@ -158,7 +158,7 @@ UW_MODELS="$ROOT/inputs/underwater/models"
 UW_OUT="$ROOT/outputs/underwater"
 # Grid stitching uses the dataset's annotation-grids (the canonical grid renders),
 # not the grids baked into all.fbm. Override with UW_GRID_DIR.
-UW_DATASET="${ANNOTATION_PREVIEW_DATASET_ROOT:-/Users/penghaotian/Downloads/DATAS/SWIMMING/swimming-xlj-middle-20260708}"
+UW_DATASET="${ANNOTATION_PREVIEW_DATASET_ROOT:-/Users/penghaotian/Downloads/DATAS/SWIMMING/swimming-xlj-under-grids}"
 UW_GRID_DIR="${UW_GRID_DIR:-$UW_DATASET/annotation-grids}"
 
 cmd_uw_extract() {

@@ -21,7 +21,7 @@ CONFIGS = INPUTS / "configs"
 GENERATED = PROJECT_ROOT / "build" / "assets" / "generated"
 
 _DEFAULT_DATASET = ("/Users/penghaotian/Downloads/DATAS/SWIMMING/"
-                    "swimming-xlj-middle-20260708")
+                    "swimming-xlj-under-grids")
 
 
 class StepError(RuntimeError):
@@ -142,8 +142,8 @@ PROFILES = {
         fbx=_OVERHEAD_MODELS / "002.fbx",
         tex_dir=_OVERHEAD_MODELS / "002.fbm",
         still_tex_dir=_OVERHEAD_MODELS / "002.fbm",
-        camera_ids=("cam5", "cam6"),
-        clip_suffix=".mp4",
+        camera_ids=("overhead5", "overhead6"),
+        clip_suffix=".ts",
         # 170 sits just above the 152~169 px/m the source frames actually carry
         # (measured from the UV<->world affine), so nothing is upscaled.
         ppm=170.0,
@@ -162,11 +162,12 @@ PROFILES = {
         # (-11.6, -8.0) where the underwater planes are, while this overhead
         # model spans Y [20.47, 23.47]. Turning it on drops both planes.
         planes_only=False,
-        # The 4K session has no usable wall clock: sync_summary reports
-        # waiting_for_syncbridge_events and every mapping offset_us is null. The
-        # six ZCAMs share one EzLink/IEEE1588 domain and one recording session,
-        # so the residual skew is frame-level.
-        sync="none",
+        # These clips carry the same wall-clock manifest the underwater samples
+        # do — align_start/align_end plus a per-lane keyframe anchor — and the
+        # two lanes' keyframes land within 3ms of each other. Each overhead
+        # sample also pairs with an underwater one recorded 1-2ms apart, which is
+        # the point of the variant: the same swimmer from above and below.
+        sync="manifest",
         source_size=(3840, 2160),
         ref_tex="video",
         out_dir=OUTPUTS / "overhead",

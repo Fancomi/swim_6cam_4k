@@ -6,7 +6,7 @@ from pathlib import Path
 from python.assets.keypoint_preview import DatasetFormatError, generate_preview
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_DATASET_ROOT = Path("/Users/penghaotian/Downloads/DATAS/SWIMMING/游泳6拼接1080P-2D关键点标注")
+DEFAULT_DATASET_ROOT = Path("/Users/penghaotian/Downloads/DATAS/SWIMMING/swim-6cam-4k/swim-6cam-4k-2dkp")
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "keypoint_preview"
 
 

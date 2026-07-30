@@ -17,7 +17,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 # 外部数据集根：通过环境变量或各 CLI 参数注入，不写死到某个项目内路径。
 DATASET = os.environ.get(
     "ANNOTATION_PREVIEW_DATASET_ROOT",
-    "/Users/penghaotian/Downloads/DATAS/SWIMMING/swimming-xlj-middle-20260708",
+    "/Users/penghaotian/Downloads/DATAS/SWIMMING/swimming-xlj-under-grids",
 )
 SNAP_DIR = os.path.join(DATASET, "snapshots")
 OBJ_DIR = os.path.join(DATASET, "object-frames")

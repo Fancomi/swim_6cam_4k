@@ -625,15 +625,15 @@ class ProfileTest(unittest.TestCase):
         from python.stitch import profiles
 
         p = profiles.get("overhead")
-        self.assertEqual(p.camera_ids, ("cam5", "cam6"))
-        self.assertEqual(p.clip_suffix, ".mp4")
+        self.assertEqual(p.camera_ids, ("overhead5", "overhead6"))
+        self.assertEqual(p.clip_suffix, ".ts")
         self.assertEqual(p.ppm, 170.0)
         self.assertEqual(p.blend_px, 85.0)
         self.assertFalse(p.full_res)
         self.assertEqual(p.crop_bottom, "none")
         self.assertTrue(p.clip_uv)
         self.assertFalse(p.planes_only)
-        self.assertEqual(p.sync, "none")
+        self.assertEqual(p.sync, "manifest")
         self.assertEqual(p.source_size, (3840, 2160))
         self.assertEqual(p.ref_tex, "video")
         self.assertEqual(p.fbx.name, "002.fbx")
@@ -700,10 +700,10 @@ class ProfileTest(unittest.TestCase):
         overhead = profiles.get("overhead")
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
-            (td / "20260629_172532_cam5.mp4").write_bytes(b"")
-            (td / "20260629_172532_cam5.ts").write_bytes(b"")   # wrong suffix
-            found = overhead.clip_for(td, "cam5")
-            self.assertEqual(found.name, "20260629_172532_cam5.mp4")
+            (td / "swb_x_overhead5.ts").write_bytes(b"")
+            (td / "swb_x_overhead5.mp4").write_bytes(b"")   # wrong suffix
+            found = overhead.clip_for(td, "overhead5")
+            self.assertEqual(found.name, "swb_x_overhead5.ts")
 
     def test_clip_for_reports_a_missing_clip(self):
         import tempfile
@@ -712,7 +712,7 @@ class ProfileTest(unittest.TestCase):
         overhead = profiles.get("overhead")
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(profiles.StepError):
-                overhead.clip_for(Path(td), "cam5")
+                overhead.clip_for(Path(td), "overhead5")
 
     def test_clip_for_refuses_to_guess_between_two_matches(self):
         import tempfile
@@ -721,10 +721,10 @@ class ProfileTest(unittest.TestCase):
         overhead = profiles.get("overhead")
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
-            (td / "a_cam5.mp4").write_bytes(b"")
-            (td / "b_cam5.mp4").write_bytes(b"")
+            (td / "a_overhead5.ts").write_bytes(b"")
+            (td / "b_overhead5.ts").write_bytes(b"")
             with self.assertRaises(profiles.StepError):
-                overhead.clip_for(td, "cam5")
+                overhead.clip_for(td, "overhead5")
 
 
 class LoopPeriodTest(unittest.TestCase):
@@ -785,7 +785,7 @@ class LoopPeriodTest(unittest.TestCase):
 class VideoCameraOrderTest(unittest.TestCase):
     """Camera identity comes from the profile's ordered ids, not from parsing a
     texture filename: the overhead textures are 05-02.jpg and C06.jpg, which no
-    naming rule maps to cam5/cam6."""
+    naming rule maps to overhead5/overhead6."""
 
     def test_camera_count_must_match_mesh_count(self):
         import tempfile
@@ -797,7 +797,7 @@ class VideoCameraOrderTest(unittest.TestCase):
                                         _plane("b", "C06.jpg", 0.9)])
             with self.assertRaises(SystemExit) as caught:
                 render_video(data, td, td / "out.mp4",
-                             camera_ids=("cam5",),          # one id, two meshes
+                             camera_ids=("overhead5",),          # one id, two meshes
                              clip_for=lambda d, c: td / "absent.mp4")
             message = str(caught.exception)
             self.assertIn("1", message)
@@ -821,9 +821,9 @@ class VideoCameraOrderTest(unittest.TestCase):
                                         _plane("b", "C06.jpg", 0.9)])
             with self.assertRaises(RuntimeError):
                 render_video(data, td, td / "out.mp4",
-                             camera_ids=("cam5", "cam6"),
+                             camera_ids=("overhead5", "overhead6"),
                              clip_for=fake_clip_for)
-        self.assertEqual(asked, ["cam5"])
+        self.assertEqual(asked, ["overhead5"])
 
     def test_camera_of_is_gone(self):
         # The underA-only regex was the last thing tying the video path to the
@@ -844,7 +844,7 @@ class RefTexTest(unittest.TestCase):
         from python.stitch import export_ref_tex, profiles
 
         self.assertEqual(export_ref_tex.tex_names(profiles.get("overhead")),
-                         ["cam5.png", "cam6.png"])
+                         ["overhead5.png", "overhead6.png"])
         names = export_ref_tex.tex_names(profiles.get("underwater"))
         self.assertEqual(names[0], "underA16.png")
         self.assertEqual(names[-1], "underA1.png")
@@ -871,7 +871,7 @@ class RefTexTest(unittest.TestCase):
             for index, camera in enumerate(overhead.camera_ids):
                 frame = np.full((16, 32, 3), 40 * (index + 1), np.uint8)
                 writer = cv2.VideoWriter(
-                    str(clips / f"sess_{camera}.mp4"),
+                    str(clips / f"sess_{camera}.ts"),
                     cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (32, 16))
                 writer.write(frame)
                 writer.release()
@@ -879,7 +879,7 @@ class RefTexTest(unittest.TestCase):
             out = td / "ref_tex"
             written = export_ref_tex.export(overhead, out_dir=out, video_dir=clips)
 
-            self.assertEqual([p.name for p in written], ["cam5.png", "cam6.png"])
+            self.assertEqual([p.name for p in written], ["overhead5.png", "overhead6.png"])
             for path in written:
                 self.assertTrue(path.is_file())
                 self.assertEqual(cv2.imread(str(path)).shape, (16, 32, 3))
@@ -893,7 +893,7 @@ class RefTexTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
             for camera in profiles.get("overhead").camera_ids:
-                (td / f"sess_{camera}.mp4").write_bytes(b"not a video")
+                (td / f"sess_{camera}.ts").write_bytes(b"not a video")
             with self.assertRaises(profiles.StepError):
                 export_ref_tex.export(profiles.get("overhead"),
                                       out_dir=td / "out", video_dir=td)
@@ -919,14 +919,14 @@ class RenderTexNamesTest(unittest.TestCase):
             # same pixels under both naming schemes, both lossless
             cv2.imwrite(str(td / "05-02.jpg"), left)
             cv2.imwrite(str(td / "C06.jpg"), right)
-            cv2.imwrite(str(td / "cam5.png"), left)
-            cv2.imwrite(str(td / "cam6.png"), right)
+            cv2.imwrite(str(td / "overhead5.png"), left)
+            cv2.imwrite(str(td / "overhead6.png"), right)
 
             by_basename = td / "a.png"
             by_position = td / "b.png"
             render_stills(data, td, by_basename, None, ppm=64.0)
             render_stills(data, td, by_position, None, ppm=64.0,
-                          tex_names=["cam5.png", "cam6.png"])
+                          tex_names=["overhead5.png", "overhead6.png"])
 
             self.assertTrue(np.array_equal(cv2.imread(str(by_basename)),
                                            cv2.imread(str(by_position))))
@@ -941,6 +941,6 @@ class RenderTexNamesTest(unittest.TestCase):
                                         _plane("b", "C06.jpg", 0.9)])
             with self.assertRaises(SystemExit) as caught:
                 render_stills(data, td, td / "out.png", None, ppm=64.0,
-                              tex_names=["cam5.png"])
+                              tex_names=["overhead5.png"])
             self.assertIn("1", str(caught.exception))
             self.assertIn("2", str(caught.exception))

@@ -22,7 +22,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 # 外部数据集根：通过环境变量或各 CLI 参数注入，不写死进代码路径以外的假设。
 DATASET = os.environ.get(
     "WATER_ENTRY_DATASET_ROOT",
-    "/Users/penghaotian/Downloads/DATAS/SWIMMING/swimming-gz-bad",
+    "/Users/penghaotian/Downloads/DATAS/SWIMMING/swimming-up/swimming-gz-bad",
 )
 CLIP_DIR = os.path.join(DATASET, "bk_export_202607")
 MANIFEST = os.path.join(DATASET, "bk_export_manifest.csv")
