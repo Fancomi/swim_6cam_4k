@@ -24,9 +24,12 @@
   只跑本任务测试类时不会碰到它们；终审跑全量时预期是 `Ran <N>, FAILED (errors=3)`。
 - 不改任何 C++ 代码、不改 `CMakeLists.txt` 的 `pool_4k.swasset` 规则、不改 `python/validation/`、不改 `python/water_entry/`、不改 `python/annotation_preview/`。
 - pool 六路**不进** profile 注册表（两排布局、相机序非 world-X 升序、距离变换羽化）。
-- overhead profile 的既定数值：`ppm=170.0`、`blend_px=85.0`、`full_res=False`、`crop_bottom="none"`、`clip_uv=True`、`planes_only=False`、`sync="none"`、`source_size=(3840, 2160)`、`camera_ids=("cam5", "cam6")`、`clip_suffix=".mp4"`。
+- overhead profile 的既定数值：`ppm=170.0`、`blend_px=85.0`、`full_res=False`、`crop_bottom="none"`、`clip_uv=True`、`planes_only=False`、`sync="manifest"`、`source_size=(3840, 2160)`、`camera_ids=("overhead5", "overhead6")`、`clip_suffix=".ts"`。
 - underwater profile 的数值必须与现状逐一相等：`ppm=240.0`、`blend_px=120.0`、`full_res=True`、`crop_bottom="auto"`、`clip_uv=True`、`planes_only=True`、`sync="manifest"`、`source_size=(1280, 720)`、`camera_ids=underA16…underA1`、`clip_suffix=".ts"`。
-- 4K 数据集：`/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K`，会话前缀 `20260629_172532`，本计划只用其中 `cam5`/`cam6` 两路。
+- overhead 片段：`/Users/penghaotian/Downloads/DATAS/SWIMMING/under-overhead-xlj/`，7 组样本，每组含 `*_overhead5.ts` 与
+  `*_overhead6.ts`（3840×2160@30fps）加 `manifest.json`。验证统一用
+  `swb_20260730-161710_7`（它与水下 `swimming-xlj-under-videos/swb_20260730-161710_8`
+  的 align_start 相差 1ms，是同一名运动员的水上水下视角）。
 - 测试里构造「两块平面 mesh JSON」的 helper 只写一份，放在 `tests/python/test_stitch.py`
   的**模块层**（与文件里已有的 `_mesh` / `_band_plane` / `_strip` 同级），三个测试类共用：
 
@@ -389,7 +392,7 @@ class ProfileTest(unittest.TestCase):
         from python.stitch import profiles
 
         p = profiles.get("overhead")
-        self.assertEqual(p.camera_ids, ("cam5", "cam6"))
+        self.assertEqual(p.camera_ids, ("overhead5", "overhead6"))
         self.assertEqual(p.clip_suffix, ".mp4")
         self.assertEqual(p.ppm, 170.0)
         self.assertEqual(p.blend_px, 85.0)
@@ -464,10 +467,10 @@ class ProfileTest(unittest.TestCase):
         overhead = profiles.get("overhead")
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
-            (td / "20260629_172532_cam5.mp4").write_bytes(b"")
-            (td / "20260629_172532_cam5.ts").write_bytes(b"")   # wrong suffix
-            found = overhead.clip_for(td, "cam5")
-            self.assertEqual(found.name, "20260629_172532_cam5.mp4")
+            (td / "swb_x_overhead5.ts").write_bytes(b"")
+            (td / "swb_x_overhead5.mp4").write_bytes(b"")   # wrong suffix
+            found = overhead.clip_for(td, "overhead5")
+            self.assertEqual(found.name, "swb_x_overhead5.ts")
 
     def test_clip_for_reports_a_missing_clip(self):
         import tempfile
@@ -476,7 +479,7 @@ class ProfileTest(unittest.TestCase):
         overhead = profiles.get("overhead")
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(profiles.StepError):
-                overhead.clip_for(Path(td), "cam5")
+                overhead.clip_for(Path(td), "overhead5")
 
     def test_clip_for_refuses_to_guess_between_two_matches(self):
         import tempfile
@@ -485,10 +488,10 @@ class ProfileTest(unittest.TestCase):
         overhead = profiles.get("overhead")
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
-            (td / "a_cam5.mp4").write_bytes(b"")
-            (td / "b_cam5.mp4").write_bytes(b"")
+            (td / "a_overhead5.ts").write_bytes(b"")
+            (td / "b_overhead5.ts").write_bytes(b"")
             with self.assertRaises(profiles.StepError):
-                overhead.clip_for(td, "cam5")
+                overhead.clip_for(td, "overhead5")
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -646,7 +649,7 @@ PROFILES = {
         fbx=_OVERHEAD_MODELS / "002.fbx",
         tex_dir=_OVERHEAD_MODELS / "002.fbm",
         still_tex_dir=_OVERHEAD_MODELS / "002.fbm",
-        camera_ids=("cam5", "cam6"),
+        camera_ids=("overhead5", "overhead6"),
         clip_suffix=".mp4",
         # 170 sits just above the 152~169 px/m the source frames actually carry
         # (measured from the UV<->world affine), so nothing is upscaled.
@@ -732,7 +735,7 @@ Expected:
 underwater  ppm= 240.0 blend=120.0 full_res=True  crop=auto sync=manifest lanes=16 src=(1280, 720)
             mesh=/Users/.../outputs/underwater/mesh.json
             asset=/Users/.../build/assets/generated/underwater.swasset
-overhead    ppm= 170.0 blend= 85.0 full_res=False crop=none sync=none     lanes= 2 src=(3840, 2160)
+overhead    ppm= 170.0 blend= 85.0 full_res=False crop=none sync=manifest lanes= 2 src=(3840, 2160)
             mesh=/Users/.../outputs/overhead/mesh.json
             asset=/Users/.../build/assets/generated/overhead.swasset
 ```
@@ -823,7 +826,7 @@ def _two_plane_json(td, planes):
 class VideoCameraOrderTest(unittest.TestCase):
     """Camera identity comes from the profile's ordered ids, not from parsing a
     texture filename: the overhead textures are 05-02.jpg and C06.jpg, which no
-    naming rule maps to cam5/cam6."""
+    naming rule maps to overhead5/overhead6."""
 
     def test_camera_count_must_match_mesh_count(self):
         import tempfile
@@ -835,7 +838,7 @@ class VideoCameraOrderTest(unittest.TestCase):
                                         _plane("b", "C06.jpg", 0.9)])
             with self.assertRaises(SystemExit) as caught:
                 render_video(data, td, td / "out.mp4",
-                             camera_ids=("cam5",),          # one id, two meshes
+                             camera_ids=("overhead5",),          # one id, two meshes
                              clip_for=lambda d, c: td / "absent.mp4")
             message = str(caught.exception)
             self.assertIn("1", message)
@@ -859,9 +862,9 @@ class VideoCameraOrderTest(unittest.TestCase):
                                         _plane("b", "C06.jpg", 0.9)])
             with self.assertRaises(RuntimeError):
                 render_video(data, td, td / "out.mp4",
-                             camera_ids=("cam5", "cam6"),
+                             camera_ids=("overhead5", "overhead6"),
                              clip_for=fake_clip_for)
-        self.assertEqual(asked, ["cam5"])
+        self.assertEqual(asked, ["overhead5"])
 
     def test_camera_of_is_gone(self):
         # The underA-only regex was the last thing tying the video path to the
@@ -1065,7 +1068,7 @@ refactor(stitch): take camera identity from the profile, not the texture name
 
 camera_of() parsed `underA\d+` out of a texture basename, so it returned None
 for the overhead textures (05-02.jpg and C06.jpg) and killed the render. No
-naming rule maps those to cam5/cam6 — the mapping is positional, and both ends
+naming rule maps those to overhead5/overhead6 — the mapping is positional, and both ends
 already agree on the order: extract sorts meshes by world X ascending and the
 profile lists its ids left-to-right. So the regex was not just underwater-only,
 it was redundant with an ordering the pipeline already guarantees.
@@ -1120,7 +1123,7 @@ class RefTexTest(unittest.TestCase):
         from python.stitch import export_ref_tex, profiles
 
         self.assertEqual(export_ref_tex.tex_names(profiles.get("overhead")),
-                         ["cam5.png", "cam6.png"])
+                         ["overhead5.png", "overhead6.png"])
         names = export_ref_tex.tex_names(profiles.get("underwater"))
         self.assertEqual(names[0], "underA16.png")
         self.assertEqual(names[-1], "underA1.png")
@@ -1147,7 +1150,7 @@ class RefTexTest(unittest.TestCase):
             for index, camera in enumerate(overhead.camera_ids):
                 frame = np.full((16, 32, 3), 40 * (index + 1), np.uint8)
                 writer = cv2.VideoWriter(
-                    str(clips / f"sess_{camera}.mp4"),
+                    str(clips / f"sess_{camera}.ts"),
                     cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (32, 16))
                 writer.write(frame)
                 writer.release()
@@ -1155,7 +1158,7 @@ class RefTexTest(unittest.TestCase):
             out = td / "ref_tex"
             written = export_ref_tex.export(overhead, out_dir=out, video_dir=clips)
 
-            self.assertEqual([p.name for p in written], ["cam5.png", "cam6.png"])
+            self.assertEqual([p.name for p in written], ["overhead5.png", "overhead6.png"])
             for path in written:
                 self.assertTrue(path.is_file())
                 self.assertEqual(cv2.imread(str(path)).shape, (16, 32, 3))
@@ -1169,7 +1172,7 @@ class RefTexTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
             for camera in profiles.get("overhead").camera_ids:
-                (td / f"sess_{camera}.mp4").write_bytes(b"not a video")
+                (td / f"sess_{camera}.ts").write_bytes(b"not a video")
             with self.assertRaises(profiles.StepError):
                 export_ref_tex.export(profiles.get("overhead"),
                                       out_dir=td / "out", video_dir=td)
@@ -1195,14 +1198,14 @@ class RenderTexNamesTest(unittest.TestCase):
             # same pixels under both naming schemes, both lossless
             cv2.imwrite(str(td / "05-02.jpg"), left)
             cv2.imwrite(str(td / "C06.jpg"), right)
-            cv2.imwrite(str(td / "cam5.png"), left)
-            cv2.imwrite(str(td / "cam6.png"), right)
+            cv2.imwrite(str(td / "overhead5.png"), left)
+            cv2.imwrite(str(td / "overhead6.png"), right)
 
             by_basename = td / "a.png"
             by_position = td / "b.png"
             render_stills(data, td, by_basename, None, ppm=64.0)
             render_stills(data, td, by_position, None, ppm=64.0,
-                          tex_names=["cam5.png", "cam6.png"])
+                          tex_names=["overhead5.png", "overhead6.png"])
 
             self.assertTrue(np.array_equal(cv2.imread(str(by_basename)),
                                            cv2.imread(str(by_position))))
@@ -1217,7 +1220,7 @@ class RenderTexNamesTest(unittest.TestCase):
                                         _plane("b", "C06.jpg", 0.9)])
             with self.assertRaises(SystemExit) as caught:
                 render_stills(data, td, td / "out.png", None, ppm=64.0,
-                              tex_names=["cam5.png"])
+                              tex_names=["overhead5.png"])
             self.assertIn("1", str(caught.exception))
             self.assertIn("2", str(caught.exception))
 ```
@@ -1252,7 +1255,7 @@ Files are named `<camera_id>.png`, not after the mesh's texture_basename:
 - the overhead basenames (05-02.jpg, C06.jpg) name a designer's working file,
   so a directory full of them says nothing about which camera is which;
 - reusing a `.jpg` basename would re-encode a lossless decode as JPEG. Measured
-  on cam5: max channel error 35, and the stitched result drifts by up to 22.
+  on overhead5: max channel error 35, and the stitched result drifts by up to 22.
 
 Two sources, chosen by profile.ref_tex:
 - "snapshot": the dataset's per-camera snapshot index (annotation_preview), used
@@ -1481,10 +1484,10 @@ Expected: `identical (360, 3278, 3)`
 ```bash
 .venv/bin/python -m python.stitch.export_ref_tex --profile overhead \
   --out-dir /tmp/oh_ref_check \
-  --video-dir /Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K
+  --video-dir /Users/penghaotian/Downloads/DATAS/SWIMMING/under-overhead-xlj/swb_20260730-161710_7
 .venv/bin/python -c "
 import cv2
-for name in ('cam5.png', 'cam6.png'):
+for name in ('overhead5.png', 'overhead6.png'):
     image = cv2.imread(f'/tmp/oh_ref_check/{name}')
     assert image is not None, name
     print(name, image.shape)
@@ -1492,11 +1495,11 @@ for name in ('cam5.png', 'cam6.png'):
 ```
 Expected:
 ```
-  cam5      <- 20260629_172532_cam5.mp4
-  cam6      <- 20260629_172532_cam6.mp4
+  overhead5 <- swb_20260730-161710_7_overhead5.ts
+  overhead6 <- swb_20260730-161710_7_overhead6.ts
 wrote 2 reference textures -> /tmp/oh_ref_check
-cam5.png (2160, 3840, 3)
-cam6.png (2160, 3840, 3)
+overhead5.png (2160, 3840, 3)
+overhead6.png (2160, 3840, 3)
 ```
 
 - [ ] **Step 10: 清理并提交**
@@ -1512,7 +1515,7 @@ could find them by swapping one directory. That breaks down for overhead: the
 basenames are 05-02.jpg and C06.jpg — a designer's working filenames, which
 tell a reader nothing about which camera produced which frame — and writing a
 lossless decode back under a .jpg name re-encodes it (measured max channel
-error 35 on cam5, up to 22 in the stitched result).
+error 35 on overhead5, up to 22 in the stitched result).
 
 So exports are now <camera_id>.png and the renderer takes an optional
 positional tex_names list. Default behaviour is untouched: with tex_names=None
@@ -1644,7 +1647,7 @@ class RunProfileTest(unittest.TestCase):
             lines = config.read_text().splitlines()
             sources = [line.split("=", 1)[0].removeprefix("source.")
                        for line in lines if line.startswith("source.")]
-            self.assertEqual(sources, ["cam5", "cam6"])
+            self.assertEqual(sources, ["overhead5", "overhead6"])
             self.assertIn(f"asset={overhead.asset.as_posix()}", lines)
             self.assertIn(f"metrics={overhead.metrics.as_posix()}", lines)
 
@@ -2077,7 +2080,7 @@ from pathlib import Path
 from python.stitch import profiles, run as runner
 
 for name, session, cams in (
-    ('overhead', '20260629_172532', ('cam5', 'cam6')),
+    ('overhead', 'swb_20260730-161710_7', ('overhead5', 'overhead6')),
     ('underwater', 'swb_test', tuple(f'underA{i}' for i in range(16, 0, -1))),
 ):
     profile = profiles.get(name)
@@ -2099,7 +2102,7 @@ for name, session, cams in (
 ```
 Expected:
 ```
-overhead    lanes= 2 first=cam5      last=cam6      asset=overhead.swasset
+overhead    lanes= 2 first=overhead5 last=overhead6 asset=overhead.swasset
             config=overhead_metal.conf stamp=overhead.stamp
 underwater  lanes=16 first=underA16  last=underA1   asset=underwater.swasset
             config=underwater_metal.conf stamp=underwater.stamp
@@ -2696,7 +2699,7 @@ EOF
 **Interfaces:**
 - Consumes: Task 2 `profiles.get("overhead")`、Task 4 `export_ref_tex`、Task 6 dispatcher。
 - Produces: `outputs/overhead/mesh.json`（2 块，顺序 `Plane002`→`Plane001`）、
-  `stitch.png` / `grid.png` / `heat.png`（4255×515）、`ref_tex/cam5.png`、`ref_tex/cam6.png`、
+  `stitch.png` / `grid.png` / `heat.png`（4255×515）、`ref_tex/overhead5.png`、`ref_tex/overhead6.png`、
   `stitch.mp4`。后续任务不依赖这些产物的具体像素，只依赖 `mesh.json` 存在。
 
 - [ ] **Step 1: 写失败的测试**
@@ -2723,7 +2726,7 @@ class OverheadExtractTest(unittest.TestCase):
             # world X ascending: Plane002 starts at -35.22, Plane001 at -27.72
             self.assertEqual([m["node"] for m in meshes],
                              ["Plane002", "Plane001"])
-            # which pins cam5 -> 05-02.jpg and cam6 -> C06.jpg positionally
+            # which pins overhead5 -> 05-02.jpg and overhead6 -> C06.jpg positionally
             self.assertEqual([m["texture_basename"] for m in meshes],
                              ["05-02.jpg", "C06.jpg"])
 
@@ -2909,15 +2912,15 @@ Expected: 三张都是 `(515, 4255, 3)`。逐张打开 `/tmp/oh_*_view.png` 确�
 
 - `stitch.png`：一条连续水道，左端到右端泳道线不断裂、不错位；接缝处（约横向
   30% 位置）泳道浮标连续。
-- `heat.png`：只有两个色块（红=cam5 在左、绿=cam6 在右），中间一条竖直过渡带；
+- `heat.png`：只有两个色块（红=overhead5 在左、绿=overhead6 在右），中间一条竖直过渡带；
   **不应**出现水平方向的锯齿或斜向分界 —— 那说明 `seam_weights` 的竖直缝判据失效。
 - `grid.png`：三角网格与底图内容对齐。
 
 - [ ] **Step 11: 端到端 —— 参考贴图与真实首帧静图**
 
 ```bash
-DATA4K=/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K
-.venv/bin/python -m python.stitch overhead tex,still --real --video-dir "$DATA4K"
+OHDIR=/Users/penghaotian/Downloads/DATAS/SWIMMING/under-overhead-xlj/swb_20260730-161710_7
+.venv/bin/python -m python.stitch overhead tex,still --real --video-dir "$OHDIR"
 .venv/bin/python -c "
 import cv2
 for name in ('stitch_real', 'heat_real'):
@@ -2931,8 +2934,8 @@ for name in ('stitch_real', 'heat_real'):
 Expected:
 ```
 === overhead: tex ===
-  cam5      <- 20260629_172532_cam5.mp4
-  cam6      <- 20260629_172532_cam6.mp4
+  overhead5 <- swb_20260730-161710_7_overhead5.ts
+  overhead6 <- swb_20260730-161710_7_overhead6.ts
 wrote 2 reference textures -> .../outputs/overhead/ref_tex
 === overhead: still ===
 canvas 4255x515 @ 170.00px/m
@@ -2942,15 +2945,15 @@ stitch_real  (515, 4255, 3)
 heat_real    (515, 4255, 3)
 ```
 打开 `/tmp/oh_stitch_real_view.png`：应看到真实泳池画面（无黄色标定线），接缝处水面
-纹理连续。这是关键一步 —— **它验证「贴图↔相机」的位置对应是对的**：若 cam5/cam6 弄反，
+纹理连续。这是关键一步 —— **它验证「贴图↔相机」的位置对应是对的**：若 overhead5/overhead6 弄反，
 接缝会出现明显错位（探索阶段已渲图确认过反向的样子）。
 
 - [ ] **Step 12: 端到端 —— 离线拼接视频**
 
 ```bash
-DATA4K=/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K
+OHDIR=/Users/penghaotian/Downloads/DATAS/SWIMMING/under-overhead-xlj/swb_20260730-161710_7
 .venv/bin/python -m python.stitch overhead video \
-  --video-dir "$DATA4K" --seconds-float 10
+  --video-dir "$OHDIR" --seconds-float 10
 ```
 Expected（关键是第二行的 `NO time alignment`）：
 ```
@@ -3004,7 +3007,7 @@ the 6.8MB asset would have become committable. inputs/overhead/models/ now
 matches how inputs/underwater/models/ is handled.
 
 The extraction test asserts the mesh order (Plane002 then Plane001) rather than
-just the count, because that order is what pins cam5 to 05-02.jpg and cam6 to
+just the count, because that order is what pins overhead5 to 05-02.jpg and overhead6 to
 C06.jpg — the mapping is positional now, so a silent reordering would swap two
 cameras and show up only as a mis-registered seam.
 EOF
@@ -3061,7 +3064,7 @@ class OverheadAssetTest(unittest.TestCase):
             for index in range(header[7]):
                 record = CAMERA.unpack_from(data, header[2] + index * CAMERA.size)
                 ids.append(record[0].split(b"\0")[0].decode())
-            self.assertEqual(ids, ["cam5", "cam6"])
+            self.assertEqual(ids, ["overhead5", "overhead6"])
 
     def test_two_lanes_are_well_within_the_runtime_ceiling(self):
         # kMaxCameras is 16, sized for the underwater panorama; a two-lane line
@@ -3097,7 +3100,7 @@ Expected:
 ```
 === overhead: asset ===
 $ ... -m python.assets.compile_runtime_asset .../outputs/overhead/mesh.json \
-    .../build/assets/generated/overhead.swasset --camera-ids cam5 cam6 \
+    .../build/assets/generated/overhead.swasset --camera-ids overhead5 overhead6 \
     --ppm 170.0 --no-neg-v --blend-px 85.0 --crop-bottom none \
     --source-size 3840 2160 --clip-uv
 2 cameras, canvas 4251x511 - crop 0 -> logical 4251x511 -> encoded 4252x512
@@ -3151,11 +3154,11 @@ Expected:
 ```
 magic b'SW4KAST\x00' version 1
 logical 4251x511  encoded 4252x512  cameras 2
-  [0] id=cam5     node=Plane002   verts=  84 indices= 360 weight=(0,0) 1531x511
-  [1] id=cam6     node=Plane001   verts= 148 indices= 612 weight=(1446,0) 2805x511
+  [0] id=overhead5 node=Plane002   verts=  84 indices= 360 weight=(0,0) 1531x511
+  [1] id=overhead6 node=Plane001   verts= 148 indices= 612 weight=(1446,0) 2805x511
 file 4439352 bytes
 ```
-关键是 `cam5` 配 `Plane002`、`cam6` 配 `Plane001` —— 与 Task 7 的 mesh 顺序一致，
+关键是 `overhead5` 配 `Plane002`、`overhead6` 配 `Plane001` —— 与 Task 7 的 mesh 顺序一致，
 且两块权重的横向范围有重叠（1446 < 1531），正是那条竖直接缝。
 
 - [ ] **Step 5: 确认 stamp 写出且带 profile 名**
@@ -3206,9 +3209,9 @@ Expected: 若 `build/metal-release/swim_realtime` 已存在，打印
 - [ ] **Step 9: 实时跑 10 秒（无窗口，先确认能起来）**
 
 ```bash
-DATA4K=/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K
+OHDIR=/Users/penghaotian/Downloads/DATAS/SWIMMING/under-overhead-xlj/swb_20260730-161710_7
 .venv/bin/python -m python.stitch overhead live \
-  --video-dir "$DATA4K" --seconds 10 --no-window
+  --video-dir "$OHDIR" --seconds 10 --no-window
 ```
 Expected: 先打印 `wrote config .../inputs/configs/overhead_metal.conf (2 lanes, 0 with a start offset)`
 ——`0 with a start offset` 正是 `sync="none"` 的体现，且**不应**出现
@@ -3221,7 +3224,7 @@ Run:
 ```bash
 cat inputs/configs/overhead_metal.conf
 ```
-Expected: 恰好两条 `source.` 行（`source.cam5=` 与 `source.cam6=`，按此顺序），
+Expected: 恰好两条 `source.` 行（`source.overhead5=` 与 `source.overhead6=`，按此顺序），
 `asset=` 指向 `overhead.swasset`，`metrics=` 指向 `outputs/overhead/realtime.jsonl`，
 **没有**任何 `start_ms` 行。
 
@@ -3247,9 +3250,9 @@ Expected: 至少若干条 interval 记录；最后一条里渲染帧率接近 30
 - [ ] **Step 12: 带窗口跑一次，目视确认画面**
 
 ```bash
-DATA4K=/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K
+OHDIR=/Users/penghaotian/Downloads/DATAS/SWIMMING/under-overhead-xlj/swb_20260730-161710_7
 .venv/bin/python -m python.stitch overhead live \
-  --video-dir "$DATA4K" --seconds 15
+  --video-dir "$OHDIR" --seconds 15
 ```
 Expected: 弹出预览窗口，显示一条横向水道全景（4252×512 的宽幅），运动员游过接缝时
 不断裂。目视确认后窗口自行关闭。
@@ -3287,7 +3290,7 @@ No C++ changed. kMaxCameras is already 16 and camera identity already comes from
 the config's source.<id> declaration order, so a two-lane line is data the
 runtime accepts as-is.
 
-The asset test asserts the ids land in mesh order (cam5 on Plane002, cam6 on
+The asset test asserts the ids land in mesh order (overhead5 on Plane002, overhead6 on
 Plane001) rather than merely that two ids exist: the texture-to-camera mapping is
 positional now, so a reordering would silently swap the two cameras and only
 surface as a mis-registered seam in the rendered panorama.
@@ -3382,7 +3385,7 @@ pool 的提取与渲染函数（`python.assets.extract_fbx`、`python.validation
 | | underwater | overhead |
 | --- | --- | --- |
 | 模型 | `all.fbx`（16 块，含杂物需过滤） | `002.fbx`（2 块，干净） |
-| 相机 | `underA16` … `underA1` | `cam5`、`cam6` |
+| 相机 | `underA16` … `underA1` | `overhead5`、`overhead6` |
 | 片段 | `*_underAi.ts` | `*_camN.mp4` |
 | 源尺寸 | 1280×720 | 3840×2160 |
 | 每米像素 | 240 | 170 |
@@ -3396,7 +3399,7 @@ pool 的提取与渲染函数（`python.assets.extract_fbx`、`python.validation
 16 路关注同一名运动员。
 
 `overhead` 的两张贴图 `05-02.jpg` / `C06.jpg` 是设计师在 overhead5 / overhead6 机位标定
-的帧。用 SIFT + RANSAC 与 `20260629-4K` 的 cam5 / cam6 首帧配准，内点 99 / 187、单应近似
+的帧。用 SIFT + RANSAC 与 `under-overhead-xlj` 片段的首帧配准，内点 68 / 166、单应近似
 恒等（四角位移均值 2.9 px / 0.3 px），确认为同一对物理相机 —— 所以视频侧用这两路 4K。
 overhead5 / overhead6 自身目前只有 50 组快照 jpg，没有原始视频。
 
@@ -3431,13 +3434,13 @@ pwsh scripts/run_stitch.ps1 PROFILE STEPS [选项…]  # Windows
 # 俯视两路：离线静图与拼接视频
 ./scripts/run_stitch.sh overhead extract,still
 ./scripts/run_stitch.sh overhead tex,still --real \
-  --video-dir /path/to/20260629-4K
-./scripts/run_stitch.sh overhead video --video-dir /path/to/20260629-4K \
+  --video-dir /Users/penghaotian/Downloads/DATAS/SWIMMING/under-overhead-xlj/swb_20260730-161710_7
+./scripts/run_stitch.sh overhead video --video-dir /Users/penghaotian/Downloads/DATAS/SWIMMING/under-overhead-xlj/swb_20260730-161710_7 \
   --seconds-float 10
 
 # 俯视两路：实时
 ./scripts/run_stitch.sh overhead extract,asset,build,live \
-  --video-dir /path/to/20260629-4K --seconds 15
+  --video-dir /Users/penghaotian/Downloads/DATAS/SWIMMING/under-overhead-xlj/swb_20260730-161710_7 --seconds 15
 ```
 
 常用选项：`--seconds N`（live 时长）、`--seconds-float N`（video 时长）、`--encode`、
@@ -3454,7 +3457,7 @@ Windows 用 Visual Studio 17 2022 (x64) + `d3d11` 后端 +
 
 网格按每块世界 X 最小值升序排列（左→右），不依赖 FBX 节点声明顺序。相机身份由此**按位置**
 对应 —— profile 的 `camera_ids` 与 mesh 顺序一一配对，不解析贴图文件名（overhead 的
-`05-02.jpg` / `C06.jpg` 无从解析出 `cam5` / `cam6`）。
+`05-02.jpg` / `C06.jpg` 无从解析出 `overhead5` / `overhead6`）。
 
 `all.fbx` 含全部 16 块平面，但同时夹带无纹理的支架框、泳道标记条与重复网格，所以
 underwater 的 profile 打开 `planes_only`：只保留「每个纹理一块、位于泳池 Y 带内的全高
@@ -3464,7 +3467,7 @@ underwater 的 profile 打开 `planes_only`：只保留「每个纹理一块、�
 或 `ANNOTATION_PREVIEW_DATASET_ROOT` 覆盖；overhead 取 `002.fbm` 里设计师的标定图）。
 `--real` 换成 `tex` 导出的相机首帧。参考贴图按 `<camera_id>.png` 命名而非沿用 mesh 的
 `texture_basename`：后者对 overhead 是设计师的工作文件名（看不出哪台相机），且把无损解码
-写回 `.jpg` 会二次编码（实测 cam5 最大通道误差 35）。
+写回 `.jpg` 会二次编码（实测 overhead5 最大通道误差 35）。
 
 `--full-res`（underwater 默认开）输出高度对齐源图高度、宽度等比缩放；缩放前会**自动砍掉
 最下方存在黑色（无纹理）像素的整行**（矮平面的透视地面缺口），再等比缩放。overhead 两块
@@ -3507,12 +3510,13 @@ macOS/Metal 实测（underwater）：16 路 1280×720 MPEG-TS → 6002×656，�
 - 拼接线路（`python/stitch/`）的相机身份是**位置**对应：profile 的 `camera_ids` 按顺序
   配 mesh（world-X 升序）。改动 FBX 里平面的相对位置、或改 profile 的 id 顺序，会把相机
   错配到别的平面上，症状是接缝处错位而不是报错。
-- overhead 线路的视频侧用 `20260629-4K` 的 cam5/cam6（已用 SIFT 配准确认与设计师标定的
-  overhead5/overhead6 同机位）。overhead5/overhead6 自身只有 50 组快照 jpg，没有原始视频；
-  拿到后只需在 `profiles.py` 新增一条记录（同一个 `002.fbx`，换 `camera_ids` 与
-  `clip_suffix`，`sync` 改回 `manifest`）。
-- 4K 两路实时的解码负载明显高于 16 路 720p（像素总量约 2.4 倍），实测帧率见
+- overhead 的 7 组样本每组只有 12 秒（水下早期样本有 30 秒的）。`live --seconds` 超过 12
+  时，各路会在 `loop_period_ms` 处回卷重播，而不是走到黑帧替换。
+- overhead 两路 4K 的解码负载明显高于 16 路 720p（像素总量约 2.4 倍），实测帧率见
   `outputs/overhead/realtime.jsonl`。
+- 每组 overhead 样本与一组水下样本的 `align_start_ms` 相差 1~2ms（如 overhead 的
+  `swb_20260730-161710_7` 对水下的 `swb_20260730-161710_8`）。两条线路各自按自己的
+  manifest 对齐，本轮**不做**跨线路的画面级同步 —— 那是下一个任务。
 ```
 
 - [ ] **Step 6: 运行测试确认通过**
@@ -3584,7 +3588,7 @@ which no longer exists is worse than no documentation, and this one had twenty
 such references.
 
 Records the two things a reader cannot infer from the code: that the overhead
-textures were pinned to cam5/cam6 by SIFT registration rather than by their
+textures were pinned to overhead5/overhead6 by SIFT registration rather than by their
 filenames, and that camera identity is positional — so reordering planes in the
 FBX mis-registers a seam instead of raising.
 EOF
