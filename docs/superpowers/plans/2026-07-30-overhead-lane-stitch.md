@@ -13,7 +13,14 @@
 - 设计文档：`docs/superpowers/specs/2026-07-30-overhead-lane-stitch-design.md`，本计划的每个数值都以它为准。
 - 解释器一律 `.venv/bin/python`；测试命令一律 `.venv/bin/python -m unittest`（本仓库**没有** pytest）。
 - 工作目录一律仓库根 `/Users/penghaotian/Documents/pythonCode/temp2025.6/probe_work/swim_fbx_demo`。
-- 基线：`.venv/bin/python -m unittest discover -s tests/python -t .` 当前 **180 passed**，其中 `test_underwater.py` **33 个**。任何任务结束时这个数字只能增不能减。
+- 基线：`.venv/bin/python -m unittest discover -s tests/python -t .` 跑 **180 个用例**。
+  其中 **3 个 water_entry 用例常态报错**（`test_water_entry.CollectFilterTest` 的
+  `test_allows_unverified_entry_when_requested`、
+  `test_max_offset_excludes_late_frames_from_the_denominator`、
+  `test_skips_clips_whose_entry_frame_is_unverified`），原因是数据集目录
+  `/Users/penghaotian/Downloads/DATAS/SWIMMING/swimming-gz-bad/` 已不在本机，
+  与本计划无关、不在范围内。**每个任务的通过标准是**：用例总数达到该任务的目标值，
+  且失败集合恰好是这 3 个、没有多出任何一个。
 - 不改任何 C++ 代码、不改 `CMakeLists.txt` 的 `pool_4k.swasset` 规则、不改 `python/validation/`、不改 `python/water_entry/`、不改 `python/annotation_preview/`。
 - pool 六路**不进** profile 注册表（两排布局、相机序非 world-X 升序、距离变换羽化）。
 - overhead profile 的既定数值：`ppm=170.0`、`blend_px=85.0`、`full_res=False`、`crop_bottom="none"`、`clip_uv=True`、`planes_only=False`、`sync="none"`、`source_size=(3840, 2160)`、`camera_ids=("cam5", "cam6")`、`clip_suffix=".mp4"`。
@@ -705,8 +712,10 @@ Run:
 Expected:
 ```
 Ran 192 tests in ...s
-OK
+FAILED (errors=3)
 ```
+那 3 个错误必须恰好是 `test_water_entry.CollectFilterTest` 的三个数据集缺失用例
+（见 Global Constraints）；多出任何一个失败都算本任务未通过。
 180 基线 + 12 个新用例。
 
 - [ ] **Step 6: 手工核对 profile 与现状是否一致**
@@ -1034,8 +1043,10 @@ Run:
 Expected:
 ```
 Ran 194 tests in ...s
-OK
+FAILED (errors=3)
 ```
+那 3 个错误必须恰好是 `test_water_entry.CollectFilterTest` 的三个数据集缺失用例
+（见 Global Constraints）；多出任何一个失败都算本任务未通过。
 192（Task 2 后）− 1（删掉的 `camera_of` 用例）+ 3（新增）= 194。
 
 - [ ] **Step 9: 冒烟测试 —— 水下离线视频仍按 manifest 对齐**
@@ -1453,8 +1464,10 @@ Run:
 Expected:
 ```
 Ran 200 tests in ...s
-OK
+FAILED (errors=3)
 ```
+那 3 个错误必须恰好是 `test_water_entry.CollectFilterTest` 的三个数据集缺失用例
+（见 Global Constraints）；多出任何一个失败都算本任务未通过。
 194（Task 3 后）+ 6 = 200。
 
 - [ ] **Step 8: 冒烟测试 —— 水下参考贴图改名后静图仍一致**
@@ -2076,8 +2089,10 @@ Run:
 Expected:
 ```
 Ran 206 tests in ...s
-OK
+FAILED (errors=3)
 ```
+那 3 个错误必须恰好是 `test_water_entry.CollectFilterTest` 的三个数据集缺失用例
+（见 Global Constraints）；多出任何一个失败都算本任务未通过。
 200（Task 4 后）+ 6 = 206。
 
 - [ ] **Step 12: 冒烟测试 —— 两条线路的 config 都对**
@@ -2653,8 +2668,10 @@ Run:
 Expected:
 ```
 Ran 213 tests in ...s
-OK
+FAILED (errors=3)
 ```
+那 3 个错误必须恰好是 `test_water_entry.CollectFilterTest` 的三个数据集缺失用例
+（见 Global Constraints）；多出任何一个失败都算本任务未通过。
 206（Task 5 后）+ 7 = 213。
 
 - [ ] **Step 13: 冒烟测试 —— 水下静图经新入口仍逐像素一致**
@@ -2873,8 +2890,10 @@ Run:
 Expected:
 ```
 Ran 216 tests in ...s
-OK
+FAILED (errors=3)
 ```
+那 3 个错误必须恰好是 `test_water_entry.CollectFilterTest` 的三个数据集缺失用例
+（见 Global Constraints）；多出任何一个失败都算本任务未通过。
 213（Task 6 后）+ 3 = 216。
 
 - [ ] **Step 8: 端到端 —— 提取网格**
@@ -3298,8 +3317,10 @@ Run:
 Expected:
 ```
 Ran 218 tests in ...s
-OK
+FAILED (errors=3)
 ```
+那 3 个错误必须恰好是 `test_water_entry.CollectFilterTest` 的三个数据集缺失用例
+（见 Global Constraints）；多出任何一个失败都算本任务未通过。
 216（Task 7 后）+ 2 = 218。
 
 - [ ] **Step 15: 清理并提交**
@@ -3563,8 +3584,10 @@ Run:
 Expected:
 ```
 Ran 220 tests in ...s
-OK
+FAILED (errors=3)
 ```
+那 3 个错误必须恰好是 `test_water_entry.CollectFilterTest` 的三个数据集缺失用例
+（见 Global Constraints）；多出任何一个失败都算本任务未通过。
 216（Task 7 后）+ 2（Task 8）+ 2（Task 9）= 220。
 
 - [ ] **Step 8: 全仓扫一遍残留引用**
