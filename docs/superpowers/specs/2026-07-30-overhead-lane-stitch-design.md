@@ -124,7 +124,7 @@ class Profile:
     blend_px: float
     clip_uv: bool                  # 排除 UV 落在源图外的像素
     crop_bottom: str               # "auto" / "none" / "N"
-    planes_only: bool              # all.fbx 需滤杂物；002.fbx 不需要
+    planes_only: bool              # all.fbx 需滤杂物；002.fbx 不能开（见下）
     sync: str                      # "manifest" / "none"
     source_size: tuple[int, int]   # (1280,720) / (3840,2160)
     ref_tex: str                   # 参考贴图来源："snapshot" / "video"
@@ -159,6 +159,11 @@ class Profile:
 `clip_uv` / `crop_bottom` 的两条取值都对齐 `run.py` 现有默认（`--no-clip-uv` 反向开关
 默认 True、`--crop-bottom auto`），overhead 只把 `crop_bottom` 改成 `"none"`（理由见
 「几何参数依据」）。
+
+`planes_only` 对 overhead 必须是 `False`，不只是「不需要」而是「不能开」：
+`select_pool_planes` 的默认 `band=(-11.6, -8.0)` 是水下平面所在的 Y 带，而 002.fbx 跨
+Y `[20.47, 23.47]`（俯视机位在池上方）。实测打开它会滤掉全部两块、提取以
+`no pool plane found` 退出。
 
 两个易混点在 profile 里被显式区分，而不是像现在那样散在 shell 变量与 CLI 默认值里：
 

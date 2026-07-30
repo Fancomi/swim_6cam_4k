@@ -19,6 +19,35 @@
 - overhead profile 的既定数值：`ppm=170.0`、`blend_px=85.0`、`full_res=False`、`crop_bottom="none"`、`clip_uv=True`、`planes_only=False`、`sync="none"`、`source_size=(3840, 2160)`、`camera_ids=("cam5", "cam6")`、`clip_suffix=".mp4"`。
 - underwater profile 的数值必须与现状逐一相等：`ppm=240.0`、`blend_px=120.0`、`full_res=True`、`crop_bottom="auto"`、`clip_uv=True`、`planes_only=True`、`sync="manifest"`、`source_size=(1280, 720)`、`camera_ids=underA16…underA1`、`clip_suffix=".ts"`。
 - 4K 数据集：`/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K`，会话前缀 `20260629_172532`，本计划只用其中 `cam5`/`cam6` 两路。
+- 测试里构造「两块平面 mesh JSON」的 helper 只写一份，放在 `tests/python/test_stitch.py`
+  的**模块层**（与文件里已有的 `_mesh` / `_band_plane` / `_strip` 同级），三个测试类共用：
+
+  ```python
+  def _plane(node, tex, x0, width=1.0, y0=0.0, y1=1.0):
+      """One quad, two triangles, UV spanning the full texture."""
+      corners = [
+          [{"pos": [x0, y0], "uv": [0.0, 0.0]},
+           {"pos": [x0 + width, y0], "uv": [1.0, 0.0]},
+           {"pos": [x0 + width, y1], "uv": [1.0, 1.0]}],
+          [{"pos": [x0, y0], "uv": [0.0, 0.0]},
+           {"pos": [x0 + width, y1], "uv": [1.0, 1.0]},
+           {"pos": [x0, y1], "uv": [0.0, 1.0]}],
+      ]
+      return {"node": node, "texture_basename": tex, "uvset": "UVChannel_1",
+              "const_axis": 2, "kept_axes": [0, 1], "spans": [width, y1 - y0, 0],
+              "triangles": corners}
+
+
+  def _two_plane_json(td, planes):
+      """Write a mesh JSON of `planes` (already built by _plane) and return it."""
+      import json
+
+      path = Path(td) / "mesh.json"
+      path.write_text(json.dumps({"source": "test", "meshes": list(planes)}))
+      return path
+  ```
+
+  Task 3 建立这两个函数；Task 4 与 Task 8 直接调用，不再各写一份。
 - 提交信息用英文，正文说清「为什么」；不写 `Generated with` 之类的尾注。
 
 ---
@@ -623,7 +652,11 @@ PROFILES = {
         # Both planes are full height: the measured ragged tail is 2 rows, which
         # is the renderer's own margin padding, not a perspective floor gap.
         crop_bottom="none",
-        # 002.fbx carries exactly the two planes, no rigging or lane strips.
+        # 002.fbx carries exactly the two planes, no rigging or lane strips —
+        # and the filter is not merely unnecessary here, it is wrong:
+        # select_pool_planes keeps meshes whose world-Y sits inside the pool band
+        # (-11.6, -8.0) where the underwater planes are, while this overhead
+        # model spans Y [20.47, 23.47]. Turning it on drops both planes.
         planes_only=False,
         # The 4K session has no usable wall clock: sync_summary reports
         # waiting_for_syncbridge_events and every mapping offset_us is null. The
@@ -751,7 +784,37 @@ EOF
 
 先把 `tests/python/test_stitch.py` 里现有的
 `VideoAlignmentTest.test_camera_of_parses_texture_basename` 整个方法**删掉**（它测的是
-即将消失的函数），再在文件末尾追加：
+即将消失的函数）。
+
+再在**模块层**（文件顶部现有 `_mesh` / `_band_plane` / `_strip` 旁边）加两个共用 helper
+—— Task 4 与 Task 8 会直接调用它们，所以放模块层而不是某个类里：
+
+```python
+def _plane(node, tex, x0, width=1.0, y0=0.0, y1=1.0):
+    """One quad, two triangles, UV spanning the full texture."""
+    corners = [
+        [{"pos": [x0, y0], "uv": [0.0, 0.0]},
+         {"pos": [x0 + width, y0], "uv": [1.0, 0.0]},
+         {"pos": [x0 + width, y1], "uv": [1.0, 1.0]}],
+        [{"pos": [x0, y0], "uv": [0.0, 0.0]},
+         {"pos": [x0 + width, y1], "uv": [1.0, 1.0]},
+         {"pos": [x0, y1], "uv": [0.0, 1.0]}],
+    ]
+    return {"node": node, "texture_basename": tex, "uvset": "UVChannel_1",
+            "const_axis": 2, "kept_axes": [0, 1], "spans": [width, y1 - y0, 0],
+            "triangles": corners}
+
+
+def _two_plane_json(td, planes):
+    """Write a mesh JSON of `planes` (already built by _plane) and return it."""
+    import json
+
+    path = Path(td) / "mesh.json"
+    path.write_text(json.dumps({"source": "test", "meshes": list(planes)}))
+    return path
+```
+
+最后在文件末尾追加：
 
 ```python
 class VideoCameraOrderTest(unittest.TestCase):
@@ -759,34 +822,14 @@ class VideoCameraOrderTest(unittest.TestCase):
     texture filename: the overhead textures are 05-02.jpg and C06.jpg, which no
     naming rule maps to cam5/cam6."""
 
-    def _mesh_json(self, td, basenames):
-        import json
-
-        def plane(basename, x0):
-            quad = [
-                [{"pos": [x0, 0.0], "uv": [0.0, 0.0]},
-                 {"pos": [x0 + 1.0, 0.0], "uv": [1.0, 0.0]},
-                 {"pos": [x0 + 1.0, 1.0], "uv": [1.0, 1.0]}],
-                [{"pos": [x0, 0.0], "uv": [0.0, 0.0]},
-                 {"pos": [x0 + 1.0, 1.0], "uv": [1.0, 1.0]},
-                 {"pos": [x0, 1.0], "uv": [0.0, 1.0]}],
-            ]
-            return {"node": basename, "texture_basename": basename,
-                    "uvset": "map1", "const_axis": 2, "kept_axes": [0, 1],
-                    "spans": [1, 1, 0], "triangles": quad}
-
-        path = td / "mesh.json"
-        path.write_text(json.dumps({"source": "x", "meshes": [
-            plane(basenames[0], 0.0), plane(basenames[1], 0.9)]}))
-        return path
-
     def test_camera_count_must_match_mesh_count(self):
         import tempfile
         from python.stitch.render_video import render_video
 
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
-            data = self._mesh_json(td, ["05-02.jpg", "C06.jpg"])
+            data = _two_plane_json(td, [_plane("a", "05-02.jpg", 0.0),
+                                        _plane("b", "C06.jpg", 0.9)])
             with self.assertRaises(SystemExit) as caught:
                 render_video(data, td, td / "out.mp4",
                              camera_ids=("cam5",),          # one id, two meshes
@@ -809,7 +852,8 @@ class VideoCameraOrderTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
-            data = self._mesh_json(td, ["05-02.jpg", "C06.jpg"])
+            data = _two_plane_json(td, [_plane("a", "05-02.jpg", 0.0),
+                                        _plane("b", "C06.jpg", 0.9)])
             with self.assertRaises(RuntimeError):
                 render_video(data, td, td / "out.mp4",
                              camera_ids=("cam5", "cam6"),
@@ -1138,27 +1182,6 @@ class RenderTexNamesTest(unittest.TestCase):
     asked, so one renderer serves both the designer's calibration frames and the
     camera-named reference exports."""
 
-    def _two_plane_json(self, td):
-        import json
-
-        def plane(basename, x0):
-            quad = [
-                [{"pos": [x0, 0.0], "uv": [0.0, 0.0]},
-                 {"pos": [x0 + 1.0, 0.0], "uv": [1.0, 0.0]},
-                 {"pos": [x0 + 1.0, 1.0], "uv": [1.0, 1.0]}],
-                [{"pos": [x0, 0.0], "uv": [0.0, 0.0]},
-                 {"pos": [x0 + 1.0, 1.0], "uv": [1.0, 1.0]},
-                 {"pos": [x0, 1.0], "uv": [0.0, 1.0]}],
-            ]
-            return {"node": basename, "texture_basename": basename,
-                    "uvset": "map1", "const_axis": 2, "kept_axes": [0, 1],
-                    "spans": [1, 1, 0], "triangles": quad}
-
-        path = td / "mesh.json"
-        path.write_text(json.dumps({"source": "x", "meshes": [
-            plane("05-02.jpg", 0.0), plane("C06.jpg", 0.9)]}))
-        return path
-
     def test_positional_names_render_the_same_as_basenames(self):
         import tempfile
         import cv2
@@ -1167,7 +1190,8 @@ class RenderTexNamesTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
-            data = self._two_plane_json(td)
+            data = _two_plane_json(td, [_plane("a", "05-02.jpg", 0.0),
+                                        _plane("b", "C06.jpg", 0.9)])
             left = np.full((16, 32, 3), 90, np.uint8)
             right = np.full((16, 32, 3), 180, np.uint8)
             # same pixels under both naming schemes, both lossless
@@ -1191,7 +1215,8 @@ class RenderTexNamesTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
-            data = self._two_plane_json(td)
+            data = _two_plane_json(td, [_plane("a", "05-02.jpg", 0.0),
+                                        _plane("b", "C06.jpg", 0.9)])
             with self.assertRaises(SystemExit) as caught:
                 render_stills(data, td, td / "out.png", None, ppm=64.0,
                               tex_names=["cam5.png"])
@@ -2737,16 +2762,19 @@ class OverheadExtractTest(unittest.TestCase):
 
     @unittest.skipUnless(HAS_FBX, "FBX SDK not available")
     @unittest.skipUnless(MODEL_002.is_file(), "002.fbx not present")
-    def test_planes_only_is_unnecessary_for_this_model(self):
-        # 002.fbx carries exactly the two planes — no rigging, no lane strips —
-        # so the profile sets planes_only=False. Prove the filter is a no-op
-        # here rather than trusting the flag.
+    def test_planes_only_would_reject_this_model(self):
+        # The profile sets planes_only=False, and that is not merely tidiness:
+        # select_pool_planes keeps meshes whose world-Y falls inside the pool
+        # band (-11.6, -8.0), which is where the underwater planes sit. 002.fbx
+        # is an overhead model spanning Y [20.47, 23.47], so the filter would
+        # drop both planes and extraction would exit with "no pool plane found".
         import tempfile
-        from python.stitch.extract import extract_to_json
+        from python.stitch.extract import extract_to_json, select_pool_planes
 
         with tempfile.TemporaryDirectory() as td:
-            plain = extract_to_json(MODEL_002, Path(td) / "a.json", TEXDIR_002)
-        self.assertEqual(len(plain), 2)
+            meshes = extract_to_json(MODEL_002, Path(td) / "m.json", TEXDIR_002)
+        self.assertEqual(len(meshes), 2)
+        self.assertEqual(select_pool_planes(meshes), [])
 ```
 
 - [ ] **Step 2: 运行测试确认跳过（模型还没落位）**
@@ -3028,29 +3056,6 @@ class OverheadAssetTest(unittest.TestCase):
     """The compiled asset must carry the profile's camera ids in mesh order, and
     the two lines must not collide in the generated directory."""
 
-    def _mesh_json(self, td):
-        import json
-
-        def plane(node, basename, x0, width):
-            quad = [
-                [{"pos": [x0, 0.0], "uv": [0.0, 0.0]},
-                 {"pos": [x0 + width, 0.0], "uv": [1.0, 0.0]},
-                 {"pos": [x0 + width, 3.0], "uv": [1.0, 1.0]}],
-                [{"pos": [x0, 0.0], "uv": [0.0, 0.0]},
-                 {"pos": [x0 + width, 3.0], "uv": [1.0, 1.0]},
-                 {"pos": [x0, 3.0], "uv": [0.0, 1.0]}],
-            ]
-            return {"node": node, "texture_basename": basename,
-                    "uvset": "UVChannel_1", "const_axis": 2,
-                    "kept_axes": [0, 1], "spans": [width, 3, 0],
-                    "triangles": quad}
-
-        path = td / "mesh.json"
-        path.write_text(json.dumps({"source": "002.fbx", "meshes": [
-            plane("Plane002", "05-02.jpg", 0.0, 10.0),
-            plane("Plane001", "C06.jpg", 7.5, 17.5)]}))
-        return path
-
     def test_camera_ids_are_written_in_mesh_order(self):
         import tempfile
         from python.assets.asset_format import CAMERA, HEADER
@@ -3061,7 +3066,11 @@ class OverheadAssetTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
             asset = td / "overhead.swasset"
-            compile_asset(self._mesh_json(td), asset, overhead.camera_ids,
+            # real proportions: 10m and 17.5m planes overlapping 2.5m, 3m tall
+            mesh = _two_plane_json(td, [
+                _plane("Plane002", "05-02.jpg", 0.0, 10.0, 0.0, 3.0),
+                _plane("Plane001", "C06.jpg", 7.5, 17.5, 0.0, 3.0)])
+            compile_asset(mesh, asset, overhead.camera_ids,
                           overhead.ppm, neg_v=False,
                           blend_px=overhead.blend_px, clip_uv=overhead.clip_uv,
                           source_size=overhead.source_size,
