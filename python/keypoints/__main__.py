@@ -3,11 +3,12 @@
 import argparse
 from pathlib import Path
 
-from python.assets.keypoint_preview import DatasetFormatError, generate_preview
+from python.common.paths import OUTPUTS
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+from python.keypoints.preview import DatasetFormatError, generate_preview
+
 DEFAULT_DATASET_ROOT = Path("/Users/penghaotian/Downloads/DATAS/SWIMMING/swim-6cam-4k/swim-6cam-4k-2dkp")
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "keypoint_preview"
+DEFAULT_OUTPUT_DIR = OUTPUTS / "keypoint_preview"
 
 
 def main() -> None:

@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# 入水检测机位（water entry）难例筛选全流程：预测 -> 选帧 -> 复核页 -> 交付包。
+# 入水检测机位（water entry）难例筛选全流程：预测 -> 选帧 -> 质检页 -> 交付包。
+#
+# 与三条拼接线无关的第四类相机：水下 0 号平面正上方的单个 Orbbec 机位，
+# 用于仰泳蹬壁出发的空中反弓与入水姿态识别。代码在 python/water_entry/。
 #
 # 新增片段后重跑这一个脚本即可全量刷新：predict 会把新片段一并纳入（manifest.csv
 # 是唯一的片段清单来源），后续每一步都从 predict 的产物重算，没有增量状态。
@@ -7,12 +10,15 @@
 # 筛选阈值的默认值来自 python/water_entry/select_frames.py 的 DEFAULT_* 常量，
 # 本脚本不复制它们——要改口径就改那里，两个入口同时生效。
 #
+# 数据集根用 WATER_ENTRY_DATASET_ROOT 覆盖，产物写入 outputs/water_entry/。
+#
 # 用法:
 #   ./scripts/run_water_entry.sh                    # 全流程，默认参数
 #   ./scripts/run_water_entry.sh --skip-predict     # 复用已有预测，只重跑筛选与出包
 #   ./scripts/run_water_entry.sh --kp 0.10          # 收紧关键点分歧阈值（选出更少）
 #   ./scripts/run_water_entry.sh --preview 0        # 质检页渲染全部候选（默认前 120）
 #   ./scripts/run_water_entry.sh --no-package       # 不出交付包
+#   单步复核页：python -m python.water_entry.review --clips 20260725-160224
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -31,7 +37,7 @@ SKIP_PREDICT=0
 DO_PACKAGE=1
 
 usage() {
-  sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while (($#)); do

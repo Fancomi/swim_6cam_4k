@@ -20,13 +20,13 @@
 连续 5 帧几乎相同的画面都送去标注。
 """
 import argparse
-import csv
 import json
 import os
 from collections import defaultdict
 
 import numpy as np
 
+from python.common.tables import write_rows
 from python.water_entry import common as C
 
 MODEL_A = "swimup"
@@ -358,11 +358,9 @@ def main():
         summarize(rows, totals, "取分数最高 %d 帧后" % args.top)
 
     rows.sort(key=lambda r: (-r["score"], r["clip"], r["frame"]))
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
-    with open(args.output, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=CANDIDATE_COLS, extrasaction="ignore")
-        w.writeheader()
-        w.writerows(rows)
+    # The rows keep the per-signal diagnostics the summary printed; only the
+    # published columns go to disk.
+    write_rows(args.output, CANDIDATE_COLS, rows, drop_extra=True)
     print("\ndone -> %s（%d 帧）" % (args.output, len(rows)))
 
 

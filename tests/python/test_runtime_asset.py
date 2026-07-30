@@ -4,7 +4,7 @@ import tempfile
 import unittest
 import zlib
 
-from python.assets.asset_format import (
+from python.stitch.asset_format import (
     CAMERA,
     HEADER,
     INDEX,
@@ -14,7 +14,7 @@ from python.assets.asset_format import (
     WEIGHT,
     read_header,
 )
-from python.assets.compile_runtime_asset import compile_asset
+from python.stitch.asset import compile_asset
 
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "python" / "tiny_mesh.json"
@@ -23,7 +23,9 @@ FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "python" / "tiny_me
 class RuntimeAssetTest(unittest.TestCase):
     def compile_fixture(self, directory):
         output = Path(directory) / "tiny.swasset"
-        compile_asset(FIXTURE, output, ("cam3", "cam2"), ppm=10.0)
+        # neg_v=True is the pool orientation, which is what the expected weight
+        # rectangles below were measured against.
+        compile_asset(FIXTURE, output, ("cam3", "cam2"), ppm=10.0, neg_v=True)
         return output
 
     def rewrite_header(self, path, field, value):

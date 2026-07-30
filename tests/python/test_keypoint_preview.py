@@ -9,8 +9,8 @@ from unittest.mock import patch
 import cv2
 import numpy as np
 
-from python.assets.build_keypoint_preview import main
-from python.assets.keypoint_preview import (
+from python.keypoints.__main__ import main
+from python.keypoints.preview import (
     DatasetFormatError,
     Rect,
     discover_dataset,
@@ -224,7 +224,7 @@ class GeneratorTests(unittest.TestCase):
             payload = {"images": [{"file_name": "frame.png", "width": 200, "height": 200}], "annotations": [{"image_idx": 0, "persons": [{"id": 1, "keypoints": [[80, 80, 2]]}, {"id": 2, "keypoints": [[120, 120, 2]]}]}]}
             (session / "session.json").write_text(json.dumps(payload), encoding="utf-8")
 
-            with patch("python.assets.keypoint_preview.cv2.imread", wraps=cv2.imread) as imread:
+            with patch("python.keypoints.preview.cv2.imread", wraps=cv2.imread) as imread:
                 summary = generate_preview(root, output)
 
             self.assertEqual(summary.generated_count, 2)
@@ -260,7 +260,7 @@ class GeneratorTests(unittest.TestCase):
             write_single_frame_dataset(root, [{"id": 1, "keypoints": [[100, 100, 2]]}])
             output = Path(temporary_directory) / "preview"
 
-            with patch("python.assets.keypoint_preview.cv2.imread", side_effect=cv2.error("decode failed")):
+            with patch("python.keypoints.preview.cv2.imread", side_effect=cv2.error("decode failed")):
                 summary = generate_preview(root, output)
 
             report = json.loads((output / "report.json").read_text(encoding="utf-8"))
@@ -285,7 +285,7 @@ class GeneratorTests(unittest.TestCase):
                 Path(destination).write_bytes(b"new partial crop")
                 return False
 
-            with patch("python.assets.keypoint_preview.cv2.imwrite", side_effect=partially_write_then_fail):
+            with patch("python.keypoints.preview.cv2.imwrite", side_effect=partially_write_then_fail):
                 with self.assertRaisesRegex(OSError, "cannot write preview crop"):
                     generate_preview(root, output)
 

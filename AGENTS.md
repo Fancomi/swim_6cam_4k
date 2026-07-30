@@ -4,9 +4,20 @@
 
 本仓库把泳池 FBX 的平面网格与 UV 编译成 GPU 运行时资产，再用三个原生后端做实时拼接。实时核心是可移植 C++20，位于 `cpp/core/`（`swim_core`）；后端在 `cpp/backends/` 下按平台隔离：`metal/`（macOS，VideoToolbox + Metal）、`d3d11/`（Windows，Media Foundation + Direct3D 11）、`cudagl/`（Windows，NVDEC + OpenGL）。三者通过 `cpp/core/include/swim/core/backend.hpp` 的 `IBackend`/`ISource`/`IRenderer` 契约接入，并用 `BackendRegistry` 按名字自注册，不允许后端专有类型泄漏进 `cpp/core/`。
 
-启动脚本按**任务**命名，不按技术栈：`run_6cam_4k.{ps1,sh}` 是六路 4K 实时拼接的 Windows / macOS 两端，`run_underwater.sh` 与 `scripts\run_win.bat under` 是水下 16 路，`run_offline.sh` 是所有非实时工具（静图/4K 渲染、FBX 提取、资产编译、标注预览），`run_water_entry.sh` 是入水检测机位的筛例流程。`run_win.bat` 是 Windows 上的双击入口，两条实时链路都从它进。新增脚本请延续这个口径——旧名 `run_metal.sh`/`run_python.sh` 用后端和语言命名，看不出各自负责什么。
+仓库有**四条互不交叉的链路**，一个脚本一条，改哪条只看那一条：
 
-离线资产与验证工具在 `python/`：`assets/` 提取 FBX 并编译 `.swasset`，`underwater/` 是与六路 pool 任务隔离的 16 路水下链路，`water_entry/` 是入水检测机位，`validation/` 是参考渲染器。启动脚本在 `scripts/`，运行时 config 在 `inputs/configs/`，测试在 `tests/`（`cpp/`、`python/`、`fixtures/`）。`build/` 与 `outputs/` 是本机产物，不放手写源码或文档。
+| 链路 | 入口 | 代码 |
+| --- | --- | --- |
+| 相机拼接（pool / underwater / overhead 三条相机线） | `scripts/run_stitch.{sh,ps1}` | `python/stitch/` + `cpp/` |
+| 入水检测机位 | `scripts/run_water_entry.sh` | `python/water_entry/` |
+| 数据集标注 | `scripts/run_label.sh` | `python/labeling/`、`python/keypoints/` |
+| 性能取证 | `scripts/run_bench.sh` | `python/benchmarks/` |
+
+`scripts\run_win.bat` 是 Windows 双击入口，走第一条链路。每个脚本不带参数运行会打印自己的完整用法，说明只存在于脚本顶部一处（用法函数把那段注释打出来，不再复制）。新增脚本请延续「一条链路一个入口」的口径，不要再按平台或语言拆。
+
+Python 侧一个包一件事：`common/` 是跨链路共用的路径 / 图像 IO / CSV / HTML 页面骨架，`fbx_tools/` 是**唯一** import `fbx` 的地方，其余四个包对应上表四条链路。`tests/python/test_layout.py` 把这些约束写成了断言——包清单、每个包必须有 docstring、`import fbx` 只允许出现在 `fbx_tools/`、除 `common/paths.py` 外任何模块都不许自己算仓库根。测试在 `tests/`（`cpp/`、`python/`、`fixtures/`），运行时 config 在 `inputs/configs/`，`build/` 与 `outputs/` 是本机产物，不放手写源码或文档。
+
+三条相机线共用一套拼接代码，**差异全部是 `python/stitch/profiles.py` 里的数据**（模型、相机 id、网格排序、每米像素、融合方式、时间对齐策略）。加第四条线应当只加一条 profile 记录；如果它需要一个新字段，那个字段本身就是需要先想清楚的东西。不要在 `python/stitch/` 的其他模块里按线路名分支。
 
 相机数量、相机 ID、输出尺寸都是**数据而非代码**：`kMaxCameras = 16`（`cpp/core/include/swim/core/camera_capacity.hpp`），config 里 `source.<id>=<path>` 的声明顺序即通道顺序。新增机位布局应通过 config + `.swasset` 表达，不要在 C++ 里加分支。
 
@@ -26,17 +37,17 @@ scripts\install.bat check      :: 只体检，不改动任何东西
 cmake -S . -B build/win-d3d11 -G "Visual Studio 17 2022" -A x64 -DPython3_EXECUTABLE=.venv\Scripts\python.exe
 cmake --build build/win-d3d11 --config Release --target swim_realtime
 
-pwsh scripts/run_6cam_4k.ps1 -Backend cudagl -Duration 600   # 六路 4K
+pwsh scripts/run_stitch.ps1 pool extract,asset,build,live -Backend cudagl
 scripts\run_win.bat under <采样目录>                     # 水下 16 路
 ```
 
-每个后端一棵独立构建树 `build/win-<backend>`（`python/underwater/run.py` 的 `build_dir_for` 就是这么找 exe 的）。CMake **不会**把 FFmpeg/GLFW/cudart 的 DLL 拷到 exe 旁，缺了会以 `0xC0000135` 启动失败；`install.bat` 和 `run_6cam_4k.ps1` 都会补这一步，新增构建路径时别忘了。
+每个后端一棵独立构建树 `build/win-<backend>`（`python/stitch/run.py` 的 `build_dir_for` 就是这么找 exe 的）。CMake **不会**把 FFmpeg/GLFW/cudart 的 DLL 拷到 exe 旁，缺了会以 `0xC0000135` 启动失败；`install.bat` 与 `run.py` 的 `build` 步骤都会补这一步，新增构建路径时别忘了。
 
-Python 3.10 是硬要求，不是偏好：Autodesk 只为 cp310 发布 FBX Python SDK 轮子，而 `python/underwater/extract.py` 是模块级 `import fbx`。
+Python 3.10 是硬要求，不是偏好：Autodesk 只为 cp310 发布 FBX Python SDK 轮子，而 `python/fbx_tools/scene.py` 是模块级 `import fbx`。反过来说，只读已提取的 mesh JSON 的代码必须在没有 `fbx` 的机器上也能跑——这就是把 SDK 关在一个包里的原因。
 
 ## 编码风格与命名约定
 
-C++20，命名空间按层次分 `swim::core` / `swim::d3d11` / `swim::cudagl`。类型用大写驼峰（`RunLifecycle`、`LatestFrameMailbox`），函数与变量用小写下划线（`classify_eof`、`past_start_offset`），成员变量带尾下划线（`lifecycle_`、`loop_sources_`）。头文件放 `include/swim/<layer>/`，实现放 `src/`。Python 用 4 空格、小写下划线，模块入口一律 `python -m python.<pkg>.<mod>`。
+C++20，命名空间按层次分 `swim::core` / `swim::d3d11` / `swim::cudagl`。类型用大写驼峰（`RunLifecycle`、`LatestFrameMailbox`），函数与变量用小写下划线（`classify_eof`、`past_start_offset`），成员变量带尾下划线（`lifecycle_`、`loop_sources_`）。头文件放 `include/swim/<layer>/`，实现放 `src/`。Python 用 4 空格、小写下划线，模块入口一律 `python -m python.<pkg>[.<mod>]`。
 
 C++ 与 Python 源码保持 UTF-8。注释解释**为什么**，尤其是那些看起来可以简化但实际不能的地方——仓库里已有多处这类注释（`view` 必须是 `Surface` 的第一个成员、`GL_UNPACK_ALIGNMENT` 必须置 1 等），删掉它们会让人重新踩坑。
 
@@ -105,6 +116,10 @@ Python 测试用 unittest：`.venv\Scripts\python.exe -m unittest discover -s te
 
 改动实时链路后跑真实数据冒烟，并记录命令与关键指标。判定标准不只看帧率，还要看 `decoded_pixel_host_copies=0`（没把解码像素读回 CPU）、`pool_exhaustion=0`、`malformed=0`。测试代码要保持跨平台：`tests/cpp/test_config.cpp` 曾因用了 POSIX 的 `setenv` 而在 MSVC 上编不过。
 
+改动拼接几何或资产编译时，验收标准是**逐字节**：三条线的 `.swasset` 与静图必须与改动前完全一致，除非改的正是那个口径。哪一条线该有多大画布、每米多少像素，README 的对照表里写着；不确定就先编一份、比 sha256，再动手。
+
+不需要再补设计文档或实施计划：口径写在 profile 记录与代码注释里，取证写在 README 的实测表里。
+
 ## 提交与 Pull Request 规范
 
 提交信息用 `type(scope): 简短祈使句`，与现有历史一致：`feat(underwater): align the realtime stitch with the offline mp4 pipeline`、`fix(build): depend on the mesh JSON by absolute path`。PR 说明改动目标、影响的 target、构建命令、手工验证结果与实测指标。
@@ -113,4 +128,4 @@ Python 测试用 unittest：`.venv\Scripts\python.exe -m unittest discover -s te
 
 不要提交大型视频、`.swasset`、`third_party/` 预编译依赖、`build/` 或 `outputs/` 产物。以下都被 gitignore 但是运行必需，新机器靠 `install.bat` 补齐：`outputs/data/pool_mesh.json`（`CMakeLists.txt` 的硬依赖，缺了任何 target 都编不过）、`inputs/underwater/models/all.fbx` + `all.fbm/`、`third_party/{ffmpeg,glfw}`、`.venv`。
 
-`inputs/configs/underwater_16_*.conf` 是 `python.underwater.run` 每次按片段目录重新生成的，不要手工维护。
+`inputs/configs/<line>_<backend>.conf` 是 `python.stitch` 每次按片段目录重新生成的，不要手工维护；手写的参考 config 只有 `macos_*.conf` 与 `windows_*.conf`。

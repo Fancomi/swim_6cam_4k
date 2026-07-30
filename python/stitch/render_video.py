@@ -1,339 +1,289 @@
-"""Stitch the 16 underwater planes from live .ts video into one panorama mp4.
+"""Stitch one clip per camera into a single panorama mp4.
 
-Reuses the geometry + seam blending already validated for the still stitch
-(python.stitch.render): same mesh JSON, same build_remap_clipped, same
-seam_weights, same auto bottom-crop. The only difference from render.py is the
-texture source — instead of one static image per plane, each plane is driven by
-its matching camera clip, and composited frame-by-frame into an h264 mp4 via
-ffmpeg (reusing reference_renderer.open_ffmpeg / finish_encoder).
+Same geometry and seam blending as the still (python.stitch.compose); the only
+difference is that each lane is driven by a clip instead of a static image.
 
-Camera↔plane mapping is positional: extract orders meshes left-to-right by world
-X, and the caller passes `camera_ids` in that same order plus a `clip_for`
-lookup (python.stitch.profiles.Profile supplies both).
+Time alignment matters and cannot be assumed. Each recorded .ts starts at its own
+decodable keyframe, placed anywhere inside the recorder's lookback window with
+GOP granularity, so the per-camera skew reaches seconds. Samples that carry a
+manifest are aligned by the same formula the front-end player uses:
 
-Time alignment: clips must NOT be assumed to share t=0. Each TS starts at its own
-decodable keyframe, which the recorder placed somewhere inside the lookback
-window — with GOP-sized granularity, so the per-camera skew reaches seconds. The
-sample's manifest.json carries the wall-clock truth, and this module follows the
-same formula the front-end player uses:
-
-    duration            = (align_end_ms - align_start_ms) / 1000
-    offset              in [0, duration]
+    duration              = (align_end_ms - align_start_ms) / 1000
     source_time_i(offset) = (align_start_ms + offset*1000 - keyframe_ms_i) / 1000
 
-So output frame n (at offset n/fps) reads source frame
-`round((align_start_ms - keyframe_ms_i) * fps / 1000) + n` from camera i. File
-duration / frame count / size are used only for QC, never as the alignment axis.
+so output frame n reads source frame `round((align_start - keyframe_i) * fps /
+1000) + n` from camera i. File duration, frame count and size are QC only, never
+the alignment axis. Lines whose recordings have no manifest (sync="none") read
+every clip from frame 0.
 """
-import argparse
 import json
-import shutil
 import time
 from pathlib import Path
 
 import cv2
-import numpy as np
 
-from python.validation import reference_renderer as rr
-from python.stitch import render as R
-from python.stitch import profiles as P
+from python.common.media import close_encoder, open_encoder
+from python.stitch import compose as C
+from python.stitch.profiles import StepError
 
 
 def load_manifest(video_dir):
-    """Read the sample manifest: the common wall-clock window + per-camera anchors.
+    """(align_start_ms, align_end_ms, fps, {camera: anchors}) for a sample.
 
-    Returns (align_start_ms, align_end_ms, fps, {cam: {...}}). Missing manifest or
-    missing align window is fatal: without it there is no defensible time axis."""
+    A missing manifest or a missing align window is fatal: without it there is no
+    defensible time axis, and silently reading from frame 0 would look correct
+    while putting the lanes seconds apart."""
     path = Path(video_dir) / "manifest.json"
     if not path.is_file():
-        raise SystemExit(
+        raise StepError(
             f"manifest.json not found in {video_dir}; cannot time-align "
-            "(pass --no-align to stitch from each file's first frame instead)")
-    with open(str(path), encoding="utf-8") as f:
-        man = json.load(f)
+            "(pass --no-align to read every clip from its first frame)")
+    manifest = json.loads(path.read_text(encoding="utf-8"))
     for key in ("align_start_ms", "align_end_ms"):
-        if man.get(key) is None:
-            raise SystemExit(f"manifest missing {key}: {path}")
-    cams = {}
-    for entry in man.get("files", []):
-        cam = entry.get("source_id")
-        if cam is None:
+        if manifest.get(key) is None:
+            raise StepError(f"manifest missing {key}: {path}")
+    cameras = {}
+    for entry in manifest.get("files", []):
+        camera = entry.get("source_id")
+        if camera is None:
             continue
         # keyframe_timestamp_ms is the wall clock of this file's frame 0; older
-        # manifests only carry first_decodable_timestamp_ms (same semantics).
-        anchor = entry.get("keyframe_timestamp_ms")
+        # manifests spell the same thing first_decodable_timestamp_ms.
+        anchor = (entry.get("keyframe_timestamp_ms")
+                  or entry.get("first_decodable_timestamp_ms"))
         if anchor is None:
-            anchor = entry.get("first_decodable_timestamp_ms")
-        if anchor is None:
-            raise SystemExit(f"manifest has no keyframe anchor for {cam}: {path}")
-        cams[cam] = {
+            raise StepError(f"manifest has no keyframe anchor for {camera}: {path}")
+        cameras[camera] = {
             "keyframe_ms": anchor,
             "last_decodable_ms": entry.get("last_decodable_timestamp_ms"),
             "frames": entry.get("frames"),
         }
-    if not cams:
-        raise SystemExit(f"manifest lists no files: {path}")
-    return man["align_start_ms"], man["align_end_ms"], man.get("fps"), cams
+    if not cameras:
+        raise StepError(f"manifest lists no files: {path}")
+    return (manifest["align_start_ms"], manifest["align_end_ms"],
+            manifest.get("fps"), cameras)
 
 
-def alignment_plan(align_start_ms, align_end_ms, fps, cams, order):
-    """Per-camera start frame on the common time axis, plus a coverage report.
-
-    `order` is the camera list in mesh order. Returns (starts, report) where
-    starts[i] is the source frame index of camera order[i] at offset 0, and
-    report[i] describes its coverage of [align_start, align_end]."""
+def alignment_plan(align_start_ms, align_end_ms, fps, cameras, order):
+    """Per-camera start frame on the common axis, plus a coverage report."""
     starts, report = [], []
-    for cam in order:
-        info = cams.get(cam)
+    for camera in order:
+        info = cameras.get(camera)
         if info is None:
-            raise SystemExit(f"manifest has no entry for {cam}")
-        anchor = info["keyframe_ms"]
-        skew_ms = align_start_ms - anchor
+            raise StepError(f"manifest has no entry for {camera}")
+        skew_ms = align_start_ms - info["keyframe_ms"]
         start = int(round(skew_ms * fps / 1000.0))
-        late = start < 0     # file begins after align_start: no coverage at t=0
         last = info["last_decodable_ms"]
-        short_ms = (align_end_ms - last) if last is not None else None
         report.append({
-            "cam": cam, "skew_ms": skew_ms, "start_frame": start,
-            "late_start": late, "short_ms": short_ms, "frames": info["frames"],
+            "cam": camera, "skew_ms": skew_ms, "start_frame": start,
+            # Negative skew means the file begins after align_start: that lane has
+            # no coverage at t=0 and its start clamps to zero.
+            "late_start": start < 0,
+            "short_ms": (align_end_ms - last) if last is not None else None,
+            "frames": info["frames"],
         })
         starts.append(max(0, start))
     return starts, report
 
 
-def render_video(data_path, video_dir, out_path, camera_ids, clip_for,
-                 seconds=None, ppm=None, unit_scale=1.0, neg_v=False,
-                 blend_px=0.0, full_res=True, align=True):
-    data_path = Path(data_path)
+def lane_offsets_ms(profile, video_dir):
+    """Milliseconds into each clip where the common axis starts.
+
+    Shared with the realtime path so the offline mp4 and the GPU stitch align by
+    exactly the same arithmetic. A line with sync="none" returns {} without
+    looking; a manifest-bearing one that has no manifest says so and degrades to
+    the same empty result rather than failing a whole run over it."""
+    if profile.sync != "manifest":
+        return {}
+    try:
+        align_start, align_end, fps, cameras = load_manifest(video_dir)
+    except StepError as error:
+        print(f"  no wall-clock alignment: {error}")
+        return {}
+    order = [c for c in profile.camera_ids if c in cameras]
+    _starts, report = alignment_plan(align_start, align_end, fps, cameras, order)
+    offsets = {entry["cam"]: max(0, entry["skew_ms"]) for entry in report}
+    skews = [entry["skew_ms"] for entry in report]
+    print(f"  wall-clock align window {(align_end - align_start) / 1000:.3f}s; "
+          f"lane skew {min(skews)}..{max(skews)}ms")
+    for entry in report:
+        if entry["late_start"]:
+            print(f"  QC {entry['cam']}: starts {-entry['skew_ms']}ms after "
+                  "align_start (no coverage at t=0)")
+    return offsets
+
+
+def loop_period_ms(profile, video_dir, offsets):
+    """Shortest usable span across lanes, in ms — the common content period.
+
+    Each lane can play from its aligned start to its own last decodable frame, and
+    those spans differ by tens of milliseconds. Restarting each lane at its own end
+    would let them drift apart on every pass; wrapping every lane on the shortest
+    span keeps them locked together indefinitely. 0 means "no manifest", which
+    tells the runtime to use each file's natural end."""
+    if profile.sync != "manifest":
+        return 0
+    try:
+        *_unused, cameras = load_manifest(video_dir)
+    except StepError:
+        return 0
+    spans = []
+    for camera, info in cameras.items():
+        last, anchor = info.get("last_decodable_ms"), info.get("keyframe_ms")
+        if last is None or anchor is None:
+            continue
+        spans.append(last - anchor - offsets.get(camera, 0))
+    return max(0, min(spans)) if spans else 0
+
+
+def render(profile, video_dir, out_path, seconds=None, ppm=None, blend_px=None,
+           full_res=None, align=True):
+    """Composite every lane's clip into one mp4. Returns (width, height, frames)."""
     video_dir = Path(video_dir)
-    out_path = Path(out_path)
-    if not data_path.is_file():
-        raise SystemExit(f"data file does not exist: {data_path}")
     if not video_dir.is_dir():
-        raise SystemExit(f"video directory does not exist: {video_dir}")
-    ffmpeg = shutil.which("ffmpeg")
-    if ffmpeg is None:
-        raise SystemExit("ffmpeg is required for video rendering")
+        raise StepError(f"video directory does not exist: {video_dir}")
 
-    with open(str(data_path), encoding="utf-8") as f:
-        loaded = json.load(f)
-    if "meshes" not in loaded:
-        raise SystemExit(f"data file missing 'meshes' key: {data_path}")
-    meshes = loaded["meshes"]
+    meshes = C.load_meshes(profile.mesh_json, neg_v=profile.neg_v)
+    cameras = list(profile.camera_ids)
+    if len(cameras) != len(meshes):
+        raise StepError(f"{len(cameras)} cameras for {len(meshes)} meshes")
 
-    # Camera identity is positional: extract sorts meshes left-to-right by world
-    # X and the profile lists its ids in that same order. Deriving it from the
-    # texture filename instead only ever worked for the underA* naming scheme —
-    # the overhead textures are 05-02.jpg and C06.jpg.
-    cam_order = list(camera_ids)
-    if len(cam_order) != len(meshes):
-        raise SystemExit(f"camera count mismatch: {len(cam_order)} ids for "
-                         f"{len(meshes)} meshes in {data_path}")
-
-    caps, src_wh = [], []
-    for cam in cam_order:
-        cap = cv2.VideoCapture(str(clip_for(video_dir, cam)))
-        if not cap.isOpened():
-            raise SystemExit(f"cannot open video for {cam}")
-        caps.append(cap)
-        src_wh.append((int(cap.get(3)), int(cap.get(4))))
+    captures, sizes = [], []
+    for camera in cameras:
+        capture = cv2.VideoCapture(str(profile.clip_for(video_dir, camera)))
+        if not capture.isOpened():
+            raise StepError(f"cannot open the clip for {camera}")
+        captures.append(capture)
+        sizes.append((int(capture.get(3)), int(capture.get(4))))
 
     try:
-        rr.to_meters(meshes, unit_scale, neg_v)
-        xmin, xmax, ymin, ymax = rr.world_bounds(meshes)
+        full_res = profile.full_res if full_res is None else full_res
         if ppm is None:
-            if full_res:
-                src_h = max(h for _w, h in src_wh)
-                span_y = ymax - ymin
-                ppm = src_h / span_y if span_y > 0 else 100.0
-            else:
-                ppm = R.resolve_ppm(xmin, xmax, 640)
-        # same edge padding as the still renderer so on-edge vertices stay inside
-        margin = 2
-        pad = margin / ppm
-        xmin, ymin = xmin - pad, ymin - pad
-        xmax, ymax = xmax + pad, ymax + pad
-        out_w = int(round((xmax - xmin) * ppm)) + 1
-        out_h = int(round((ymax - ymin) * ppm)) + 1
+            ppm = (C.adaptive_ppm(meshes, max(h for _w, h in sizes))
+                   if full_res else profile.ppm)
+        blend_px = profile.blend_px if blend_px is None else blend_px
 
-        layers = [R.build_remap_clipped(m, w, h, xmin, ymin, ppm, out_w, out_h)
-                  for m, (w, h) in zip(meshes, src_wh)]
-        raw_wts = R.seam_weights([l[2] for l in layers], blend_px)
-        wts = [w[..., None] for w in raw_wts]
+        canvas = C.Canvas(meshes, ppm, margin=profile.still_margin)
+        layers = [C.build_remap(mesh, canvas, size, clip=profile.clip_uv)
+                  for mesh, size in zip(meshes, sizes)]
+        weights = [w[..., None] for w in
+                   C.blend_weights([layer[2] for layer in layers], blend_px)]
 
-        # auto bottom-crop rows, computed once from union coverage (static geometry)
-        union = np.zeros((out_h, out_w), np.uint8)
-        for l in layers:
-            union |= l[2]
-        crop = R.bottom_dirty_rows(union) if full_res else 0
-        target_height = max(h for _w, h in src_wh)
-        # width after crop+rescale (kept constant for every frame)
+        # Geometry is static, so the crop is measured once and every frame gets
+        # the same one; a per-frame measurement would make the output size wobble.
+        crop = (C.bottom_dirty_rows(C.union_coverage(layers, canvas))
+                if full_res else 0)
+        target_height = max(h for _w, h in sizes)
         if crop:
-            kept_h = out_h - crop
-            final_w = int(round(out_w * target_height / kept_h))
             final_h = target_height
+            final_w = int(round(canvas.width * target_height / (canvas.height - crop)))
         else:
-            final_w, final_h = out_w, out_h
-        print(f"canvas {out_w}x{out_h} @ {ppm:.2f}px/m -> output {final_w}x{final_h} "
-              f"(bottom crop {crop}px)")
+            final_w, final_h = canvas.width, canvas.height
+        print(f"canvas {canvas.width}x{canvas.height} @ {ppm:.2f}px/m "
+              f"-> output {final_w}x{final_h} (bottom crop {crop}px)")
 
-        src_fps = [c.get(cv2.CAP_PROP_FPS) or 30.0 for c in caps]
-        n_src = [int(c.get(cv2.CAP_PROP_FRAME_COUNT)) for c in caps]
+        source_fps = [capture.get(cv2.CAP_PROP_FPS) or 30.0 for capture in captures]
+        source_frames = [int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+                         for capture in captures]
 
-        if align:
-            a_start, a_end, man_fps, cams = load_manifest(video_dir)
-            base_fps = man_fps or min(src_fps)
-            starts, report = alignment_plan(a_start, a_end, base_fps, cams, cam_order)
-            window_s = (a_end - a_start) / 1000.0
-            print(f"wall-clock align window {window_s:.3f}s @ {base_fps:g}fps "
-                  f"(sync_mode=manifest align_start/align_end)")
-            skews = [r["skew_ms"] for r in report]
-            print(f"per-camera keyframe skew {min(skews)}..{max(skews)}ms "
+        window_frames = None
+        if align and profile.sync == "manifest":
+            start_ms, end_ms, manifest_fps, entries = load_manifest(video_dir)
+            base_fps = manifest_fps or min(source_fps)
+            starts, report = alignment_plan(start_ms, end_ms, base_fps,
+                                            entries, cameras)
+            window_s = (end_ms - start_ms) / 1000.0
+            skews = [entry["skew_ms"] for entry in report]
+            print(f"wall-clock align window {window_s:.3f}s @ {base_fps:g}fps; "
+                  f"keyframe skew {min(skews)}..{max(skews)}ms "
                   f"-> start frames {min(starts)}..{max(starts)}")
-            for r in report:
+            for entry in report:
                 notes = []
-                if r["late_start"]:
-                    notes.append(f"STARTS {-r['skew_ms']}ms AFTER align_start "
+                if entry["late_start"]:
+                    notes.append(f"starts {-entry['skew_ms']}ms after align_start "
                                  "(no coverage at t=0)")
-                if r["short_ms"] is not None and r["short_ms"] > 1000.0 / base_fps:
-                    notes.append(f"ends {r['short_ms']}ms before align_end")
+                if (entry["short_ms"] is not None
+                        and entry["short_ms"] > 1000.0 / base_fps):
+                    notes.append(f"ends {entry['short_ms']}ms before align_end")
                 if notes:
-                    print(f"  QC {r['cam']}: {'; '.join(notes)}")
-            n_window = int(round(window_s * base_fps))
+                    print(f"  QC {entry['cam']}: {'; '.join(notes)}")
+            window_frames = int(round(window_s * base_fps))
         else:
-            base_fps = min(src_fps)
-            starts = [0] * len(caps)
-            n_window = None
-            print(f"NO time alignment: reading every clip from frame 0 "
+            base_fps = min(source_fps)
+            starts = [0] * len(captures)
+            print(f"no time alignment: every clip read from frame 0 "
                   f"(base {base_fps:.2f}fps)")
 
-        steps = [f / base_fps for f in src_fps]
-        # bounded by each clip's remaining frames after its aligned start
-        avail = [int((n - s) / st) for n, s, st in zip(n_src, starts, steps)]
-        max_out = max(0, min(avail))
-        n_out = max_out if n_window is None else min(max_out, n_window)
+        # Higher-fps sources are subsampled to the lowest source fps by nearest
+        # frame. This aligns the frame RATE only, never the capture start time.
+        steps = [fps / base_fps for fps in source_fps]
+        available = [int((count - start) / step)
+                     for count, start, step in zip(source_frames, starts, steps)]
+        frames = max(0, min(available))
+        if window_frames is not None:
+            frames = min(frames, window_frames)
         if seconds is not None:
-            n_out = min(n_out, int(seconds * base_fps))
-        if n_out <= 0:
-            raise SystemExit("no overlapping frames across cameras")
-        print(f"{n_out} output frames (~{n_out / base_fps:.1f}s)")
+            frames = min(frames, int(seconds * base_fps))
+        if frames <= 0:
+            raise StepError("no overlapping frames across cameras")
+        print(f"{frames} output frames (~{frames / base_fps:.1f}s)")
 
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        enc = rr.open_ffmpeg(ffmpeg, out_path, final_w, final_h, base_fps)
-
-        cur = [None] * len(caps)
-        src_pos = [-1] * len(caps)
-        # seek each clip to its aligned start by decoding forward (TS keyframe
-        # indexes are unreliable for random access, and the offsets are small)
-        for i, c in enumerate(caps):
-            for _ in range(starts[i] + 1):
-                ok, fr = c.read()
+        encoder = open_encoder(out_path, final_w, final_h, base_fps)
+        current = [None] * len(captures)
+        position = list(starts)
+        # Decode forward to each aligned start: .ts keyframe indexes are
+        # unreliable for random access and the offsets are small.
+        for index, capture in enumerate(captures):
+            for _ in range(starts[index] + 1):
+                ok, frame = capture.read()
                 if not ok:
-                    raise SystemExit(
-                        f"{cam_order[i]}: ran out of frames while seeking to "
-                        f"aligned start frame {starts[i]}")
-                cur[i] = fr
-            src_pos[i] = starts[i]
+                    raise StepError(
+                        f"{cameras[index]}: ran out of frames while seeking to "
+                        f"aligned start frame {starts[index]}")
+                current[index] = frame
 
-        t0 = time.perf_counter()
-        n = 0
-        write_error = None
-        encoder_finished = False
+        started = time.perf_counter()
+        written = 0
+        finished = False
         try:
-            try:
-                while n < n_out:
-                    ok_all = True
-                    for i, c in enumerate(caps):
-                        target = starts[i] + int(round(n * steps[i]))
-                        while src_pos[i] < target:
-                            ok, fr = c.read()
-                            if not ok:
-                                ok_all = False
-                                break
-                            cur[i] = fr
-                            src_pos[i] += 1
-                        if not ok_all:
+            while written < frames:
+                complete = True
+                for index, capture in enumerate(captures):
+                    target = starts[index] + int(round(written * steps[index]))
+                    while position[index] < target:
+                        ok, frame = capture.read()
+                        if not ok:
+                            complete = False
                             break
-                    if not ok_all:
+                        current[index] = frame
+                        position[index] += 1
+                    if not complete:
                         break
-                    comp = rr.composite(layers, wts, cur, out_h, out_w)
-                    if crop:
-                        comp = R.crop_bottom_and_scale(comp, crop, target_height)
-                    enc.stdin.write(comp.tobytes())
-                    n += 1
-                    if n % 100 == 0:
-                        el = time.perf_counter() - t0
-                        print(f"  {n}/{n_out}  {n / el:.1f} fps")
-            except BrokenPipeError as exc:
-                write_error = exc
-
-            return_code, close_error = rr.finish_encoder(enc)
-            encoder_finished = True
-            if return_code != 0:
-                raise SystemExit(
-                    f"ffmpeg failed for video {out_path}: exit code {return_code}")
-            pipe_error = write_error or close_error
-            if pipe_error is not None:
-                raise SystemExit(f"ffmpeg pipe failed for {out_path}: {pipe_error}")
-            el = time.perf_counter() - t0
-            print(f"wrote video {out_path}: {n} frames in {el:.1f}s -> {n / el:.1f} fps")
+                if not complete:
+                    break
+                composite = C.composite(layers, weights, current, canvas)
+                if crop:
+                    composite = C.crop_and_scale(composite, crop, target_height)
+                encoder.stdin.write(composite.tobytes())
+                written += 1
+                if written % 100 == 0:
+                    elapsed = time.perf_counter() - started
+                    print(f"  {written}/{frames}  {written / elapsed:.1f} fps")
+            # Inside the try so a BrokenPipeError raised while draining is
+            # reported as one, and outside the loop so a short clip still
+            # finalises the container.
+            close_encoder(encoder, out_path)
+            finished = True
+        except BrokenPipeError as error:
+            raise StepError(f"ffmpeg pipe failed for {out_path}: {error}") from None
         finally:
-            if enc is not None and not encoder_finished:
-                enc.kill()
-                enc.wait()
-        return final_w, final_h, n
+            if not finished:
+                encoder.kill()
+                encoder.wait()
+        elapsed = time.perf_counter() - started
+        print(f"wrote {out_path}: {written} frames in {elapsed:.1f}s "
+              f"-> {written / elapsed:.1f} fps")
+        return final_w, final_h, written
     finally:
-        for c in caps:
-            c.release()
-
-
-def main(argv=None):
-    ap = argparse.ArgumentParser(description="Stitch plane textures from video")
-    ap.add_argument("video_dir", type=Path,
-                    help="directory holding one clip per camera")
-    ap.add_argument("--profile", default="underwater",
-                    help="stitch line whose camera ids and clip suffix to use "
-                         "(default: %(default)s)")
-    ap.add_argument("--data", type=Path, default=None,
-                    help="mesh JSON (default: the profile's)")
-    ap.add_argument("--out", type=Path, default=None,
-                    help="output mp4 (default: <profile out_dir>/stitch.mp4)")
-    ap.add_argument("--seconds", type=float, default=None,
-                    help="cap output duration; default uses the whole align window")
-    ap.add_argument("--ppm", type=float, default=None,
-                    help="pixels per metre; default adapts to source height in --full-res")
-    ap.add_argument("--unit-scale", type=float, default=1.0)
-    ap.add_argument("--neg-v", dest="neg_v", action="store_true", default=False)
-    ap.add_argument("--blend-px", type=float, default=None,
-                    help="horizontal pixels blended across each vertical seam "
-                         "(default: the profile's)")
-    ap.add_argument("--no-full-res", action="store_true",
-                    help="skip source-height rescale / bottom auto-crop")
-    ap.add_argument("--no-align", action="store_true",
-                    help="ignore manifest wall clocks and read every clip from "
-                         "frame 0; already implied for profiles whose "
-                         "recordings carry no wall clock")
-    args = ap.parse_args(argv)
-
-    profile = P.get(args.profile)
-    # A profile whose recordings have no usable wall clock (sync="none") reads
-    # from frame 0 anyway; --no-align forces that for a manifest-bearing one.
-    align = profile.sync == "manifest" and not args.no_align
-    render_video(
-        args.data or profile.mesh_json,
-        args.video_dir,
-        args.out or profile.out_dir / "stitch.mp4",
-        camera_ids=profile.camera_ids,
-        clip_for=profile.clip_for,
-        seconds=args.seconds,
-        ppm=args.ppm if args.ppm is not None else profile.ppm,
-        unit_scale=args.unit_scale,
-        neg_v=args.neg_v,
-        blend_px=args.blend_px if args.blend_px is not None else profile.blend_px,
-        full_res=profile.full_res and not args.no_full_res,
-        align=align,
-    )
-
-
-if __name__ == "__main__":
-    main()
+        for capture in captures:
+            capture.release()

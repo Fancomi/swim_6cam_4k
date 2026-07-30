@@ -5,7 +5,7 @@ import unittest
 import urllib.request
 from unittest.mock import patch
 
-from python.annotation_preview import labeler_server as L
+from python.labeling import server as L
 
 
 class ServeTest(unittest.TestCase):

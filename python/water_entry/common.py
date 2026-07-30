@@ -1,36 +1,30 @@
 #!/usr/bin/env python3
-"""入水检测机位分析——公共工具模块。
+"""入水检测机位的领域知识：数据集口径、入水判据、选人启发式。
 
-集中数据集路径、manifest 读取、关键帧窗口、模型注册、帧解码、
-COCO-17 骨架常量与目标选人启发式，供 predict / review / select_frames 统一复用。
+只放这条机位特有的东西——帧解码、CSV、HTML 页面都在 python.common 下，
+三条拼接线与这里共用同一份。
 
 数据来源：广州二沙（swimming-gz）水下 0 号平面正上方的 Orbbec 机位，
 RGB 1280×720 @30fps，每段约 25 秒，覆盖准备、蹬壁、飞行、入水、滑行。
 帧号口径：解码序、从 0 开始，与 manifest.csv / res.json 一致。
 """
-import csv
 import json
 import os
 from dataclasses import dataclass
 
-import cv2
 import numpy as np
 
-# 仓库根（.../swim_fbx_demo），用于派生统一输出根。
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from python.common.paths import OUTPUTS, dataset_root
+from python.common.tables import read_rows
 
-# 外部数据集根：通过环境变量或各 CLI 参数注入，不写死进代码路径以外的假设。
-DATASET = os.environ.get(
+DATASET = str(dataset_root(
     "WATER_ENTRY_DATASET_ROOT",
-    "/Users/penghaotian/Downloads/DATAS/SWIMMING/swimming-up/swimming-gz-bad",
-)
+    "/Users/penghaotian/Downloads/DATAS/SWIMMING/swimming-up/swimming-gz-bad"))
 CLIP_DIR = os.path.join(DATASET, "bk_export_202607")
 MANIFEST = os.path.join(DATASET, "bk_export_manifest.csv")
 
-OUTPUT_ROOT = os.environ.get(
-    "WATER_ENTRY_OUTPUT_ROOT",
-    os.path.join(PROJECT_ROOT, "outputs", "water_entry"),
-)
+OUTPUT_ROOT = str(dataset_root("WATER_ENTRY_OUTPUT_ROOT",
+                               OUTPUTS / "water_entry"))
 
 # 模型注册：现网特化版、随包微调版、通用 COCO 版。
 # 通用版不随数据集提供，首次使用时由 ultralytics 下载到 outputs/water_entry/weights/，
@@ -143,8 +137,7 @@ def load_manifest(path=MANIFEST, include_notes=None):
     note 取值：'' 正常；'suspected_false_positive' 疑似误触发；
     'autolabel_selection_failed' 视频可用但自动选人被干扰。
     """
-    with open(path, newline="") as f:
-        rows = list(csv.DictReader(f))
+    rows = read_rows(path)
     clips = [Clip(name=r["clip"], jump_frame=int(r["jump_frame"]),
                   water_frame=int(r["water_frame"]), angle=float(r["angle"]),
                   backstroke_applied=r["backstroke_applied"] == "True",
@@ -154,33 +147,6 @@ def load_manifest(path=MANIFEST, include_notes=None):
         clips = [c for c in clips if c.note in include_notes]
     return clips
 
-
-def read_frames(video_path, indices):
-    """顺序解码取出指定帧号（升序），返回 {frame_index: BGR ndarray}。
-
-    这些片段只有 750 帧，顺序 grab 到目标位比 CAP_PROP_POS_FRAMES 随机定位更可靠。
-    """
-    want = sorted(set(int(i) for i in indices))
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise SystemExit("无法打开视频：%s" % video_path)
-    out, cursor, pos = {}, 0, 0
-    try:
-        while cursor < len(want):
-            target = want[cursor]
-            while pos < target:
-                if not cap.grab():
-                    return out
-                pos += 1
-            ok, frame = cap.read()
-            if not ok:
-                return out
-            out[target] = frame
-            pos += 1
-            cursor += 1
-    finally:
-        cap.release()
-    return out
 
 
 def torso_ok(kps_conf):
@@ -312,16 +278,4 @@ def resolve_device(name=None):
     return "mps" if torch.backends.mps.is_available() else "cpu"
 
 
-def lazy_img_js(margin_px):
-    """复核页共用的图片懒加载脚本：千级裁剪图一次性加载会卡死浏览器。
-
-    review 与 annotate_preview 的页面布局各不相同（多模型横排 vs 候选帧序列），
-    共用的只有「一堆 <img data-src> 进视口再取图」，预加载距离各自给。
-    """
-    return ("\nconst io=new IntersectionObserver((es)=>{for(const e of es){"
-            "if(e.isIntersecting){\nconst i=e.target;if(i.dataset.src){"
-            "i.src=i.dataset.src;delete i.dataset.src;}io.unobserve(i);}}},\n"
-            "{rootMargin:'%dpx'});\n"
-            "document.querySelectorAll('img[data-src]').forEach(i=>io.observe(i));\n"
-            % margin_px)
 

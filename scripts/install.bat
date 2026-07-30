@@ -475,22 +475,22 @@ rem ======================================================================
 echo.
 echo --- [7/7] 网格 / 资产 / 构建 -----------------------------
 
-rem 7.1 pool_mesh.json is gitignored yet a hard CMakeLists.txt:26 dependency,
-rem     so without it every target fails while building pool_4k.swasset.
-if exist "%ROOT%\outputs\data\pool_mesh.json" (
-  echo   [SKIP] outputs\data\pool_mesh.json 已存在
+rem 7.1 The pool mesh is gitignored yet a hard CMakeLists.txt dependency, so
+rem     without it every target fails while building pool.swasset.
+if exist "%ROOT%\outputs\pool\mesh.json" (
+  echo   [SKIP] outputs\pool\mesh.json 已存在
 ) else (
   if "%MODE%"=="check" (
-    echo   [FAIL] 缺 outputs\data\pool_mesh.json [构建会失败在 pool_4k.swasset]
+    echo   [FAIL] 缺 outputs\pool\mesh.json [构建会失败在 pool.swasset]
     exit /b 1
   )
-  echo   正在从 inputs\pool\models\pool.fbx 提取 pool_mesh.json...
-  "%VPY%" -m python.assets.extract_fbx
+  echo   正在从 inputs\pool\models\pool.fbx 提取 pool 网格...
+  "%VPY%" -m python.stitch pool extract
   if errorlevel 1 (
     echo   [FAIL] pool 网格提取失败
     exit /b 1
   )
-  echo   [OK]   outputs\data\pool_mesh.json
+  echo   [OK]   outputs\pool\mesh.json
 )
 
 rem 7.2 underwater 16-lane mesh + .swasset

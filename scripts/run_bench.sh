@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
-# 六路 4K 实时拼接（macOS / Metal 后端）：可视化 demo、性能矩阵、soak。
+# 实时运行时的性能取证（macOS / Metal）：48 格性能矩阵与十分钟 soak。
 #
-# 与 Windows 的 scripts/run_6cam_4k.ps1 是同一个任务的两个平台端；水下 16 路
-# 是另一条链路，见 scripts/run_stitch.sh。
+# 只做「测量」这一件事。要跑起来看画面用 scripts/run_stitch.sh LINE live，
+# 三条相机线（pool / underwater / overhead）都从那里进。
 #
 # 用法:
-#   ./scripts/run_6cam_4k.sh demo [--duration N] [--no-window] [--no-encode] [...]
-#   ./scripts/run_6cam_4k.sh benchmarks [--quick] [--duration N] [--visible] [...]
-#   ./scripts/run_6cam_4k.sh soak [--duration N] [--visible] [...]
+#   ./scripts/run_bench.sh matrix [--quick] [--duration N] [--visible] [...]
+#   ./scripts/run_bench.sh soak   [--duration N] [--visible] [...]
+#
+# matrix 覆盖 6 个 stage × 1/2/4/6 路 × paced/unpaced 共 48 格，每格独立 JSONL
+# 并立即校验；任一格失败即停，不会静默重试或拼进最终结果。--quick 每格 1 秒只
+# 验通路，可发布的矩阵每格至少 15 秒（少于 15 秒 publishable 恒为 false）。
+#
+# soak 按每条 interval 的真实 elapsed_s 累加时间轴，报告 RSS 与 Metal allocation
+# 的每分钟斜率，并拒绝 host copy、容量越界、编码错误，以及 warm-up 后连续五个
+# 区间低于 29 FPS。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -20,26 +27,16 @@ VISIBLE=false
 
 usage() {
   cat <<'EOF'
-Usage: scripts/run_6cam_4k.sh <command> [options]
+Usage: scripts/run_bench.sh <command> [options]
 
 Commands:
-  demo         Six-camera realtime stitch with AppKit preview window
-  benchmarks   Release 48-cell performance matrix
-  soak         Paced full-stage soak with leak/FPS gates
+  matrix   Release 48-cell performance matrix
+  soak     Paced full-stage soak with leak/FPS gates
 
-demo options:
-  --duration N       Seconds (default: 30)
-  --no-window        Offscreen Metal present sink (no AppKit window)
-  --no-encode        Skip HEVC file write (encode-sink=null)
-  --encode-path PATH HEVC output (default: outputs/videos/pool_metal.h265)
-  --metrics PATH     Metrics JSONL (default: outputs/benchmarks/manual.jsonl)
-  --config PATH      Runtime config
-  --build-dir PATH   Release CMake build directory
-  --executable PATH  Use an already-built Release executable
-  --stage NAME       Runtime stage (default: full)
-  --stream-count N   Active camera count (default: 6)
+To watch the stitch instead of measuring it:
+  ./scripts/run_stitch.sh pool extract,asset,build,live
 
-benchmarks options:
+matrix options:
   --duration N       Seconds per cell (default: 15; <15 is non-publishable)
   --quick            One-second functional 48-cell smoke
   --visible          Use the AppKit preview window (default: offscreen)
@@ -92,6 +89,11 @@ config_value() {
   awk -F= -v wanted="$key" '$1 == wanted {sub(/^[^=]*=/, ""); print; found=1} END {if (!found) exit 1}' "$CONFIG"
 }
 
+# Camera ids in the config's declaration order (skipping source.<id>.start_ms).
+config_cameras() {
+  awk -F= '/^source\.[^.]+=/ {sub(/^source\./, "", $1); print $1}' "$CONFIG"
+}
+
 resolve_path() {
   local value="$1"
   if [[ "$value" = /* ]]; then
@@ -107,77 +109,6 @@ sha256_file() {
   else
     sha256sum "$1" | awk '{print $1}'
   fi
-}
-
-cmd_demo() {
-  local duration=30
-  local window=true
-  local encode=true
-  local encode_path="$ROOT/outputs/videos/pool_metal.h265"
-  local metrics="$ROOT/outputs/benchmarks/manual.jsonl"
-  local stage=full
-  local stream_count=6
-
-  while (($#)); do
-    case "$1" in
-      --duration) duration="${2:?--duration requires N}"; shift 2 ;;
-      --no-window) window=false; shift ;;
-      --no-encode) encode=false; shift ;;
-      --encode-path) encode_path="${2:?--encode-path requires PATH}"; shift 2 ;;
-      --metrics) metrics="${2:?--metrics requires PATH}"; shift 2 ;;
-      --config) CONFIG="${2:?--config requires PATH}"; shift 2 ;;
-      --build-dir) BUILD_DIR="${2:?--build-dir requires PATH}"; shift 2 ;;
-      --executable) EXECUTABLE="${2:?--executable requires PATH}"; shift 2 ;;
-      --stage) stage="${2:?--stage requires NAME}"; shift 2 ;;
-      --stream-count) stream_count="${2:?--stream-count requires N}"; shift 2 ;;
-      --help|-h) usage; exit 0 ;;
-      *) echo "unknown demo option: $1" >&2; usage >&2; exit 2 ;;
-    esac
-  done
-
-  if [[ ! "$duration" =~ ^[1-9][0-9]*$ ]]; then
-    echo "--duration must be a positive integer" >&2
-    exit 2
-  fi
-  if [[ ! -f "$CONFIG" ]]; then
-    echo "config does not exist: $CONFIG" >&2
-    exit 2
-  fi
-
-  ensure_executable
-  mkdir -p "$(dirname "$metrics")"
-  if [[ "$encode" == true ]]; then
-    mkdir -p "$(dirname "$encode_path")"
-  fi
-
-  local -a args=(
-    --config "$CONFIG"
-    "--stage=$stage"
-    "--stream-count=$stream_count"
-    --mode=realtime
-    "--duration-seconds=$duration"
-    --preview=true
-    "--preview-visible=$window"
-  )
-  if [[ "$encode" == true ]]; then
-    args+=(--encode=true --encode-sink=file "--encode-path=$encode_path")
-  else
-    args+=(--encode=true --encode-sink=null)
-  fi
-  args+=("--metrics=$metrics")
-
-  echo "Metal demo: window=$window encode=$encode duration=${duration}s"
-  echo "  executable: $EXECUTABLE"
-  if [[ "$encode" == true ]]; then
-    echo "  hevc: $encode_path"
-  fi
-  echo "  metrics: $metrics"
-  "$EXECUTABLE" "${args[@]}"
-  echo "Metal demo complete."
-  if [[ "$encode" == true ]]; then
-    echo "HEVC output -> $encode_path"
-  fi
-  echo "metrics -> $metrics"
 }
 
 cmd_benchmarks() {
@@ -248,7 +179,11 @@ cmd_benchmarks() {
 
   local asset
   asset="$(resolve_path "$(config_value asset)")"
-  local -a cameras=(cam3 cam2 cam1 cam4 cam5 cam6)
+  # Lane list comes from the config's own declaration order, which is what the
+  # C++ loader uses for camera identity; a hard-coded list here would silently
+  # fingerprint the wrong files for a config with different lanes.
+  local -a cameras=()
+  while IFS= read -r camera; do cameras+=("$camera"); done < <(config_cameras)
   local -a sources=()
   local camera
   for camera in "${cameras[@]}"; do
@@ -280,7 +215,7 @@ cmd_benchmarks() {
     printf 'run_id=%s\n' "$run_id"
     printf 'asset_sha256=%s\n' "$asset_sha"
     local index
-    for index in 0 1 2 3 4 5; do
+    for index in "${!cameras[@]}"; do
       printf 'source.%s_sha256=%s\n' "${cameras[$index]}" "${source_shas[$index]}"
     done
   } >"$runtime_manifest"
@@ -292,7 +227,7 @@ cmd_benchmarks() {
     "--preview-visible=$VISIBLE" --encode=true --encode-sink=null \
     "--benchmark-manifest=$runtime_manifest" "--metrics=$preflight_metrics" \
     >"$OUTPUT_DIR/logs/preflight.log" 2>&1
-  "$python" -m python.validation.summarize_benchmarks "$preflight_metrics" \
+  "$python" -m python.benchmarks.summarize "$preflight_metrics" \
     --cell-only --expected-stage render-only --expected-stream-count 1 \
     --expected-pacing paced --expected-git-sha "$expected_git_sha" \
     --expected-build-type Release
@@ -337,7 +272,7 @@ PY
           "--preview-visible=$VISIBLE" --encode=true --encode-sink=null \
           "--benchmark-manifest=$runtime_manifest" "--metrics=$metrics" \
           >"$log" 2>&1
-        "$python" -m python.validation.summarize_benchmarks "$metrics" \
+        "$python" -m python.benchmarks.summarize "$metrics" \
           --cell-only --expected-stage "$stage" --expected-stream-count "$count" \
           --expected-pacing "$pacing" --expected-git-sha "$embedded_sha" \
           --expected-build-type "$embedded_build_type"
@@ -356,7 +291,7 @@ PY
   if [[ "$publishable" == true ]]; then
     summary_args+=(--publishable)
   fi
-  "$python" -m python.validation.summarize_benchmarks "${summary_args[@]}"
+  "$python" -m python.benchmarks.summarize "${summary_args[@]}"
 
   mkdir -p "$ROOT/outputs/benchmarks"
   ln -sfn "$OUTPUT_DIR" "$ROOT/outputs/benchmarks/latest"
@@ -407,7 +342,11 @@ cmd_soak() {
 
   local asset
   asset="$(resolve_path "$(config_value asset)")"
-  local -a cameras=(cam3 cam2 cam1 cam4 cam5 cam6)
+  # Lane list comes from the config's own declaration order, which is what the
+  # C++ loader uses for camera identity; a hard-coded list here would silently
+  # fingerprint the wrong files for a config with different lanes.
+  local -a cameras=()
+  while IFS= read -r camera; do cameras+=("$camera"); done < <(config_cameras)
   local -a sources=()
   local camera
   for camera in "${cameras[@]}"; do
@@ -432,7 +371,7 @@ cmd_soak() {
   {
     printf 'run_id=%s\nasset_sha256=%s\n' "$run_id" "$asset_sha"
     local index
-    for index in 0 1 2 3 4 5; do
+    for index in "${!cameras[@]}"; do
       printf 'source.%s_sha256=%s\n' "${cameras[$index]}" "${source_shas[$index]}"
     done
   } >"$manifest"
@@ -443,7 +382,7 @@ cmd_soak() {
     --duration-seconds=1 --preview=true "--preview-visible=$VISIBLE" \
     --encode=true --encode-sink=null "--benchmark-manifest=$manifest" "--metrics=$preflight" \
     >"$OUTPUT_DIR/preflight.log" 2>&1
-  "$python" -m python.validation.summarize_benchmarks "$preflight" --cell-only \
+  "$python" -m python.benchmarks.summarize "$preflight" --cell-only \
     --expected-stage render-only --expected-stream-count 1 --expected-pacing paced \
     --expected-git-sha "$expected_git_sha" --expected-build-type Release
   local executable_sha
@@ -466,7 +405,7 @@ PY
     "--duration-seconds=$duration" --preview=true "--preview-visible=$VISIBLE" \
     --encode=true --encode-sink=null "--benchmark-manifest=$manifest" "--metrics=$metrics" \
     >"$OUTPUT_DIR/runtime.log" 2>&1
-  "$python" -m python.validation.summarize_benchmarks "$metrics" --cell-only \
+  "$python" -m python.benchmarks.summarize "$metrics" --cell-only \
     --expected-stage full --expected-stream-count 6 --expected-pacing paced \
     --expected-git-sha "$expected_git_sha" --expected-build-type Release
   local -a soak_args=(
@@ -474,7 +413,7 @@ PY
     --max-rss-slope-bytes-per-minute "$max_rss_slope"
     --max-gpu-slope-bytes-per-minute "$max_gpu_slope"
   )
-  "$python" -m python.validation.summarize_benchmarks "${soak_args[@]}" | tee "$OUTPUT_DIR/soak-summary.json"
+  "$python" -m python.benchmarks.summarize "${soak_args[@]}" | tee "$OUTPUT_DIR/soak-summary.json"
   echo "Metal soak complete: $OUTPUT_DIR"
 }
 
@@ -486,8 +425,7 @@ fi
 COMMAND="$1"
 shift
 case "$COMMAND" in
-  demo) cmd_demo "$@" ;;
-  benchmarks|bench|matrix) cmd_benchmarks "$@" ;;
+  matrix|benchmarks|bench) cmd_benchmarks "$@" ;;
   soak) cmd_soak "$@" ;;
   --help|-h|help) usage ;;
   *)

@@ -11,13 +11,14 @@
 """
 import argparse
 import glob
-import html
 import json
 import os
 
 import cv2
 import numpy as np
 
+from python.common.media import read_frames, write_image
+from python.common.page import escape, write_page as write_html
 from python.water_entry import common as C
 
 BOX_COLOR = (60, 220, 60)
@@ -89,22 +90,26 @@ def crop_around(image, centre, side):
     return image[y0:y0 + side, x0:x0 + side]
 
 
-def frame_centre(by_model, frame, width, height):
-    """该帧的共享裁剪中心：所有模型在此帧检出框中心的均值。
+def shared_centre(records, width, height):
+    """一行内各格共用的裁剪中心：各模型检出框中心的均值。
 
-    同一行的各模型必须用同一个中心，否则「A 检出、B 缺检」两格画的不是同一块
-    画面，无法判断 B 是真的漏检还是被裁到画外。全都缺检时退回画面中心。
+    必须共用，否则「A 检出、B 缺检」两格画的不是同一块画面，无法判断 B 是真漏检
+    还是被裁到画外。全都缺检时退回画面中心。
     """
-    centres = []
-    for payload in by_model.values():
-        rec = next((r for r in payload["frames"] if r["frame"] == frame), None)
-        if rec and rec.get("box") is not None:
-            centres.append(((rec["box"][0] + rec["box"][2]) / 2.0,
-                            (rec["box"][1] + rec["box"][3]) / 2.0))
+    centres = [((r["box"][0] + r["box"][2]) / 2.0,
+                (r["box"][1] + r["box"][3]) / 2.0)
+               for r in records if r and r.get("box") is not None]
     if not centres:
         return (width / 2.0, height / 2.0)
     return (float(np.mean([c[0] for c in centres])),
             float(np.mean([c[1] for c in centres])))
+
+
+def frame_centre(by_model, frame, width, height):
+    """该帧在各模型 payload 里的共享裁剪中心。"""
+    return shared_centre(
+        [next((r for r in payload["frames"] if r["frame"] == frame), None)
+         for payload in by_model.values()], width, height)
 
 
 def load_predictions(predict_dir, models, clips):
@@ -131,7 +136,7 @@ def build_clip_rows(name, by_model, models, radius, side, crops_dir, full):
     clip = C.Clip(name=name, jump_frame=any_payload["jump_frame"],
                   water_frame=any_payload["manifest_water_frame"],
                   angle=0.0, backstroke_applied=False, note="")
-    images = C.read_frames(clip.video, wanted)
+    images = read_frames(clip.video, wanted)
     rows = []
     for frame in wanted:
         if frame not in images:
@@ -151,54 +156,41 @@ def build_clip_rows(name, by_model, models, radius, side, crops_dir, full):
                 drawn = crop_around(drawn, centre, side).copy()
             drawn = draw_caption(drawn, rec, "%s f%d" % (model, frame))
             rel = os.path.join(name, "%s_f%03d.jpg" % (model, frame))
-            out = os.path.join(crops_dir, rel)
-            os.makedirs(os.path.dirname(out), exist_ok=True)
-            cv2.imwrite(out, drawn, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+            write_image(os.path.join(crops_dir, rel), drawn, "review crop")
             cells.append((model, rel, rec["kps_xy"] is None))
         rows.append((frame, cells))
     return entry, rows
 
 
 PAGE_CSS = """
-body{background:#14161a;color:#dde3ea;font:13px/1.5 -apple-system,Helvetica,sans-serif;margin:24px}
-h1{font-size:19px;margin:0 0 4px}
-h2{font-size:15px;margin:28px 0 6px;border-bottom:1px solid #2c313a;padding-bottom:4px}
-.meta{color:#8d97a5}
 .row{display:flex;gap:8px;align-items:flex-start;margin:8px 0}
 .tag{min-width:64px;color:#8d97a5;padding-top:4px}
 .tag.entry{color:#ffd166;font-weight:600}
-figure{margin:0}
-figure img{display:block;width:var(--w);border:2px solid #2c313a;border-radius:4px;background:#000}
 figure.miss img{border-color:#e03131}
-figcaption{color:#8d97a5;font-size:11px;text-align:center}
 """
-
 
 
 def write_page(path, sections, models, radius, cell_width):
     """写单页 HTML：一片段一节，一行一帧，行内按模型横排。"""
-    out = ["<!doctype html><html lang=\"zh\"><head><meta charset=\"utf-8\">",
-           "<title>入水检测 pose 复核</title><style>", PAGE_CSS,
-           ":root{--w:%dpx}" % cell_width, "</style></head><body>",
-           "<h1>入水检测机位 YOLO-pose 复核</h1>",
-           "<p class=\"meta\">模型横排：%s ｜ 每片段取入水帧 ±%d 帧 ｜ "
-           "黄行为基准入水帧，红框为该模型缺检 ｜ 橙点=肩中点，粉点=胯中点，"
-           "sho-hip 由负转正即入水判据</p>" % (html.escape(" / ".join(models)), radius)]
+    body = ["<h1>入水检测机位 YOLO-pose 复核</h1>",
+            "<p class=\"meta\">模型横排：%s ｜ 每片段取入水帧 ±%d 帧 ｜ "
+            "黄行为基准入水帧，红框为该模型缺检 ｜ 橙点=肩中点，粉点=胯中点，"
+            "sho-hip 由负转正即入水判据</p>"
+            % (escape(" / ".join(models)), radius)]
     for name, entry, rows, notes in sections:
-        out.append("<h2>%s <span class=\"meta\">entry=%d ｜ %s</span></h2>"
-                   % (html.escape(name), entry, html.escape(notes)))
+        body.append("<h2>%s <span class=\"meta\">entry=%d ｜ %s</span></h2>"
+                    % (escape(name), entry, escape(notes)))
         for frame, cells in rows:
             tag = "tag entry" if frame == entry else "tag"
-            out.append("<div class=\"row\"><div class=\"%s\">f%d</div>" % (tag, frame))
+            body.append("<div class=\"row\"><div class=\"%s\">f%d</div>" % (tag, frame))
             for model, rel, miss in cells:
-                out.append("<figure class=\"%s\"><img data-src=\"crops/%s\" "
-                           "alt=\"%s f%d\"><figcaption>%s</figcaption></figure>"
-                           % ("miss" if miss else "", rel,
-                              html.escape(model), frame, html.escape(model)))
-            out.append("</div>")
-    out.append("<script>%s</script></body></html>" % C.lazy_img_js(600))
-    with open(path, "w") as f:
-        f.write("\n".join(out))
+                body.append("<figure class=\"%s\"><img data-src=\"crops/%s\" "
+                            "alt=\"%s f%d\"><figcaption>%s</figcaption></figure>"
+                            % ("miss" if miss else "", rel,
+                               escape(model), frame, escape(model)))
+            body.append("</div>")
+    return write_html(path, "入水检测 pose 复核", body, css=PAGE_CSS,
+                      cell_width=cell_width)
 
 
 def main():

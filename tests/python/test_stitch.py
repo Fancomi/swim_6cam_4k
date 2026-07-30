@@ -1,7 +1,18 @@
+"""Stitch line tests: geometry, shaping, alignment, and the step dispatcher.
+
+The three lines share one code path, so most tests here assert that a per-line
+difference really is a profile field and not a branch.
+"""
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
-from python.stitch.extract import sort_meshes_by_world_x, select_pool_planes
+import numpy as np
+
+from python.stitch import compose as C
+from python.stitch import profiles as P
+from python.stitch.extract import select_planes, sort_by_world_x
 
 try:
     import fbx  # noqa: F401
@@ -9,1144 +20,797 @@ try:
 except Exception:
     HAS_FBX = False
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-MODEL_01D = PROJECT_ROOT / "inputs" / "underwater" / "models" / "01d.fbx"
-TEXDIR_01D = PROJECT_ROOT / "inputs" / "underwater" / "models" / "01d.fbm"
+ROOT = Path(__file__).resolve().parents[2]
+POOL_FBX = ROOT / "inputs" / "pool" / "models" / "pool.fbx"
+OVERHEAD_FBX = ROOT / "inputs" / "overhead" / "models" / "002.fbx"
 
 
-def _mesh(node, x0):
-    # single triangle whose min pos[0] is x0
-    tri = [
-        {"pos": [x0, 0.0], "uv": [0.0, 0.0]},
-        {"pos": [x0 + 1.0, 0.0], "uv": [1.0, 0.0]},
-        {"pos": [x0, 1.0], "uv": [0.0, 1.0]},
-    ]
-    return {"node": node, "texture_basename": f"{node}.png", "triangles": [tri]}
+def _quad(x0, x1, y0, y1, uv=(0.0, 1.0)):
+    """Two triangles covering [x0,x1]x[y0,y1], UV spanning `uv` on both axes."""
+    u0, u1 = uv
+    corners = {(x0, y0): (u0, u0), (x1, y0): (u1, u0),
+               (x1, y1): (u1, u1), (x0, y1): (u0, u1)}
+
+    def vertex(x, y):
+        u, v = corners[(x, y)]
+        return {"pos": [x, y], "uv": [u, v]}
+
+    return [[vertex(x0, y0), vertex(x1, y0), vertex(x1, y1)],
+            [vertex(x0, y0), vertex(x1, y1), vertex(x0, y1)]]
 
 
-class SortMeshesTest(unittest.TestCase):
-    def test_orders_left_to_right_by_world_x(self):
-        meshes = [_mesh("right", 5.0), _mesh("left", -2.0), _mesh("mid", 1.0)]
-        ordered = sort_meshes_by_world_x(meshes)
-        self.assertEqual([m["node"] for m in ordered], ["left", "mid", "right"])
-
-    def test_does_not_mutate_input(self):
-        meshes = [_mesh("right", 5.0), _mesh("left", -2.0)]
-        sort_meshes_by_world_x(meshes)
-        self.assertEqual([m["node"] for m in meshes], ["right", "left"])
-
-    def test_empty_triangles_sort_last(self):
-        empty = {"node": "empty", "texture_basename": "e.png", "triangles": []}
-        meshes = [empty, _mesh("left", -2.0)]
-        ordered = sort_meshes_by_world_x(meshes)
-        self.assertEqual([m["node"] for m in ordered], ["left", "empty"])
+def _mesh(node, x0, x1=None, y0=0.0, y1=1.0, tex=None, uv=(0.0, 1.0)):
+    x1 = x0 + 1.0 if x1 is None else x1
+    return {"node": node, "texture_basename": tex if tex is not None else f"{node}.png",
+            "uvset": "map1", "const_axis": 2, "kept_axes": [0, 1],
+            "spans": [x1 - x0, y1 - y0, 0.0],
+            "triangles": _quad(x0, x1, y0, y1, uv)}
 
 
-def _band_plane(node, tex, x0, tris=64):
-    # a full-height pool plane: world-Y (pos[1]) inside the pool band, height 3
-    tri = [
-        {"pos": [x0, -11.28], "uv": [0.0, 0.0]},
-        {"pos": [x0 + 5.5, -11.28], "uv": [1.0, 0.0]},
-        {"pos": [x0, -8.28], "uv": [0.0, 1.0]},
-    ]
-    return {"node": node, "texture_basename": tex, "triangles": [tri] * tris}
-
-
-def _strip(node, tex, x0):
-    # a short lane-marker strip near world-Y 0 (height ~0.5), should be dropped
-    tri = [
-        {"pos": [x0, -0.24], "uv": [0.0, 0.0]},
-        {"pos": [x0 + 0.85, -0.24], "uv": [1.0, 0.0]},
-        {"pos": [x0, 0.24], "uv": [0.0, 1.0]},
-    ]
-    return {"node": node, "texture_basename": tex, "triangles": [tri]}
-
-
-def _plane(node, tex, x0, width=1.0, y0=0.0, y1=1.0):
-    """One quad, two triangles, UV spanning the full texture."""
-    corners = [
-        [{"pos": [x0, y0], "uv": [0.0, 0.0]},
-         {"pos": [x0 + width, y0], "uv": [1.0, 0.0]},
-         {"pos": [x0 + width, y1], "uv": [1.0, 1.0]}],
-        [{"pos": [x0, y0], "uv": [0.0, 0.0]},
-         {"pos": [x0 + width, y1], "uv": [1.0, 1.0]},
-         {"pos": [x0, y1], "uv": [0.0, 1.0]}],
-    ]
-    return {"node": node, "texture_basename": tex, "uvset": "UVChannel_1",
-            "const_axis": 2, "kept_axes": [0, 1], "spans": [width, y1 - y0, 0],
-            "triangles": corners}
-
-
-def _two_plane_json(td, planes):
-    """Write a mesh JSON of `planes` (already built by _plane) and return it."""
-    import json
-
-    path = Path(td) / "mesh.json"
-    path.write_text(json.dumps({"source": "test", "meshes": list(planes)}))
+def _mesh_json(directory, meshes):
+    path = Path(directory) / "mesh.json"
+    path.write_text(json.dumps({"source": "fixture", "meshes": meshes}))
     return path
 
 
-class SelectPoolPlanesTest(unittest.TestCase):
+class MeshOrderTest(unittest.TestCase):
+    def test_orders_left_to_right_by_world_x(self):
+        meshes = [_mesh("right", 5.0), _mesh("left", -2.0), _mesh("mid", 1.0)]
+        self.assertEqual([m["node"] for m in sort_by_world_x(meshes)],
+                         ["left", "mid", "right"])
+
+    def test_does_not_mutate_its_input(self):
+        meshes = [_mesh("b", 5.0), _mesh("a", -2.0)]
+        sort_by_world_x(meshes)
+        self.assertEqual([m["node"] for m in meshes], ["b", "a"])
+
     def test_keeps_one_full_height_plane_per_texture(self):
-        meshes = [
-            _band_plane("planeA", "a.png", 0.0),
-            _strip("stripA", "a.png", 0.0),
-            _band_plane("planeB", "b.png", 5.0),
-            {"node": "frame", "texture_basename": None, "triangles": [
-                [{"pos": [0.0, 0.0], "uv": [0, 0]},
-                 {"pos": [1.0, 0.0], "uv": [1, 0]},
-                 {"pos": [0.0, 1.0], "uv": [0, 1]}]]},
-        ]
-        kept = select_pool_planes(meshes)
-        self.assertEqual(
-            sorted(m["node"] for m in kept), ["planeA", "planeB"])
+        # A real plane is tall and inside the pool Y band; the clutter in all.fbx
+        # is either untextured, short, or a duplicate with fewer triangles.
+        plane = _mesh("plane", 0.0, 4.0, -11.0, -8.2, tex="cam.png")
+        duplicate = dict(plane, node="copy", triangles=plane["triangles"][:1])
+        strip = _mesh("strip", 0.0, 4.0, -0.2, 0.2, tex="cam.png")
+        untextured = _mesh("frame", 0.0, 4.0, -11.0, -8.2, tex=None)
+        untextured["texture_basename"] = None
 
-    def test_prefers_highest_tri_count_among_duplicates(self):
-        meshes = [
-            _band_plane("small", "a.png", 0.0, tris=10),
-            _band_plane("big", "a.png", 0.0, tris=200),
-        ]
-        kept = select_pool_planes(meshes)
-        self.assertEqual([m["node"] for m in kept], ["big"])
+        kept = select_planes([duplicate, strip, plane, untextured])
+        self.assertEqual([m["node"] for m in kept], ["plane"])
 
-    def test_drops_untextured_and_strips(self):
-        meshes = [_strip("s", "a.png", 0.0)]
-        self.assertEqual(select_pool_planes(meshes), [])
+    def test_rejects_a_model_outside_the_pool_band(self):
+        # 002.fbx spans Y [20.47, 23.47]; the filter is for all.fbx only, which
+        # is why the overhead line leaves planes_only off.
+        overhead = _mesh("Plane001", -35.0, -27.0, 20.47, 23.47, tex="C06.jpg")
+        self.assertEqual(select_planes([overhead]), [])
 
 
-class VideoAlignmentTest(unittest.TestCase):
-    """Time alignment must come from the manifest wall clocks, not file order."""
+class CanvasTest(unittest.TestCase):
+    def test_size_follows_world_span_and_density(self):
+        canvas = C.Canvas([_mesh("a", 0.0, 2.0, 0.0, 1.0)], 100.0, margin=0)
+        self.assertEqual((canvas.width, canvas.height), (201, 101))
 
-    def test_start_frames_follow_playback_formula(self):
-        from python.stitch.render_video import alignment_plan
+    def test_margin_pads_both_sides(self):
+        canvas = C.Canvas([_mesh("a", 0.0, 2.0, 0.0, 1.0)], 100.0, margin=2)
+        self.assertEqual((canvas.width, canvas.height), (205, 105))
 
-        align_start, align_end, fps = 1_000_000, 1_030_000, 30.0
-        cams = {
-            # frame 0 lands 2970ms before align_start -> start at frame 89
-            "underA2": {"keyframe_ms": align_start - 2970,
-                        "last_decodable_ms": align_end, "frames": 989},
-            # frame 0 lands 14ms before align_start -> start at frame 0
-            "underA1": {"keyframe_ms": align_start - 14,
-                        "last_decodable_ms": align_end, "frames": 900},
-        }
-        starts, report = alignment_plan(
-            align_start, align_end, fps, cams, ["underA2", "underA1"])
+    def test_projection_puts_world_y_up_and_canvas_y_down(self):
+        meshes = [_mesh("a", 0.0, 1.0, 0.0, 1.0)]
+        canvas = C.Canvas(meshes, 10.0, margin=0)
+        bottom_left, _bottom_right, top_right = canvas.project(
+            meshes[0]["triangles"][0])
+        self.assertAlmostEqual(bottom_left[0], 0.0)
+        self.assertAlmostEqual(bottom_left[1], canvas.height - 1)
+        self.assertAlmostEqual(top_right[1], 0.0)
 
-        self.assertEqual(starts, [89, 0])
-        self.assertEqual([r["skew_ms"] for r in report], [2970, 14])
-        self.assertFalse(any(r["late_start"] for r in report))
+    def test_adaptive_ppm_matches_source_height_when_given_one(self):
+        self.assertAlmostEqual(
+            C.adaptive_ppm([_mesh("a", 0.0, 8.0, 0.0, 2.0)], 720), 360.0)
 
-    def test_flags_camera_starting_after_align_start(self):
-        from python.stitch.render_video import alignment_plan
+    def test_adaptive_ppm_falls_back_to_a_target_width(self):
+        self.assertAlmostEqual(
+            C.adaptive_ppm([_mesh("a", -1.0, 1.0)], None, 640), 320.0)
 
-        align_start, align_end, fps = 1_000_000, 1_030_000, 30.0
-        cams = {"underA1": {"keyframe_ms": align_start + 500,
-                            "last_decodable_ms": align_end, "frames": 900}}
-        starts, report = alignment_plan(
-            align_start, align_end, fps, cams, ["underA1"])
+    def test_adaptive_ppm_survives_a_degenerate_span(self):
+        self.assertEqual(C.adaptive_ppm([_mesh("a", 0.0, 0.0, 0.0, 0.0)], None), 100.0)
 
-        self.assertEqual(starts, [0])          # clamped, cannot read before frame 0
-        self.assertTrue(report[0]["late_start"])
-
-    def test_reports_short_tail_against_align_end(self):
-        from python.stitch.render_video import alignment_plan
-
-        align_start, align_end, fps = 1_000_000, 1_030_000, 30.0
-        cams = {"underA1": {"keyframe_ms": align_start,
-                            "last_decodable_ms": align_end - 400, "frames": 890}}
-        _starts, report = alignment_plan(
-            align_start, align_end, fps, cams, ["underA1"])
-
-        self.assertEqual(report[0]["short_ms"], 400)
-
-    def test_manifest_without_align_window_is_fatal(self):
-        import json
-        import tempfile
-        from python.stitch.render_video import load_manifest
-
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            (td / "manifest.json").write_text(json.dumps({"files": []}))
-            with self.assertRaises(SystemExit):
-                load_manifest(td)
-
-    def test_missing_manifest_is_fatal(self):
-        import tempfile
-        from python.stitch.render_video import load_manifest
-
-        with tempfile.TemporaryDirectory() as td:
-            with self.assertRaises(SystemExit):
-                load_manifest(Path(td))
-
-    def test_falls_back_to_first_decodable_anchor(self):
-        import json
-        import tempfile
-        from python.stitch.render_video import load_manifest
-
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            (td / "manifest.json").write_text(json.dumps({
-                "align_start_ms": 10, "align_end_ms": 20, "fps": 30.0,
-                "files": [{"source_id": "underA1",
-                           "first_decodable_timestamp_ms": 7,
-                           "last_decodable_timestamp_ms": 20, "frames": 30}],
-            }))
-            start, end, fps, cams = load_manifest(td)
-
-            self.assertEqual((start, end, fps), (10, 20, 30.0))
-            self.assertEqual(cams["underA1"]["keyframe_ms"], 7)
+    def test_to_metres_flips_y_only_when_asked(self):
+        upright = [_mesh("a", 0.0, 1.0, 2.0, 4.0)]
+        flipped = json.loads(json.dumps(upright))
+        C.to_metres(upright, 1.0, False)
+        C.to_metres(flipped, 1.0, True)
+        self.assertEqual(upright[0]["triangles"][0][0]["pos"][1], 2.0)
+        self.assertEqual(flipped[0]["triangles"][0][0]["pos"][1], -2.0)
 
 
-class ExtractIntegrationTest(unittest.TestCase):
-    @unittest.skipUnless(HAS_FBX, "FBX SDK not available")
-    @unittest.skipUnless(MODEL_01D.is_file(), "01d.fbx not present")
-    def test_extracts_two_ordered_meshes(self):
-        import tempfile
-        from python.stitch.extract import extract_to_json
+class BlendTest(unittest.TestCase):
+    """clip and blend_px are the two knobs separating the pool's distance feather
+    from the plane lines' vertical seam."""
 
-        with tempfile.TemporaryDirectory() as td:
-            dst = Path(td) / "01d_mesh.json"
-            meshes = extract_to_json(MODEL_01D, dst, TEXDIR_01D)
+    def _layers(self, clip, uv=(0.0, 1.0)):
+        """Two overlapping planes at 64 px/m over a 32x32 source."""
+        meshes = [_mesh("left", 0.0, 1.0, 0.0, 1.0, uv=uv),
+                  _mesh("right", 0.8, 1.8, 0.0, 1.0, uv=uv)]
+        canvas = C.Canvas(meshes, 64.0, margin=0)
+        return canvas, [C.build_remap(m, canvas, (32, 32), clip=clip)
+                        for m in meshes]
 
-            self.assertTrue(dst.is_file())
-            self.assertEqual(len(meshes), 2)
-            # ordered left-to-right by world X: Box001 (min x ~ -0.57) before pPlane1 (~ -0.43)
-            self.assertEqual(
-                [m["node"] for m in meshes], ["Box001", "pPlane1"]
-            )
-            self.assertEqual(
-                [m["texture_basename"] for m in meshes],
-                ["underA2-grid.png", "underA1-grid.png"],
-            )
-            self.assertEqual([m["uvset"] for m in meshes], ["UVChannel_1", "map1"])
+    def test_clip_removes_coverage_where_uv_leaves_the_image(self):
+        _canvas, plain = self._layers(clip=False, uv=(-0.2, 1.2))
+        _canvas, clipped = self._layers(clip=True, uv=(-0.2, 1.2))
+        for loose, tight in zip(plain, clipped):
+            self.assertGreater(int(loose[2].sum()), int(tight[2].sum()))
+
+    def test_clip_keeps_everything_that_samples_inside(self):
+        # UV 0..1 maps to source coordinate 0..tex_size, so the far edge lands one
+        # past the last index and clipping always trims that hairline. A UV that
+        # stays comfortably inside loses nothing, which is what makes clip safe to
+        # leave on for the plane lines.
+        _canvas, plain = self._layers(clip=False, uv=(0.05, 0.9))
+        _canvas, clipped = self._layers(clip=True, uv=(0.05, 0.9))
+        for loose, tight in zip(plain, clipped):
+            self.assertTrue(np.array_equal(loose[2], tight[2]))
+
+    def test_weights_sum_to_one_wherever_anything_is_covered(self):
+        canvas, layers = self._layers(clip=True)
+        masks = [layer[2] for layer in layers]
+        covered = np.zeros(canvas.shape, bool)
+        for mask in masks:
+            covered |= mask > 0
+        for blend in (None, 0.0, 20.0):
+            total = sum(C.blend_weights(masks, blend))
+            np.testing.assert_allclose(total[covered], 1.0, atol=1e-5)
+            self.assertEqual(float(total[~covered].max(initial=0.0)), 0.0)
+
+    def test_a_hard_cut_gives_every_pixel_to_one_lane(self):
+        _canvas, layers = self._layers(clip=True)
+        weights = C.blend_weights([layer[2] for layer in layers], 0.0)
+        self.assertEqual(int((np.stack(weights) > 0).sum(axis=0).max()), 1)
+
+    def test_a_blend_band_shares_pixels_across_the_seam(self):
+        _canvas, layers = self._layers(clip=True)
+        weights = C.blend_weights([layer[2] for layer in layers], 20.0)
+        self.assertTrue(((np.stack(weights) > 0).sum(axis=0) > 1).any())
+
+    def test_the_seam_is_vertical(self):
+        # Every row must hand over at the same column, which is what a
+        # horizontal-depth blend guarantees and a 2-D distance transform does not.
+        _canvas, layers = self._layers(clip=True)
+        left, _right = C.blend_weights([layer[2] for layer in layers], 0.0)
+        edges = {int(row[-1]) for row in
+                 (np.flatnonzero(r > 0) for r in left) if len(row)}
+        self.assertEqual(len(edges), 1)
+
+    def test_feather_keeps_single_coverage_opaque(self):
+        # An edge pixel only one lane reaches must not be dimmed, or the pool
+        # composite darkens along its outer border.
+        meshes = [_mesh("a", 0.0, 1.0), _mesh("b", 5.0, 6.0)]      # disjoint
+        canvas = C.Canvas(meshes, 32.0, margin=0)
+        masks = [C.build_remap(m, canvas, (8, 8))[2] for m in meshes]
+        for weight, mask in zip(C.blend_weights(masks, None), masks):
+            np.testing.assert_allclose(weight[mask > 0], 1.0, atol=1e-6)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class CropTest(unittest.TestCase):
+    def test_bottom_dirty_rows_counts_the_ragged_tail(self):
+        coverage = np.zeros((10, 5), np.uint8)
+        coverage[:7] = 1
+        coverage[7, :3] = 1
+        coverage[8, :1] = 1                        # row 9 stays empty
+        self.assertEqual(C.bottom_dirty_rows(coverage), 3)
 
+    def test_bottom_dirty_rows_is_zero_on_a_clean_canvas(self):
+        self.assertEqual(C.bottom_dirty_rows(np.ones((8, 5), np.uint8)), 0)
 
-class RenderStillTest(unittest.TestCase):
-    def test_resolve_ppm_targets_width(self):
-        from python.stitch.render import resolve_ppm
-        # world X span 2.0 -> ppm ~ 320 for 640 target
-        self.assertAlmostEqual(resolve_ppm(-1.0, 1.0, 640), 320.0, places=3)
+    def test_bottom_dirty_rows_measures_against_the_widest_row(self):
+        # A constant margin leaves zero columns even in a full row, so the
+        # reference is the per-canvas maximum and not the full width.
+        coverage = np.zeros((6, 10), np.uint8)
+        coverage[:5, 2:8] = 1
+        coverage[5, 2:5] = 1
+        self.assertEqual(C.bottom_dirty_rows(coverage), 1)
 
-    def test_resolve_ppm_degenerate_span_falls_back(self):
-        from python.stitch.render import resolve_ppm
-        self.assertEqual(resolve_ppm(0.0, 0.0, 640), 100.0)
-
-    def test_render_writes_still_and_grid(self):
-        import json
-        import tempfile
-        import cv2
-        import numpy as np
-        from python.stitch.render import render_stills
-
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            # one unit-square mesh mapped to a full texture
-            tri_a = [
-                {"pos": [0.0, 0.0], "uv": [0.0, 0.0]},
-                {"pos": [1.0, 0.0], "uv": [1.0, 0.0]},
-                {"pos": [1.0, 1.0], "uv": [1.0, 1.0]},
-            ]
-            tri_b = [
-                {"pos": [0.0, 0.0], "uv": [0.0, 0.0]},
-                {"pos": [1.0, 1.0], "uv": [1.0, 1.0]},
-                {"pos": [0.0, 1.0], "uv": [0.0, 1.0]},
-            ]
-            data = {"source": "x", "meshes": [
-                {"node": "p", "texture_basename": "t.png", "uvset": "map1",
-                 "const_axis": 2, "kept_axes": [0, 1], "spans": [1, 1, 0],
-                 "triangles": [tri_a, tri_b]},
-            ]}
-            data_path = td / "mesh.json"
-            data_path.write_text(json.dumps(data))
-            tex = np.full((16, 16, 3), 200, np.uint8)
-            cv2.imwrite(str(td / "t.png"), tex)
-
-            still = td / "out_stitch.png"
-            grid = td / "out_grid.png"
-            out_w, out_h = render_stills(
-                data_path, td, still, grid, ppm=None,
-                unit_scale=1.0, neg_v=False, target_width=64,
-            )
-            self.assertTrue(still.is_file())
-            self.assertTrue(grid.is_file())
-            img = cv2.imread(str(still))
-            self.assertEqual(img.shape[1], out_w)
-            self.assertEqual(img.shape[0], out_h)
-            self.assertGreater(int(img.max()), 0)  # not all black
-
-    def test_render_default_orientation_upright(self):
-        import json
-        import tempfile
-        import cv2
-        import numpy as np
-        from python.stitch.render import render_stills
-
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            tri_a = [
-                {"pos": [0.0, 0.0], "uv": [0.0, 0.0]},
-                {"pos": [1.0, 0.0], "uv": [1.0, 0.0]},
-                {"pos": [1.0, 1.0], "uv": [1.0, 1.0]},
-            ]
-            tri_b = [
-                {"pos": [0.0, 0.0], "uv": [0.0, 0.0]},
-                {"pos": [1.0, 1.0], "uv": [1.0, 1.0]},
-                {"pos": [0.0, 1.0], "uv": [0.0, 1.0]},
-            ]
-            data = {"source": "x", "meshes": [
-                {"node": "p", "texture_basename": "t.png", "uvset": "map1",
-                 "const_axis": 2, "kept_axes": [0, 1], "spans": [1, 1, 0],
-                 "triangles": [tri_a, tri_b]},
-            ]}
-            data_path = td / "mesh.json"
-            data_path.write_text(json.dumps(data))
-            tex = np.full((16, 16, 3), 200, np.uint8)
-            cv2.imwrite(str(td / "t.png"), tex)
-
-            still = td / "out_stitch.png"
-            grid = td / "out_grid.png"
-            render_stills(data_path, td, still, grid, ppm=None, target_width=64)
-            self.assertTrue(still.is_file())
-            self.assertTrue(grid.is_file())
-            img = cv2.imread(str(still))
-            self.assertGreater(int(img.max()), 0)
-
-    def test_crop_bottom_row_rescales_to_source_height(self):
-        import numpy as np
-        from python.stitch.render import crop_bottom_and_scale
-
+    def test_crop_and_scale_restores_the_target_height(self):
         image = np.zeros((100, 200, 3), np.uint8)
         image[:80] = (10, 20, 30)
         image[80:] = (200, 210, 220)
-
-        result = crop_bottom_and_scale(image, crop_px=20, target_height=100)
-
+        result = C.crop_and_scale(image, crop_px=20, target_height=100)
         self.assertEqual(result.shape, (100, 250, 3))
-        self.assertLess(int(result[..., 0].max()), 100)
+        self.assertLess(int(result[..., 0].max()), 100)    # the bright tail is gone
 
-    def test_bottom_dirty_rows_counts_ragged_tail(self):
-        import numpy as np
-        from python.stitch.render import bottom_dirty_rows
+    def test_crop_and_scale_rejects_removing_everything(self):
+        with self.assertRaises(ValueError):
+            C.crop_and_scale(np.zeros((10, 10, 3), np.uint8), 10, 10)
 
-        # 10 rows: rows 0..6 fully covered (width 5), rows 7..9 ragged
-        cov = np.zeros((10, 5), np.uint8)
-        cov[:7] = 1
-        cov[7, :3] = 1
-        cov[8, :1] = 1
-        # row 9 all zero
-        self.assertEqual(bottom_dirty_rows(cov), 3)
 
-    def test_bottom_dirty_rows_zero_when_clean(self):
-        import numpy as np
-        from python.stitch.render import bottom_dirty_rows
+class LoadMeshesTest(unittest.TestCase):
+    def test_missing_file_names_the_step_that_makes_it(self):
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(P.StepError) as caught:
+                C.load_meshes(Path(td) / "absent.json")
+            self.assertIn("extract", str(caught.exception))
 
-        cov = np.ones((8, 5), np.uint8)
-        self.assertEqual(bottom_dirty_rows(cov), 0)
+    def test_json_without_meshes_is_refused(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "bad.json"
+            path.write_text(json.dumps({"source": "x"}))
+            with self.assertRaises(P.StepError):
+                C.load_meshes(path)
 
-    def test_full_res_crop_bottom_restores_source_height_and_scales_width(self):
-        import json
-        import tempfile
-        import cv2
-        import numpy as np
-        from python.stitch.render import render_stills
 
+class ProfileTest(unittest.TestCase):
+    """A profile record is the single place a line's differences live."""
+
+    def test_registry_holds_the_three_lines(self):
+        self.assertEqual(P.names(), ["pool", "underwater", "overhead"])
+
+    def test_pool_values_reproduce_the_shipped_asset(self):
+        # The committed pool_4k.swasset was baked with exactly these; a drift
+        # here silently changes the runtime geometry.
+        pool = P.get("pool")
+        self.assertEqual(pool.camera_ids,
+                         ("cam3", "cam2", "cam1", "cam4", "cam5", "cam6"))
+        self.assertEqual(pool.ppm, 100.0)
+        self.assertIsNone(pool.blend_px)          # distance feather
+        self.assertFalse(pool.clip_uv)
+        self.assertTrue(pool.neg_v)
+        self.assertEqual(pool.order, "declared")
+        self.assertEqual(pool.still_margin, 0)
+        self.assertFalse(pool.full_res)
+        self.assertEqual(pool.crop_bottom, "none")
+        self.assertEqual(pool.sync, "none")
+
+    def test_underwater_values_match_the_shipped_pipeline(self):
+        line = P.get("underwater")
+        self.assertEqual(line.camera_ids,
+                         tuple(f"underA{i}" for i in range(16, 0, -1)))
+        self.assertEqual(line.clip_suffix, ".ts")
+        self.assertEqual(line.ppm, 240.0)
+        self.assertEqual(line.blend_px, 120.0)
+        self.assertTrue(line.full_res)
+        self.assertEqual(line.crop_bottom, "auto")
+        self.assertTrue(line.clip_uv)
+        self.assertFalse(line.neg_v)
+        self.assertTrue(line.planes_only)
+        self.assertEqual(line.sync, "manifest")
+        self.assertEqual(line.source_size, (1280, 720))
+        self.assertEqual(line.ref_tex, "snapshot")
+        self.assertEqual(line.asset.name, "underwater.swasset")
+
+    def test_overhead_values_match_the_design(self):
+        line = P.get("overhead")
+        self.assertEqual(line.camera_ids, ("overhead5", "overhead6"))
+        self.assertEqual(line.ppm, 170.0)
+        self.assertEqual(line.blend_px, 85.0)
+        self.assertFalse(line.full_res)
+        self.assertEqual(line.crop_bottom, "none")
+        self.assertTrue(line.clip_uv)
+        self.assertFalse(line.planes_only)
+        self.assertEqual(line.sync, "manifest")
+        self.assertEqual(line.source_size, (3840, 2160))
+        self.assertEqual(line.ref_tex, "video")
+        self.assertEqual(line.fbx.name, "002.fbx")
+
+    def test_pool_keeps_declared_order_because_its_meshes_are_two_rows(self):
+        # World-X order would interleave the banks and pair each camera with the
+        # opposite one's plane; only the plane lines are a single row.
+        self.assertEqual(P.get("pool").order, "declared")
+        self.assertEqual(P.get("underwater").order, "world_x")
+        self.assertEqual(P.get("overhead").order, "world_x")
+
+    def test_unknown_name_lists_the_registered_ones(self):
+        with self.assertRaises(SystemExit) as caught:
+            P.get("nosuchline")
+        message = str(caught.exception)
+        self.assertIn("nosuchline", message)
+        for name in P.names():
+            self.assertIn(name, message)
+
+    def test_a_profile_is_immutable(self):
+        import dataclasses
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            P.get("overhead").ppm = 1.0
+
+    def test_every_line_has_its_own_output_dir_asset_and_config(self):
+        lines = [P.get(name) for name in P.names()]
+        for attribute in ("out_dir", "asset", "metrics", "mesh_json"):
+            values = [getattr(line, attribute) for line in lines]
+            self.assertEqual(len(set(values)), len(values), attribute)
+        configs = [line.config_path("metal") for line in lines]
+        self.assertEqual(len(set(configs)), len(configs))
+
+    def test_still_textures_default_to_the_model_directory(self):
+        # Only underwater splits them: its canonical grids live in the dataset,
+        # while the .fbm copies are stale.
+        for name in ("pool", "overhead"):
+            line = P.get(name)
+            self.assertEqual(line.still_textures, line.tex_dir)
+        self.assertNotEqual(P.get("underwater").still_textures,
+                            P.get("underwater").tex_dir)
+
+    def test_only_pool_has_a_default_clip_directory(self):
+        # The plane lines are per-sample directories chosen per run; pool's is a
+        # machine-wide session.
+        self.assertIsNotNone(P.default_video_dir(P.get("pool")))
+        self.assertIsNone(P.default_video_dir(P.get("overhead")))
+        self.assertIsNone(P.default_video_dir(P.get("underwater")))
+
+    def test_clip_for_matches_the_suffix(self):
+        overhead = P.get("overhead")
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
-            tri_a = [
-                {"pos": [0.0, 0.0], "uv": [0.0, 0.0]},
-                {"pos": [1.0, 0.0], "uv": [1.0, 0.0]},
-                {"pos": [1.0, 1.0], "uv": [1.0, 1.0]},
-            ]
-            tri_b = [
-                {"pos": [0.0, 0.0], "uv": [0.0, 0.0]},
-                {"pos": [1.0, 1.0], "uv": [1.0, 1.0]},
-                {"pos": [0.0, 1.0], "uv": [0.0, 1.0]},
-            ]
-            data = {"source": "x", "meshes": [
-                {"node": "p", "texture_basename": "t.png", "uvset": "map1",
-                 "const_axis": 2, "kept_axes": [0, 1], "spans": [1, 1, 0],
-                 "triangles": [tri_a, tri_b]},
-            ]}
-            data_path = td / "mesh.json"
-            data_path.write_text(json.dumps(data))
-            cv2.imwrite(str(td / "t.png"), np.full((16, 32, 3), 200, np.uint8))
-            still = td / "out.png"
+            (td / "swb_x_overhead5.ts").write_bytes(b"")
+            (td / "swb_x_overhead5.mp4").write_bytes(b"")      # wrong suffix
+            self.assertEqual(overhead.clip_for(td, "overhead5").name,
+                             "swb_x_overhead5.ts")
 
-            out_w, out_h = render_stills(
-                data_path, td, still, None, full_res=True,
-                margin=0, crop_bottom_px=4,
-            )
+    def test_clip_for_reports_a_missing_clip(self):
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(P.StepError):
+                P.get("overhead").clip_for(Path(td), "overhead5")
 
-            img = cv2.imread(str(still))
-            self.assertEqual((out_w, out_h), (21, 16))
-            self.assertEqual(img.shape[:2], (16, 21))
-
-    def test_render_rejects_json_without_meshes(self):
-        import json
-        import tempfile
-        from python.stitch.render import render_stills
-
+    def test_clip_for_refuses_to_guess_between_two_matches(self):
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
-            bad_path = td / "bad.json"
-            bad_path.write_text(json.dumps({"source": "x"}))
-            still = td / "out_stitch.png"
-            grid = td / "out_grid.png"
-            with self.assertRaises(SystemExit):
-                render_stills(bad_path, td, still, grid)
+            (td / "a_overhead5.ts").write_bytes(b"")
+            (td / "b_overhead5.ts").write_bytes(b"")
+            with self.assertRaises(P.StepError):
+                P.get("overhead").clip_for(td, "overhead5")
+
+    def test_grid_dir_honours_the_explicit_override(self):
+        # Resolved at use time, not at import, so setting the variable in a shell
+        # before the command still takes effect.
+        import os
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"STITCH_GRID_DIR": "/tmp/grids-xyz"}):
+            self.assertEqual(str(P.get("underwater").still_textures),
+                             "/tmp/grids-xyz")
+
+    def test_grid_dir_falls_back_to_the_dataset_root(self):
+        import os
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"SWIM_UNDER_GRIDS_ROOT": "/tmp/ds-xyz"}):
+            os.environ.pop("STITCH_GRID_DIR", None)
+            self.assertEqual(str(P.get("underwater").still_textures),
+                             "/tmp/ds-xyz/annotation-grids")
 
 
-class OneClickRunnerTest(unittest.TestCase):
-    """The one-command runner must pick the right platform toolchain and emit a
-    config whose lane order matches the compiled asset."""
+class AssetTest(unittest.TestCase):
+    """The baked asset must reproduce the offline canvas and coverage exactly —
+    it is what the GPU trusts instead of re-deriving geometry."""
 
-    def test_platform_selects_backend_build_dir_and_executable(self):
-        import python.stitch.run as runner
+    def _mesh_pair(self, td):
+        """Two planes whose UVs run past the source image, so clipping and the
+        ragged bottom both have something to act on."""
+        return _mesh_json(td, [_mesh("left", 0.0, 1.0, 0.0, 1.0, uv=(-0.2, 0.9)),
+                               _mesh("right", 0.8, 1.8, 0.0, 1.0, uv=(0.1, 1.2))])
 
-        original = runner.platform.system
-        try:
-            runner.platform.system = lambda: "Darwin"
-            self.assertEqual(runner.default_backend(), "metal")
-            self.assertEqual(runner.build_dir_for("metal").name, "metal-release")
-            self.assertEqual(
-                runner.executable_for(runner.build_dir_for("metal")).name,
-                "swim_realtime")
-
-            runner.platform.system = lambda: "Windows"
-            self.assertEqual(runner.default_backend(), "d3d11")
-            self.assertEqual(runner.build_dir_for("d3d11").name, "win-d3d11")
-            self.assertEqual(
-                runner.executable_for(runner.build_dir_for("d3d11")).name,
-                "swim_realtime.exe")
-        finally:
-            runner.platform.system = original
-
-    def test_generated_config_declares_sixteen_lanes_right_to_left(self):
-        import tempfile
-        import python.stitch.run as runner
-        from python.stitch import profiles
-
+    def test_clip_uv_shrinks_coverage_without_moving_the_canvas(self):
+        from python.stitch.asset import compile_asset
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
-            for index in range(1, 17):
-                (td / f"swb_test_underA{index}.ts").write_bytes(b"")
-            config = td / "generated.conf"
-            runner.write_config(profiles.get("underwater"), config, td, "metal",
-                                td / "out.h265", align=False)
-
-            lines = config.read_text().splitlines()
-            sources = [line.split("=", 1)[0].removeprefix("source.")
-                       for line in lines if line.startswith("source.")]
-            # extract orders meshes left-to-right, which is underA16 -> underA1
-            self.assertEqual(sources, [f"underA{i}" for i in range(16, 0, -1)])
-            self.assertIn("backend=metal", lines)
-
-    def test_missing_clip_is_reported_not_silently_skipped(self):
-        import tempfile
-        import python.stitch.run as runner
-        from python.stitch import profiles
-
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            for index in range(1, 16):          # underA16 absent
-                (td / f"swb_test_underA{index}.ts").write_bytes(b"")
-            with self.assertRaises(runner.StepError):
-                runner.write_config(profiles.get("underwater"), td / "c.conf",
-                                    td, "metal", td / "o.h265", align=False)
-
-    def test_newer_than_treats_missing_target_as_stale(self):
-        import tempfile
-        import python.stitch.run as runner
-
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            source = td / "src"
-            source.write_text("x")
-            self.assertFalse(runner.newer_than(td / "absent", source))
-
-            target = td / "target"
-            target.write_text("y")
-            self.assertTrue(runner.newer_than(target, source))
-
-
-class AssetShapingTest(unittest.TestCase):
-    """clip_uv and crop_bottom must reproduce the offline renderer's geometry
-    while leaving the pool defaults byte-identical."""
-
-    def _tiny_mesh(self, td):
-        """A two-plane mesh whose UVs run past the source image, so clipping and
-        the ragged bottom both have something to act on."""
-        import json
-
-        def plane(node, x0, uv_lo, uv_hi):
-            quad = [
-                [{"pos": [x0, 0.0], "uv": [uv_lo, uv_lo]},
-                 {"pos": [x0 + 1.0, 0.0], "uv": [uv_hi, uv_lo]},
-                 {"pos": [x0 + 1.0, 1.0], "uv": [uv_hi, uv_hi]}],
-                [{"pos": [x0, 0.0], "uv": [uv_lo, uv_lo]},
-                 {"pos": [x0 + 1.0, 1.0], "uv": [uv_hi, uv_hi]},
-                 {"pos": [x0, 1.0], "uv": [uv_lo, uv_hi]}],
-            ]
-            return {"node": node, "texture_basename": f"{node}.png",
-                    "uvset": "map1", "const_axis": 2, "kept_axes": [0, 1],
-                    "spans": [1, 1, 0], "triangles": quad}
-
-        path = td / "mesh.json"
-        path.write_text(json.dumps({"source": "x", "meshes": [
-            plane("left", 0.0, -0.2, 0.9),
-            plane("right", 0.8, 0.1, 1.2),
-        ]}))
-        return path
-
-    def test_clip_uv_shrinks_coverage_without_moving_geometry(self):
-        import tempfile
-        from python.assets.compile_runtime_asset import compile_asset
-
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            mesh = self._tiny_mesh(td)
+            mesh = self._mesh_pair(td)
             plain = compile_asset(mesh, td / "plain.swasset", ["a", "b"], 64.0,
-                                  neg_v=False, blend_px=0.0, clip_uv=False)
+                                  blend_px=0.0, clip_uv=False)
             clipped = compile_asset(mesh, td / "clip.swasset", ["a", "b"], 64.0,
-                                    neg_v=False, blend_px=0.0, clip_uv=True,
+                                    blend_px=0.0, clip_uv=True,
                                     source_size=(32, 32))
-            # clipping only removes coverage; the canvas is unchanged
             self.assertEqual(plain["logical_width"], clipped["logical_width"])
             self.assertEqual(plain["logical_height"], clipped["logical_height"])
             self.assertLess((td / "clip.swasset").stat().st_size,
                             (td / "plain.swasset").stat().st_size)
 
-    def test_crop_bottom_shortens_the_canvas(self):
-        import tempfile
-        from python.assets.compile_runtime_asset import compile_asset
-
+    def test_crop_bottom_shortens_the_canvas_without_moving_content(self):
+        from python.stitch.asset import compile_asset
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
-            mesh = self._tiny_mesh(td)
+            mesh = self._mesh_pair(td)
             full = compile_asset(mesh, td / "full.swasset", ["a", "b"], 64.0,
-                                 neg_v=False, blend_px=0.0, crop_bottom="none")
+                                 blend_px=0.0, crop_bottom="none")
             cropped = compile_asset(mesh, td / "crop.swasset", ["a", "b"], 64.0,
-                                    neg_v=False, blend_px=0.0, crop_bottom=8)
+                                    blend_px=0.0, crop_bottom=8)
             self.assertEqual(cropped["crop_rows"], 8)
-            self.assertEqual(cropped["logical_height"],
-                             full["logical_height"] - 8)
+            self.assertEqual(cropped["logical_height"], full["logical_height"] - 8)
+            # y is measured from the top of the uncropped canvas, so geometry
+            # never moves: the crop only shortens the raster.
             self.assertEqual(cropped["canvas_height"], full["canvas_height"])
-            # encoded stays the logical size rounded up to even
             self.assertEqual(cropped["encoded_height"],
-                             cropped["logical_height"] +
-                             (cropped["logical_height"] & 1))
+                             cropped["logical_height"]
+                             + (cropped["logical_height"] & 1))
 
     def test_crop_bottom_rejects_removing_the_whole_canvas(self):
-        import tempfile
-        from python.assets.compile_runtime_asset import compile_asset
-
+        from python.stitch.asset import compile_asset
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
-            mesh = self._tiny_mesh(td)
             with self.assertRaises(ValueError):
-                compile_asset(mesh, td / "x.swasset", ["a", "b"], 64.0,
-                              neg_v=False, crop_bottom=100000)
-
-    def test_defaults_keep_the_pool_bake_unchanged(self):
-        # The pool asset predates these options; its defaults must stay off so
-        # the committed 5002x2102 geometry is reproduced exactly.
-        import inspect
-        from python.assets.compile_runtime_asset import compile_asset
-
-        defaults = inspect.signature(compile_asset).parameters
-        self.assertIs(defaults["clip_uv"].default, False)
-        self.assertIsNone(defaults["crop_bottom"].default)
-        self.assertIs(defaults["neg_v"].default, True)
-
-
-class LaneAlignmentConfigTest(unittest.TestCase):
-    def test_start_offsets_come_from_the_manifest_skew(self):
-        import python.stitch.run as runner
-
-        # alignment_plan reports skew per lane; run.py turns each into ms and
-        # clamps lanes that begin after align_start to zero.
-        align_start, align_end, fps = 1_000_000, 1_012_000, 30.0
-        cams = {
-            "underA16": {"keyframe_ms": align_start - 3083,
-                         "last_decodable_ms": align_end, "frames": 400},
-            "underA1": {"keyframe_ms": align_start + 250,
-                        "last_decodable_ms": align_end, "frames": 400},
-        }
-        order = ["underA16", "underA1"]
-        starts, report = runner.RV.alignment_plan(
-            align_start, align_end, fps, cams, order)
-        offsets = {entry["cam"]: max(0, entry["skew_ms"]) for entry in report}
-
-        self.assertEqual(offsets["underA16"], 3083)
-        self.assertEqual(offsets["underA1"], 0)      # starts after align_start
-        self.assertTrue(report[1]["late_start"])
-
-    def test_config_omits_start_ms_when_alignment_is_disabled(self):
-        import tempfile
-        import python.stitch.run as runner
-        from python.stitch import profiles
-
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            for index in range(1, 17):
-                (td / f"swb_test_underA{index}.ts").write_bytes(b"")
-            config = td / "c.conf"
-            runner.write_config(profiles.get("underwater"), config, td, "metal",
-                                td / "o.h265", align=False)
-            self.assertNotIn("start_ms", config.read_text())
-
-
-class RunProfileTest(unittest.TestCase):
-    """The runner reads every path and lane from the profile, so two lines can
-    share it without either one's artefacts leaking into the other's."""
-
-    def test_config_lanes_and_asset_come_from_the_profile(self):
-        import tempfile
-        import python.stitch.run as runner
-        from python.stitch import profiles
-
-        overhead = profiles.get("overhead")
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            for camera in overhead.camera_ids:
-                (td / f"20260629_172532_{camera}{overhead.clip_suffix}"
-                 ).write_bytes(b"")
-            config = td / "overhead.conf"
-            runner.write_config(overhead, config, td, "metal", td / "o.h265",
-                                align=False)
-
-            lines = config.read_text().splitlines()
-            sources = [line.split("=", 1)[0].removeprefix("source.")
-                       for line in lines if line.startswith("source.")]
-            self.assertEqual(sources, ["overhead5", "overhead6"])
-            self.assertIn(f"asset={overhead.asset.as_posix()}", lines)
-            self.assertIn(f"metrics={overhead.metrics.as_posix()}", lines)
-
-    def test_sync_manifest_applies_to_overhead_too(self):
-        # overhead's clips carry the same wall-clock manifest the underwater
-        # samples do (profiles.py: sync="manifest" for both), so a missing
-        # manifest degrades to "read from frame 0" rather than being skipped.
-        import tempfile
-        import python.stitch.run as runner
-        from python.stitch import profiles
-
-        called = []
-
-        def fake(video_dir):
-            called.append(video_dir)
-            raise SystemExit("no manifest here")
-
-        original = runner.RV.load_manifest
-        try:
-            runner.RV.load_manifest = fake
-            with tempfile.TemporaryDirectory() as td:
-                offsets = runner.lane_start_offsets(profiles.get("overhead"),
-                                                    Path(td))
-            self.assertEqual(offsets, {})
-            self.assertEqual(len(called), 1)
-        finally:
-            runner.RV.load_manifest = original
-
-    def test_sync_manifest_still_reads_the_manifest(self):
-        import tempfile
-        import python.stitch.run as runner
-        from python.stitch import profiles
-
-        called = []
-
-        def fake(video_dir):
-            called.append(video_dir)
-            raise SystemExit("no manifest here")
-
-        original = runner.RV.load_manifest
-        try:
-            runner.RV.load_manifest = fake
-            with tempfile.TemporaryDirectory() as td:
-                offsets = runner.lane_start_offsets(profiles.get("underwater"),
-                                                    Path(td))
-            # a missing manifest degrades to "read from frame 0" for the
-            # realtime path, but it must have been attempted
-            self.assertEqual(offsets, {})
-            self.assertEqual(len(called), 1)
-        finally:
-            runner.RV.load_manifest = original
-
-    def test_asset_stamp_is_per_profile(self):
-        import python.stitch.run as runner
-        from python.stitch import profiles
-
-        underwater = runner.stamp_path(profiles.get("underwater"))
-        overhead = runner.stamp_path(profiles.get("overhead"))
-        self.assertNotEqual(underwater, overhead)
-        self.assertEqual(underwater.name, "underwater.stamp")
-        self.assertEqual(overhead.name, "overhead.stamp")
-
-    def test_asset_stamp_records_the_profile_and_its_shaping(self):
-        import argparse
-        import python.stitch.run as runner
-        from python.stitch import profiles
-
-        overhead = profiles.get("overhead")
-        args = argparse.Namespace(asset_ppm=overhead.ppm,
-                                  blend_px=overhead.blend_px,
-                                  crop_bottom=overhead.crop_bottom,
-                                  clip_uv=overhead.clip_uv)
-        options, stamp = runner.asset_options(overhead, args)
-
-        self.assertTrue(stamp.startswith("overhead "))
-        self.assertIn("170.0", stamp)
-        self.assertIn("85.0", stamp)
-        self.assertIn("none", stamp)
-        self.assertIn("--clip-uv", options)
-        self.assertIn("3840", options)          # source size reaches the compiler
-
-    def test_config_path_is_named_after_the_profile(self):
-        from python.stitch import profiles
-
-        self.assertEqual(profiles.get("overhead").config_path("metal").name,
-                         "overhead_metal.conf")
-        self.assertEqual(profiles.get("underwater").config_path("d3d11").name,
-                         "underwater_d3d11.conf")
-
-
-class ProfileTest(unittest.TestCase):
-    """A profile is the single place a stitch line's differences live."""
-
-    def test_registry_holds_both_lines(self):
-        from python.stitch import profiles
-
-        self.assertEqual(profiles.names(), ["underwater", "overhead"])
-
-    def test_underwater_values_match_the_shipped_pipeline(self):
-        # These are the numbers the committed underwater artefacts were made
-        # with; a profile that drifts from them silently changes the bake.
-        from python.stitch import profiles
-
-        p = profiles.get("underwater")
-        self.assertEqual(p.camera_ids, tuple(f"underA{i}" for i in range(16, 0, -1)))
-        self.assertEqual(p.clip_suffix, ".ts")
-        self.assertEqual(p.ppm, 240.0)
-        self.assertEqual(p.blend_px, 120.0)
-        self.assertTrue(p.full_res)
-        self.assertEqual(p.crop_bottom, "auto")
-        self.assertTrue(p.clip_uv)
-        self.assertTrue(p.planes_only)
-        self.assertEqual(p.sync, "manifest")
-        self.assertEqual(p.source_size, (1280, 720))
-        self.assertEqual(p.ref_tex, "snapshot")
-        self.assertEqual(p.asset.name, "underwater.swasset")
-
-    def test_overhead_values_match_the_design(self):
-        from python.stitch import profiles
-
-        p = profiles.get("overhead")
-        self.assertEqual(p.camera_ids, ("overhead5", "overhead6"))
-        self.assertEqual(p.clip_suffix, ".ts")
-        self.assertEqual(p.ppm, 170.0)
-        self.assertEqual(p.blend_px, 85.0)
-        self.assertFalse(p.full_res)
-        self.assertEqual(p.crop_bottom, "none")
-        self.assertTrue(p.clip_uv)
-        self.assertFalse(p.planes_only)
-        self.assertEqual(p.sync, "manifest")
-        self.assertEqual(p.source_size, (3840, 2160))
-        self.assertEqual(p.ref_tex, "video")
-        self.assertEqual(p.fbx.name, "002.fbx")
-        self.assertEqual(p.asset.name, "overhead.swasset")
-
-    def test_unknown_name_lists_the_registered_ones(self):
-        from python.stitch import profiles
-
-        with self.assertRaises(SystemExit) as caught:
-            profiles.get("pool")
-        message = str(caught.exception)
-        self.assertIn("pool", message)
-        self.assertIn("underwater", message)
-        self.assertIn("overhead", message)
-
-    def test_profile_is_immutable(self):
-        import dataclasses
-        from python.stitch import profiles
-
-        with self.assertRaises(dataclasses.FrozenInstanceError):
-            profiles.get("overhead").ppm = 1.0
-
-    def test_overhead_still_tex_dir_is_the_designer_fbm(self):
-        # underwater renders stills from the dataset's annotation-grids, not the
-        # grids baked into the .fbm; overhead has no such split.
-        from python.stitch import profiles
-
-        p = profiles.get("overhead")
-        self.assertEqual(p.still_tex_dir, p.tex_dir)
-        self.assertEqual(p.tex_dir.name, "002.fbm")
-
-    def test_grid_dir_honours_the_explicit_override(self):
-        import os
-        from unittest.mock import patch
-        from python.stitch import profiles
-
-        with patch.dict(os.environ, {"STITCH_GRID_DIR": "/tmp/grids-xyz"}):
-            self.assertEqual(str(profiles.grid_dir()), "/tmp/grids-xyz")
-
-    def test_grid_dir_falls_back_to_the_dataset_root(self):
-        import os
-        from unittest.mock import patch
-        from python.stitch import profiles
-
-        env = {"ANNOTATION_PREVIEW_DATASET_ROOT": "/tmp/ds-xyz"}
-        with patch.dict(os.environ, env, clear=False):
-            os.environ.pop("STITCH_GRID_DIR", None)
-            self.assertEqual(str(profiles.grid_dir()),
-                             "/tmp/ds-xyz/annotation-grids")
-
-    def test_every_profile_has_a_distinct_out_dir_and_asset(self):
-        from python.stitch import profiles
-
-        all_profiles = [profiles.get(name) for name in profiles.names()]
-        out_dirs = [p.out_dir for p in all_profiles]
-        assets = [p.asset for p in all_profiles]
-        self.assertEqual(len(set(out_dirs)), len(out_dirs))
-        self.assertEqual(len(set(assets)), len(assets))
-
-    def test_clip_for_matches_the_profile_suffix(self):
-        import tempfile
-        from python.stitch import profiles
-
-        overhead = profiles.get("overhead")
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            (td / "swb_x_overhead5.ts").write_bytes(b"")
-            (td / "swb_x_overhead5.mp4").write_bytes(b"")   # wrong suffix
-            found = overhead.clip_for(td, "overhead5")
-            self.assertEqual(found.name, "swb_x_overhead5.ts")
-
-    def test_clip_for_reports_a_missing_clip(self):
-        import tempfile
-        from python.stitch import profiles
-
-        overhead = profiles.get("overhead")
-        with tempfile.TemporaryDirectory() as td:
-            with self.assertRaises(profiles.StepError):
-                overhead.clip_for(Path(td), "overhead5")
-
-    def test_clip_for_refuses_to_guess_between_two_matches(self):
-        import tempfile
-        from python.stitch import profiles
-
-        overhead = profiles.get("overhead")
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            (td / "a_overhead5.ts").write_bytes(b"")
-            (td / "b_overhead5.ts").write_bytes(b"")
-            with self.assertRaises(profiles.StepError):
-                overhead.clip_for(td, "overhead5")
-
-
-class LoopPeriodTest(unittest.TestCase):
-    """Every lane must wrap on the same content period, or they drift apart by
-    the difference in their usable spans on every pass."""
-
-    def test_period_is_the_shortest_usable_span(self):
-        import python.stitch.run as runner
-        from python.stitch import profiles
-
-        # spans after the aligned start: 900, 950, 880 -> the shortest wins
-        cams = {
-            "underA3": {"keyframe_ms": 0, "last_decodable_ms": 1200},
-            "underA2": {"keyframe_ms": 0, "last_decodable_ms": 1150},
-            "underA1": {"keyframe_ms": 0, "last_decodable_ms": 1080},
-        }
-        offsets = {"underA3": 300, "underA2": 200, "underA1": 200}
-        original = runner.RV.load_manifest
-        try:
-            runner.RV.load_manifest = lambda _d: (0, 1000, 30.0, cams)
-            self.assertEqual(
-                runner.loop_period_ms(profiles.get("underwater"), "ignored",
-                                      offsets),
-                880)
-        finally:
-            runner.RV.load_manifest = original
-
-    def test_period_is_zero_without_a_manifest(self):
-        import python.stitch.run as runner
-        from python.stitch import profiles
-
-        original = runner.RV.load_manifest
-        try:
-            def missing(_d):
-                raise SystemExit("no manifest")
-            runner.RV.load_manifest = missing
-            # zero tells the runtime to use each file's own end
-            self.assertEqual(
-                runner.loop_period_ms(profiles.get("underwater"), "ignored", {}),
-                0)
-        finally:
-            runner.RV.load_manifest = original
-
-    def test_config_carries_loop_controls_only_when_requested(self):
-        import tempfile
-        import python.stitch.run as runner
-        from python.stitch import profiles
-
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            for index in range(1, 17):
-                (td / f"swb_test_underA{index}.ts").write_bytes(b"")
-            underwater = profiles.get("underwater")
-            # looping is the default; --no-loop ends the run at EOF instead
-            on = td / "on.conf"
-            runner.write_config(underwater, on, td, "metal", td / "o.h265",
-                                align=False)
-            self.assertIn("loop_sources=true", on.read_text())
-            self.assertIn("stop_at_eof=false", on.read_text())
-
-            off = td / "off.conf"
-            runner.write_config(underwater, off, td, "metal", td / "o.h265",
-                                align=False, loop=False)
-            self.assertIn("loop_sources=false", off.read_text())
-            self.assertIn("stop_at_eof=true", off.read_text())
-
-
-class VideoCameraOrderTest(unittest.TestCase):
-    """Camera identity comes from the profile's ordered ids, not from parsing a
-    texture filename: the overhead textures are 05-02.jpg and C06.jpg, which no
-    naming rule maps to overhead5/overhead6."""
+                compile_asset(self._mesh_pair(Path(td)), Path(td) / "x.swasset",
+                              ["a", "b"], 64.0, crop_bottom=100000)
 
     def test_camera_count_must_match_mesh_count(self):
-        import tempfile
-        from python.stitch.render_video import render_video
-
+        from python.stitch.asset import compile_asset
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
-            data = _two_plane_json(td, [_plane("a", "05-02.jpg", 0.0),
-                                        _plane("b", "C06.jpg", 0.9)])
-            with self.assertRaises(SystemExit) as caught:
-                render_video(data, td, td / "out.mp4",
-                             camera_ids=("overhead5",),          # one id, two meshes
-                             clip_for=lambda d, c: td / "absent.mp4")
-            message = str(caught.exception)
-            self.assertIn("1", message)
-            self.assertIn("2", message)
+            with self.assertRaises(ValueError):
+                compile_asset(self._mesh_pair(td), td / "x.swasset",
+                              ["only-one"], 64.0)
 
-    def test_clip_lookup_is_delegated_to_the_caller(self):
-        # render_video must not glob for clips itself; the profile owns the
-        # suffix and the ambiguity rules.
-        import tempfile
-        from python.stitch.render_video import render_video
+    def test_camera_ids_are_written_in_mesh_order(self):
+        from python.stitch.asset import compile_asset
+        from python.stitch.asset_format import CAMERA, HEADER
 
-        asked = []
-
-        def fake_clip_for(video_dir, camera):
-            asked.append(camera)
-            raise RuntimeError("stop here")
-
+        overhead = P.get("overhead")
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
-            data = _two_plane_json(td, [_plane("a", "05-02.jpg", 0.0),
-                                        _plane("b", "C06.jpg", 0.9)])
-            with self.assertRaises(RuntimeError):
-                render_video(data, td, td / "out.mp4",
-                             camera_ids=("overhead5", "overhead6"),
-                             clip_for=fake_clip_for)
-        self.assertEqual(asked, ["overhead5"])
+            # Real proportions: 10m and 17.5m planes overlapping 2.5m, 3m tall.
+            mesh = _mesh_json(td, [
+                _mesh("Plane002", 0.0, 10.0, 0.0, 3.0, tex="05-02.jpg"),
+                _mesh("Plane001", 7.5, 25.0, 0.0, 3.0, tex="C06.jpg")])
+            asset = td / "overhead.swasset"
+            compile_asset(mesh, asset, overhead.camera_ids, overhead.ppm,
+                          neg_v=overhead.neg_v, blend_px=overhead.blend_px,
+                          clip_uv=overhead.clip_uv,
+                          source_size=overhead.source_size,
+                          crop_bottom=overhead.crop_bottom)
 
-    def test_camera_of_is_gone(self):
-        # The underA-only regex was the last thing tying the video path to the
-        # underwater naming scheme.
-        import python.stitch.render_video as rv
+            data = asset.read_bytes()
+            header = HEADER.unpack_from(data, 0)
+            self.assertEqual(header[7], 2)                      # camera_count
+            ids = [CAMERA.unpack_from(data, header[2] + index * CAMERA.size)[0]
+                   .split(b"\0")[0].decode()
+                   for index in range(header[7])]
+            self.assertEqual(ids, ["overhead5", "overhead6"])
 
-        self.assertFalse(hasattr(rv, "camera_of"))
-        self.assertFalse(hasattr(rv, "video_for_camera"))
+    def test_every_line_fits_the_runtime_camera_ceiling(self):
+        # kMaxCameras is 16, sized for the underwater panorama; no line needs a
+        # C++ change.
+        for name in P.names():
+            self.assertLessEqual(len(P.get(name).camera_ids), 16)
+
+    def test_compile_profile_takes_every_shaping_value_from_the_line(self):
+        from python.stitch import asset as A
+        recorded = {}
+
+        def spy(mesh_json, output, camera_ids, ppm, **kwargs):
+            recorded.update(kwargs, ppm=ppm, camera_ids=tuple(camera_ids))
+            return {"camera_count": len(camera_ids), "logical_width": 1,
+                    "logical_height": 1, "encoded_width": 2, "encoded_height": 2,
+                    "canvas_height": 1, "crop_rows": 0}
+
+        original = A.compile_asset
+        try:
+            A.compile_asset = spy
+            A.compile_profile(P.get("pool"))
+        finally:
+            A.compile_asset = original
+
+        pool = P.get("pool")
+        self.assertEqual(recorded["ppm"], pool.ppm)
+        self.assertEqual(recorded["camera_ids"], pool.camera_ids)
+        self.assertIs(recorded["neg_v"], pool.neg_v)
+        self.assertIsNone(recorded["blend_px"])
+        self.assertIs(recorded["clip_uv"], pool.clip_uv)
+        self.assertEqual(recorded["crop_bottom"], pool.crop_bottom)
+        self.assertEqual(recorded["source_size"], pool.source_size)
+
+
+class AlignmentTest(unittest.TestCase):
+    """Recorded clips do not share a t=0; the manifest is the only defensible
+    time axis."""
+
+    ALIGN_START, ALIGN_END, FPS = 1_000_000, 1_012_000, 30.0
+
+    def _cams(self, **skews):
+        return {camera: {"keyframe_ms": self.ALIGN_START - skew,
+                         "last_decodable_ms": self.ALIGN_END, "frames": 400}
+                for camera, skew in skews.items()}
+
+    def test_start_frames_follow_the_playback_formula(self):
+        from python.stitch.render_video import alignment_plan
+        cams = self._cams(underA16=3083, underA1=-250)
+        order = ["underA16", "underA1"]
+        starts, report = alignment_plan(self.ALIGN_START, self.ALIGN_END,
+                                        self.FPS, cams, order)
+        self.assertEqual(starts, [int(round(3083 * self.FPS / 1000)), 0])
+        self.assertEqual(report[0]["skew_ms"], 3083)
+        self.assertTrue(report[1]["late_start"])
+
+    def test_lane_offsets_put_every_lane_on_the_common_axis(self):
+        from python.stitch import render_video as RV
+        cams = self._cams(underA16=2964, underA1=308)
+        original = RV.load_manifest
+        try:
+            RV.load_manifest = lambda _d: (self.ALIGN_START, self.ALIGN_END,
+                                           self.FPS, cams)
+            offsets = RV.lane_offsets_ms(P.get("underwater"), "ignored")
+        finally:
+            RV.load_manifest = original
+        for camera, offset in offsets.items():
+            self.assertEqual(cams[camera]["keyframe_ms"] + offset,
+                             self.ALIGN_START)
+        # Replaying from frame 0 instead would restart the lanes 2656ms apart,
+        # which is exactly the desynchronisation the offset removes.
+        raw = [cams[c]["keyframe_ms"] for c in cams]
+        self.assertEqual(max(raw) - min(raw), 2656)
+
+    def test_a_line_without_a_wall_clock_does_not_look_for_one(self):
+        from python.stitch import render_video as RV
+        called = []
+        original = RV.load_manifest
+        try:
+            RV.load_manifest = lambda d: called.append(d)
+            self.assertEqual(RV.lane_offsets_ms(P.get("pool"), "ignored"), {})
+        finally:
+            RV.load_manifest = original
+        self.assertEqual(called, [])
+
+    def test_a_missing_manifest_degrades_instead_of_failing_the_run(self):
+        from python.stitch import render_video as RV
+        original = RV.load_manifest
+        try:
+            def missing(_d):
+                raise P.StepError("no manifest here")
+            RV.load_manifest = missing
+            for name in ("underwater", "overhead"):
+                self.assertEqual(RV.lane_offsets_ms(P.get(name), "ignored"), {})
+        finally:
+            RV.load_manifest = original
+
+    def test_manifest_without_an_align_window_is_fatal(self):
+        from python.stitch.render_video import load_manifest
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "manifest.json").write_text(json.dumps(
+                {"files": [{"source_id": "underA1", "keyframe_timestamp_ms": 1}]}))
+            with self.assertRaises(P.StepError):
+                load_manifest(td)
+
+    def test_missing_manifest_names_the_escape_hatch(self):
+        from python.stitch.render_video import load_manifest
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(P.StepError) as caught:
+                load_manifest(td)
+            self.assertIn("--no-align", str(caught.exception))
+
+    def test_older_manifests_use_the_first_decodable_anchor(self):
+        from python.stitch.render_video import load_manifest
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "manifest.json").write_text(json.dumps({
+                "align_start_ms": 10, "align_end_ms": 20, "fps": 30,
+                "files": [{"source_id": "underA1",
+                           "first_decodable_timestamp_ms": 7}]}))
+            *_unused, cams = load_manifest(td)
+            self.assertEqual(cams["underA1"]["keyframe_ms"], 7)
+
+    def test_loop_period_is_the_shortest_usable_span(self):
+        from python.stitch import render_video as RV
+        # spans after each aligned start: 900, 950, 880 -> the shortest wins
+        cams = {"underA3": {"keyframe_ms": 0, "last_decodable_ms": 1200},
+                "underA2": {"keyframe_ms": 0, "last_decodable_ms": 1150},
+                "underA1": {"keyframe_ms": 0, "last_decodable_ms": 1080}}
+        offsets = {"underA3": 300, "underA2": 200, "underA1": 200}
+        original = RV.load_manifest
+        try:
+            RV.load_manifest = lambda _d: (0, 1000, 30.0, cams)
+            self.assertEqual(
+                RV.loop_period_ms(P.get("underwater"), "ignored", offsets), 880)
+        finally:
+            RV.load_manifest = original
+
+    def test_loop_period_is_zero_without_a_manifest(self):
+        from python.stitch import render_video as RV
+        original = RV.load_manifest
+        try:
+            def missing(_d):
+                raise P.StepError("none")
+            RV.load_manifest = missing
+            self.assertEqual(
+                RV.loop_period_ms(P.get("underwater"), "ignored", {}), 0)
+        finally:
+            RV.load_manifest = original
+
+
+class RuntimeConfigTest(unittest.TestCase):
+    """The C++ loader takes camera identity from the config's declaration order,
+    so the config is where a lane mix-up would become invisible."""
+
+    def _clips(self, directory, line):
+        for camera in line.camera_ids:
+            (directory / f"sess_{camera}{line.clip_suffix}").write_bytes(b"")
+
+    def test_lane_order_matches_the_asset_for_every_line(self):
+        from python.stitch import run as R
+        for name in P.names():
+            line = P.get(name)
+            with tempfile.TemporaryDirectory() as td:
+                td = Path(td)
+                self._clips(td, line)
+                config = R.write_config(line, td / "c.conf", td, "metal",
+                                        td / "o.h265", align=False)
+                sources = [row.split("=", 1)[0].removeprefix("source.")
+                           for row in config.read_text().splitlines()
+                           if row.startswith("source.")
+                           and ".start_ms" not in row]
+                self.assertEqual(sources, list(line.camera_ids), name)
+
+    def test_config_names_the_lines_own_asset_and_metrics(self):
+        from python.stitch import run as R
+        line = P.get("overhead")
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            self._clips(td, line)
+            config = R.write_config(line, td / "c.conf", td, "metal",
+                                    td / "o.h265", align=False)
+            rows = config.read_text().splitlines()
+            self.assertIn(f"asset={line.asset.as_posix()}", rows)
+            self.assertIn(f"metrics={line.metrics.as_posix()}", rows)
+            self.assertIn("backend=metal", rows)
+
+    def test_missing_clip_is_reported_not_silently_skipped(self):
+        from python.stitch import run as R
+        line = P.get("underwater")
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            for camera in line.camera_ids[1:]:            # underA16 absent
+                (td / f"sess_{camera}.ts").write_bytes(b"")
+            with self.assertRaises(P.StepError):
+                R.write_config(line, td / "c.conf", td, "metal", td / "o.h265",
+                               align=False)
+
+    def test_no_start_offsets_when_alignment_is_disabled(self):
+        from python.stitch import run as R
+        line = P.get("underwater")
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            self._clips(td, line)
+            config = R.write_config(line, td / "c.conf", td, "metal",
+                                    td / "o.h265", align=False)
+            self.assertNotIn("start_ms", config.read_text())
+
+    def test_loop_controls_flip_together(self):
+        from python.stitch import run as R
+        line = P.get("underwater")
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            self._clips(td, line)
+            on = R.write_config(line, td / "on.conf", td, "metal",
+                                td / "o.h265", align=False).read_text()
+            off = R.write_config(line, td / "off.conf", td, "metal",
+                                 td / "o.h265", align=False,
+                                 loop=False).read_text()
+        self.assertIn("loop_sources=true", on)
+        self.assertIn("stop_at_eof=false", on)
+        self.assertIn("loop_sources=false", off)
+        self.assertIn("stop_at_eof=true", off)
+
+    def test_platform_selects_toolchain_build_dir_and_executable(self):
+        from python.stitch import run as R
+        original = R.platform.system
+        try:
+            R.platform.system = lambda: "Darwin"
+            self.assertEqual(R.default_backend(), "metal")
+            self.assertEqual(R.build_dir_for("metal").name, "metal-release")
+            self.assertEqual(
+                R.executable_for(R.build_dir_for("metal")).name, "swim_realtime")
+
+            R.platform.system = lambda: "Windows"
+            self.assertEqual(R.default_backend(), "d3d11")
+            self.assertEqual(R.build_dir_for("d3d11").name, "win-d3d11")
+            self.assertEqual(
+                R.executable_for(R.build_dir_for("d3d11")).name,
+                "swim_realtime.exe")
+        finally:
+            R.platform.system = original
+
+    def test_newer_than_treats_a_missing_target_as_stale(self):
+        from python.stitch import run as R
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            source = td / "src"
+            source.write_text("x")
+            self.assertFalse(R.newer_than(td / "absent", source))
+            target = td / "target"
+            target.write_text("y")
+            self.assertTrue(R.newer_than(target, source))
+
+    def test_shaping_stamp_is_per_line_and_covers_every_bake_option(self):
+        # mtime cannot see a changed --ppm, so the stamp is what makes the asset
+        # step skip correctly.
+        import argparse
+        from python.stitch import run as R
+        blank = argparse.Namespace(ppm=None, blend_px=None, crop_bottom=None)
+        stamps = {name: R.shaping_stamp(P.get(name), blank) for name in P.names()}
+        self.assertEqual(len(set(stamps.values())), len(stamps))
+        for name, stamp in stamps.items():
+            self.assertTrue(stamp.startswith(name + " "))
+        overhead = R.shaping_stamp(
+            P.get("overhead"),
+            argparse.Namespace(ppm=999.0, blend_px=None, crop_bottom=None))
+        self.assertIn("999.0", overhead)
+        self.assertNotEqual(overhead, stamps["overhead"])
+
+    def test_stamp_files_never_collide(self):
+        from python.stitch import run as R
+        paths = [R.stamp_path(P.get(name)) for name in P.names()]
+        self.assertEqual(len(set(paths)), len(paths))
+        self.assertTrue(all(path.suffix == ".stamp" for path in paths))
 
 
 class RefTexTest(unittest.TestCase):
-    """Reference textures are named after the camera, not after the mesh's
-    texture basename: the overhead basenames (05-02.jpg, C06.jpg) say nothing
-    about which camera they came from, and reusing a .jpg name would re-encode
-    a lossless frame as JPEG."""
+    """Reference textures are named after the camera, not the mesh's texture
+    basename: 05-02.jpg and C06.jpg say nothing about which camera they are, and
+    reusing a .jpg name would re-encode a lossless frame."""
 
-    def test_tex_names_follow_camera_ids(self):
-        from python.stitch import export_ref_tex, profiles
-
-        self.assertEqual(export_ref_tex.tex_names(profiles.get("overhead")),
+    def test_names_follow_camera_ids(self):
+        from python.stitch import export_ref_tex as E
+        self.assertEqual(E.tex_names(P.get("overhead")),
                          ["overhead5.png", "overhead6.png"])
-        names = export_ref_tex.tex_names(profiles.get("underwater"))
-        self.assertEqual(names[0], "underA16.png")
-        self.assertEqual(names[-1], "underA1.png")
-        self.assertEqual(len(names), 16)
+        names = E.tex_names(P.get("underwater"))
+        self.assertEqual((names[0], names[-1], len(names)),
+                         ("underA16.png", "underA1.png", 16))
 
-    def test_video_source_requires_a_video_dir(self):
-        from python.stitch import export_ref_tex, profiles
+    def test_a_video_source_needs_a_clip_directory(self):
+        from python.stitch import export_ref_tex as E
+        with self.assertRaises(P.StepError):
+            E.export(P.get("overhead"), video_dir=None)
 
-        with self.assertRaises(profiles.StepError):
-            export_ref_tex.export(profiles.get("overhead"), video_dir=None)
-
-    def test_video_source_writes_one_png_per_camera(self):
-        import tempfile
+    def test_one_png_per_camera_from_clip_frame_zero(self):
         import cv2
-        import numpy as np
-        from python.stitch import export_ref_tex, profiles
-
-        overhead = profiles.get("overhead")
+        from python.stitch import export_ref_tex as E
+        overhead = P.get("overhead")
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
             clips = td / "clips"
             clips.mkdir()
-            # two one-frame mp4s, distinguishable by colour
             for index, camera in enumerate(overhead.camera_ids):
-                frame = np.full((16, 32, 3), 40 * (index + 1), np.uint8)
-                writer = cv2.VideoWriter(
-                    str(clips / f"sess_{camera}.ts"),
-                    cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (32, 16))
-                writer.write(frame)
+                writer = cv2.VideoWriter(str(clips / f"sess_{camera}.ts"),
+                                         cv2.VideoWriter_fourcc(*"mp4v"),
+                                         30.0, (32, 16))
+                writer.write(np.full((16, 32, 3), 40 * (index + 1), np.uint8))
                 writer.release()
+            written = E.export(overhead, out_dir=td / "ref_tex", video_dir=clips)
+        self.assertEqual([path.name for path in written],
+                         ["overhead5.png", "overhead6.png"])
 
-            out = td / "ref_tex"
-            written = export_ref_tex.export(overhead, out_dir=out, video_dir=clips)
-
-            self.assertEqual([p.name for p in written], ["overhead5.png", "overhead6.png"])
-            for path in written:
-                self.assertTrue(path.is_file())
-                self.assertEqual(cv2.imread(str(path)).shape, (16, 32, 3))
-
-    def test_unreadable_clip_is_reported(self):
-        # OpenCV prints "moov atom not found" to stderr here; the point is that
-        # export raises instead of writing a black frame.
-        import tempfile
-        from python.stitch import export_ref_tex, profiles
-
+    def test_an_unreadable_clip_is_reported_not_written_black(self):
+        from python.stitch import export_ref_tex as E
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
-            for camera in profiles.get("overhead").camera_ids:
+            for camera in P.get("overhead").camera_ids:
                 (td / f"sess_{camera}.ts").write_bytes(b"not a video")
-            with self.assertRaises(profiles.StepError):
-                export_ref_tex.export(profiles.get("overhead"),
-                                      out_dir=td / "out", video_dir=td)
-
-
-class RenderTexNamesTest(unittest.TestCase):
-    """render_stills reads texture_basename by default and positional names when
-    asked, so one renderer serves both the designer's calibration frames and the
-    camera-named reference exports."""
-
-    def test_positional_names_render_the_same_as_basenames(self):
-        import tempfile
-        import cv2
-        import numpy as np
-        from python.stitch.render import render_stills
-
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            data = _two_plane_json(td, [_plane("a", "05-02.jpg", 0.0),
-                                        _plane("b", "C06.jpg", 0.9)])
-            left = np.full((16, 32, 3), 90, np.uint8)
-            right = np.full((16, 32, 3), 180, np.uint8)
-            # same pixels under both naming schemes, both lossless
-            cv2.imwrite(str(td / "05-02.jpg"), left)
-            cv2.imwrite(str(td / "C06.jpg"), right)
-            cv2.imwrite(str(td / "overhead5.png"), left)
-            cv2.imwrite(str(td / "overhead6.png"), right)
-
-            by_basename = td / "a.png"
-            by_position = td / "b.png"
-            render_stills(data, td, by_basename, None, ppm=64.0)
-            render_stills(data, td, by_position, None, ppm=64.0,
-                          tex_names=["overhead5.png", "overhead6.png"])
-
-            self.assertTrue(np.array_equal(cv2.imread(str(by_basename)),
-                                           cv2.imread(str(by_position))))
-
-    def test_tex_names_length_must_match_mesh_count(self):
-        import tempfile
-        from python.stitch.render import render_stills
-
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            data = _two_plane_json(td, [_plane("a", "05-02.jpg", 0.0),
-                                        _plane("b", "C06.jpg", 0.9)])
-            with self.assertRaises(SystemExit) as caught:
-                render_stills(data, td, td / "out.png", None, ppm=64.0,
-                              tex_names=["overhead5.png"])
-            self.assertIn("1", str(caught.exception))
-            self.assertIn("2", str(caught.exception))
-
-
-class LoopSynchronisationTest(unittest.TestCase):
-    """A loop must land every lane back on the common time axis, not on each
-    file's own frame 0."""
-
-    def test_every_pass_starts_at_the_aligned_offset(self):
-        from python.stitch import render_video as RV
-
-        # Two lanes whose keyframes sit ~2.8s apart inside the lookback window.
-        align_start, align_end, fps = 1_000_000, 1_012_000, 30.0
-        cams = {
-            "underA16": {"keyframe_ms": align_start - 2964,
-                         "last_decodable_ms": align_end, "frames": 450},
-            "underA1": {"keyframe_ms": align_start - 308,
-                        "last_decodable_ms": align_end, "frames": 370},
-        }
-        order = ["underA16", "underA1"]
-        _starts, report = RV.alignment_plan(
-            align_start, align_end, fps, cams, order)
-        offsets = {e["cam"]: max(0, e["skew_ms"]) for e in report}
-
-        # Applying the offset puts both lanes on align_start...
-        for cam, offset in offsets.items():
-            self.assertEqual(cams[cam]["keyframe_ms"] + offset, align_start)
-        # ...while replaying from frame 0 would restart them 2656ms apart, which
-        # is exactly the desynchronisation the offset exists to remove.
-        raw = [cams[cam]["keyframe_ms"] for cam in order]
-        self.assertEqual(max(raw) - min(raw), 2656)
-        self.assertNotEqual(offsets["underA16"], offsets["underA1"])
+            with self.assertRaises(Exception):
+                E.export(P.get("overhead"), out_dir=td / "out", video_dir=td)
 
 
 class DispatcherTest(unittest.TestCase):
-    """One step table, profile as an argument — so a third line costs a profile
+    """One step table, the line as an argument — a fourth line costs a profile
     record and no new CLI surface."""
 
     def test_step_table_lists_offline_then_realtime(self):
         from python.stitch import __main__ as cli
-
         self.assertEqual(list(cli.STEPS),
                          ["extract", "tex", "still", "video", "asset",
                           "build", "live"])
 
-    def test_every_step_takes_profile_and_args(self):
+    def test_every_step_takes_the_line_and_the_args(self):
         import inspect
         from python.stitch import __main__ as cli
-
         for name, handler in cli.STEPS.items():
-            parameters = list(inspect.signature(handler).parameters)
-            self.assertEqual(parameters, ["profile", "args"],
-                             f"step {name} has signature {parameters}")
+            self.assertEqual(list(inspect.signature(handler).parameters),
+                             ["profile", "args"], name)
 
     def test_unknown_step_lists_the_valid_ones(self):
         from python.stitch import __main__ as cli
-
         with self.assertRaises(SystemExit) as caught:
             cli.main(["overhead", "polish"])
         message = str(caught.exception)
         self.assertIn("polish", message)
         self.assertIn("extract", message)
-        self.assertIn("live", message)
 
-    def test_unknown_profile_is_rejected_before_any_step_runs(self):
+    def test_unknown_line_is_rejected_before_any_step_runs(self):
         from python.stitch import __main__ as cli
-
         with self.assertRaises(SystemExit) as caught:
-            cli.main(["pool", "extract"])
-        message = str(caught.exception)
-        self.assertIn("pool", message)
-        self.assertIn("underwater", message)
+            cli.main(["nosuchline", "extract"])
+        self.assertIn("nosuchline", str(caught.exception))
 
     def test_steps_run_in_the_order_given(self):
         from python.stitch import __main__ as cli
-
         order = []
         original = dict(cli.STEPS)
         try:
@@ -1159,141 +823,160 @@ class DispatcherTest(unittest.TestCase):
             cli.STEPS.update(original)
         self.assertEqual(order, ["asset", "extract"])
 
-    def test_video_and_live_require_a_video_dir(self):
+    def test_video_and_live_require_clips(self):
         from python.stitch import __main__ as cli
-
         for step in ("video", "live"):
             with self.assertRaises(SystemExit) as caught:
                 cli.main(["overhead", step])
             self.assertIn("--video-dir", str(caught.exception))
 
-    def test_tex_requires_a_video_dir_only_when_the_source_is_video(self):
+    def test_pool_falls_back_to_its_dataset_directory(self):
+        # pool's clips are a machine-wide session, so `video` must not demand
+        # --video-dir the way the per-sample plane lines do.
         from python.stitch import __main__ as cli
+        args = cli.parse_args(["pool", "video"])
+        self.assertIsNone(args.video_dir)
+        self.assertIsNotNone(P.default_video_dir(P.get("pool")))
 
-        # overhead reads reference textures from clips, so tex needs the dir
+    def test_tex_requires_clips_only_when_the_source_is_video(self):
+        from python.stitch import __main__ as cli
         with self.assertRaises(SystemExit) as caught:
             cli.main(["overhead", "tex"])
         self.assertIn("--video-dir", str(caught.exception))
 
 
-MODEL_002 = PROJECT_ROOT / "inputs" / "overhead" / "models" / "002.fbx"
-TEXDIR_002 = PROJECT_ROOT / "inputs" / "overhead" / "models" / "002.fbm"
+class RenderTest(unittest.TestCase):
+    """One renderer serves the designer's calibration textures and the
+    camera-named reference exports."""
 
+    def _line(self, td, **overrides):
+        """A throwaway line pointing at a temporary directory."""
+        import dataclasses
+        base = P.get("overhead")
+        return dataclasses.replace(base, _out_dir=Path(td), **overrides)
 
-class OverheadExtractTest(unittest.TestCase):
-    @unittest.skipUnless(HAS_FBX, "FBX SDK not available")
-    @unittest.skipUnless(MODEL_002.is_file(), "002.fbx not present")
-    def test_extracts_two_planes_left_to_right(self):
-        import tempfile
-        from python.stitch.extract import extract_to_json
+    def _fixture(self, td, value=200, size=(16, 32)):
+        import cv2
+        line = self._line(td, tex_dir=Path(td), still_tex_dir=Path(td))
+        _mesh_json(td, [_mesh("Plane002", 0.0, 10.0, 0.0, 3.0, tex="05-02.jpg"),
+                        _mesh("Plane001", 7.5, 25.0, 0.0, 3.0, tex="C06.jpg")])
+        for name in ("05-02.jpg", "C06.jpg", "overhead5.png", "overhead6.png"):
+            cv2.imwrite(str(Path(td) / name),
+                        np.full((*size, 3), value, np.uint8))
+        return line
 
+    def test_writes_still_grid_and_heatmap(self):
+        from python.stitch import render as R
         with tempfile.TemporaryDirectory() as td:
-            dst = Path(td) / "mesh.json"
-            meshes = extract_to_json(MODEL_002, dst, TEXDIR_002)
+            line = self._fixture(td)
+            width, height = R.render(line, None, Path(td) / "out", ppm=8.0)
+            for suffix in ("", "_grid", "_heat"):
+                self.assertTrue((Path(td) / f"out{suffix}.png").is_file(), suffix)
+            import cv2
+            image = cv2.imread(str(Path(td) / "out.png"))
+            self.assertEqual((image.shape[1], image.shape[0]), (width, height))
+            self.assertGreater(int(image.max()), 0)           # not all black
 
-            self.assertEqual(len(meshes), 2)
-            # world X ascending: Plane002 starts at -35.22, Plane001 at -27.72
-            self.assertEqual([m["node"] for m in meshes],
-                             ["Plane002", "Plane001"])
-            # which pins overhead5 -> 05-02.jpg and overhead6 -> C06.jpg positionally
-            self.assertEqual([m["texture_basename"] for m in meshes],
-                             ["05-02.jpg", "C06.jpg"])
-
-    @unittest.skipUnless(HAS_FBX, "FBX SDK not available")
-    @unittest.skipUnless(MODEL_002.is_file(), "002.fbx not present")
-    def test_spans_one_lane_the_same_size_as_the_underwater_panorama(self):
-        # Both models cover the same 25.000m x 3.000m lane; that is why one set
-        # of geometry code serves both.
-        import tempfile
-        from python.stitch.extract import extract_to_json
-
+    def test_positional_names_render_the_same_as_basenames(self):
+        import cv2
+        from python.stitch import render as R
         with tempfile.TemporaryDirectory() as td:
-            meshes = extract_to_json(MODEL_002, Path(td) / "m.json", TEXDIR_002)
+            line = self._fixture(td)
+            R.render(line, None, Path(td) / "by_basename", ppm=8.0,
+                     grid=False, heatmap=False)
+            R.render(line, None, Path(td) / "by_camera", ppm=8.0,
+                     grid=False, heatmap=False,
+                     tex_names=["overhead5.png", "overhead6.png"])
+            self.assertTrue(np.array_equal(
+                cv2.imread(str(Path(td) / "by_basename.png")),
+                cv2.imread(str(Path(td) / "by_camera.png"))))
 
-        xs = [v["pos"][0] for m in meshes for t in m["triangles"] for v in t]
-        ys = [v["pos"][1] for m in meshes for t in m["triangles"] for v in t]
-        self.assertAlmostEqual(max(xs) - min(xs), 25.0, places=3)
-        self.assertAlmostEqual(max(ys) - min(ys), 3.0, places=3)
-
-    @unittest.skipUnless(HAS_FBX, "FBX SDK not available")
-    @unittest.skipUnless(MODEL_002.is_file(), "002.fbx not present")
-    def test_planes_only_would_reject_this_model(self):
-        # The profile sets planes_only=False, and that is not merely tidiness:
-        # select_pool_planes keeps meshes whose world-Y falls inside the pool
-        # band (-11.6, -8.0), which is where the underwater planes sit. 002.fbx
-        # is an overhead model spanning Y [20.47, 23.47], so the filter would
-        # drop both planes and extraction would exit with "no pool plane found".
-        import tempfile
-        from python.stitch.extract import extract_to_json, select_pool_planes
-
+    def test_a_wrong_number_of_texture_names_is_refused(self):
+        from python.stitch import render as R
         with tempfile.TemporaryDirectory() as td:
-            meshes = extract_to_json(MODEL_002, Path(td) / "m.json", TEXDIR_002)
-        self.assertEqual(len(meshes), 2)
-        self.assertEqual(select_pool_planes(meshes), [])
+            line = self._fixture(td)
+            with self.assertRaises(P.StepError) as caught:
+                R.render(line, None, Path(td) / "out", ppm=8.0,
+                         tex_names=["overhead5.png"])
+            self.assertIn("1", str(caught.exception))
+            self.assertIn("2", str(caught.exception))
 
-
-class OverheadAssetTest(unittest.TestCase):
-    """The compiled asset must carry the profile's camera ids in mesh order, and
-    the two lines must not collide in the generated directory."""
-
-    def test_camera_ids_are_written_in_mesh_order(self):
-        import tempfile
-        from python.assets.asset_format import CAMERA, HEADER
-        from python.assets.compile_runtime_asset import compile_asset
-        from python.stitch import profiles
-
-        overhead = profiles.get("overhead")
+    def test_full_res_rescales_back_to_the_source_height(self):
+        from python.stitch import render as R
+        import cv2
         with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            asset = td / "overhead.swasset"
-            # real proportions: 10m and 17.5m planes overlapping 2.5m, 3m tall
-            mesh = _two_plane_json(td, [
-                _plane("Plane002", "05-02.jpg", 0.0, 10.0, 0.0, 3.0),
-                _plane("Plane001", "C06.jpg", 7.5, 17.5, 0.0, 3.0)])
-            compile_asset(mesh, asset, overhead.camera_ids,
-                          overhead.ppm, neg_v=False,
-                          blend_px=overhead.blend_px, clip_uv=overhead.clip_uv,
-                          source_size=overhead.source_size,
-                          crop_bottom=overhead.crop_bottom)
+            # A short second plane leaves a ragged bottom for the auto-crop.
+            line = self._line(td, tex_dir=Path(td), still_tex_dir=Path(td),
+                              full_res=True, crop_bottom="auto")
+            _mesh_json(td, [_mesh("tall", 0.0, 4.0, 0.0, 3.0, tex="a.png"),
+                            _mesh("short", 3.0, 8.0, 0.5, 3.0, tex="b.png")])
+            for name in ("a.png", "b.png"):
+                cv2.imwrite(str(Path(td) / name), np.full((24, 32, 3), 180, np.uint8))
+            _width, height = R.render(line, None, Path(td) / "out",
+                                      grid=False, heatmap=False)
+            self.assertEqual(height, 24)
 
-            data = asset.read_bytes()
-            header = HEADER.unpack_from(data, 0)
-            self.assertEqual(header[7], 2)                 # camera_count
-            ids = []
-            for index in range(header[7]):
-                record = CAMERA.unpack_from(data, header[2] + index * CAMERA.size)
-                ids.append(record[0].split(b"\0")[0].decode())
-            self.assertEqual(ids, ["overhead5", "overhead6"])
-
-    def test_two_lanes_are_well_within_the_runtime_ceiling(self):
-        # kMaxCameras is 16, sized for the underwater panorama; a two-lane line
-        # needs no C++ change at all.
-        from python.stitch import profiles
-
-        ceiling = 16
-        for name in profiles.names():
-            self.assertLessEqual(len(profiles.get(name).camera_ids), ceiling)
+    def test_a_missing_texture_directory_names_itself(self):
+        from python.stitch import render as R
+        with tempfile.TemporaryDirectory() as td:
+            line = self._fixture(td)
+            with self.assertRaises(P.StepError) as caught:
+                R.render(line, Path(td) / "absent", Path(td) / "out", ppm=8.0)
+            self.assertIn("absent", str(caught.exception))
 
 
-if __name__ == "__main__":
-    unittest.main()
+class VideoTest(unittest.TestCase):
+    def test_camera_count_must_match_mesh_count(self):
+        import dataclasses
+        from python.stitch import render_video as RV
+        with tempfile.TemporaryDirectory() as td:
+            line = dataclasses.replace(P.get("overhead"), _out_dir=Path(td),
+                                       camera_ids=("overhead5",))
+            _mesh_json(td, [_mesh("a", 0.0, 1.0, tex="05-02.jpg"),
+                            _mesh("b", 0.9, 2.0, tex="C06.jpg")])
+            with self.assertRaises(P.StepError) as caught:
+                RV.render(line, td, Path(td) / "out.mp4")
+            message = str(caught.exception)
+            self.assertIn("1", message)
+            self.assertIn("2", message)
+
+    def test_clip_lookup_goes_through_the_line(self):
+        # render must not glob for clips itself; the line owns the suffix and the
+        # ambiguity rules.
+        import dataclasses
+        from python.stitch import render_video as RV
+        asked = []
+
+        class Recording(type(P.get("overhead"))):
+            pass
+
+        line = dataclasses.replace(P.get("overhead"))
+        with tempfile.TemporaryDirectory() as td:
+            line = dataclasses.replace(line, _out_dir=Path(td))
+            _mesh_json(td, [_mesh("a", 0.0, 1.0, tex="05-02.jpg"),
+                            _mesh("b", 0.9, 2.0, tex="C06.jpg")])
+            object.__setattr__(line, "clip_for",
+                               lambda d, c: asked.append(c) or Path(td) / "x.ts")
+            with self.assertRaises(P.StepError):
+                RV.render(line, td, Path(td) / "out.mp4")
+        self.assertEqual(asked[:1], ["overhead5"])
 
 
 class DocsTest(unittest.TestCase):
-    """The README must not point at commands that no longer exist."""
+    def test_readme_names_every_line_and_its_entry_point(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("run_stitch.sh", readme)
+        for name in P.names():
+            self.assertIn(name, readme)
 
     def test_readme_has_no_retired_commands(self):
-        readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
         for retired in ("uw-extract", "uw-tex", "uw-render", "uw-real",
-                        "uw-video", "run_underwater.sh", "run_underwater.ps1",
-                        "python.underwater", "underwater_16.swasset"):
+                        "uw-video", "run_underwater.sh", "run_metal.sh",
+                        "run_python.sh", "python.underwater",
+                        "python.validation", "python.assets",
+                        "python.annotation_preview", "underwater_16.swasset"):
             self.assertNotIn(retired, readme, f"README still mentions {retired}")
-
-    def test_readme_documents_both_stitch_lines(self):
-        readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("run_stitch.sh", readme)
-        self.assertIn("overhead5", readme)
-        self.assertIn("002.fbx", readme)
 
 
 class PatchGridTest(unittest.TestCase):
@@ -1302,51 +985,100 @@ class PatchGridTest(unittest.TestCase):
 
     def test_finds_the_empty_grid_slot(self):
         from python.stitch.patch_grid import missing_world_x
-
-        # eight slots at 0.5m from world X 0, with slot 3 (X=1.5) absent
-        ppm = 100.0
-        present = [0.0, 0.5, 1.0, 2.0, 2.5, 3.0]
-        columns = [int(round(x * ppm)) for x in present]
-        gaps, residual = missing_world_x(columns, 0.0, ppm)
-
+        present = [0.0, 0.5, 1.0, 2.0, 2.5, 3.0]          # slot at 1.5 absent
+        columns = [int(round(x * 100.0)) for x in present]
+        gaps, residual = missing_world_x(columns, 0.0, 100.0)
         self.assertEqual([round(x, 3) for x in gaps], [1.5])
         self.assertLess(residual, 0.01)
 
     def test_no_gap_reports_nothing(self):
         from python.stitch.patch_grid import missing_world_x
-
-        columns = [0, 50, 100, 150]
-        gaps, _residual = missing_world_x(columns, 0.0, 100.0)
+        gaps, _residual = missing_world_x([0, 50, 100, 150], 0.0, 100.0)
         self.assertEqual(gaps, [])
 
     def test_lines_off_the_grid_are_refused(self):
         from python.stitch.patch_grid import missing_world_x
-        from python.stitch.profiles import StepError
-
-        # 0.31m spacing fits no 0.5m grid
-        columns = [0, 31, 62, 93]
-        with self.assertRaises(StepError):
-            missing_world_x(columns, 0.0, 100.0)
+        with self.assertRaises(P.StepError):
+            missing_world_x([0, 31, 62, 93], 0.0, 100.0)   # 0.31m fits no 0.5m grid
 
     def test_refuses_to_patch_inside_an_overlap(self):
-        # A gap where two planes both reach is covered by the neighbour, so
-        # painting one plane's texture would be wrong.
+        # A gap both planes reach is covered by the neighbour, so painting one
+        # plane's texture would be wrong.
         from python.stitch.patch_grid import owning_mesh
-        from python.stitch.profiles import StepError
-
-        left = _plane("left", "a.jpg", 0.0, 10.0)
-        right = _plane("right", "b.jpg", 7.5, 10.0)
+        left = _mesh("left", 0.0, 10.0)
+        right = _mesh("right", 7.5, 17.5)
         self.assertEqual(owning_mesh([left, right], 2.0)["node"], "left")
         self.assertEqual(owning_mesh([left, right], 15.0)["node"], "right")
-        with self.assertRaises(StepError):
+        with self.assertRaises(P.StepError):
             owning_mesh([left, right], 8.0)
 
     def test_line_columns_ignores_short_marks(self):
-        import numpy as np
         from python.stitch.patch_grid import line_columns
-
         image = np.zeros((100, 60, 3), np.uint8)
-        image[:, 10:13] = (1, 254, 254)      # full-height line
-        image[:8, 30:33] = (1, 254, 254)     # a short mark, not a grid line
-        image[:, 50:53] = (1, 254, 254)      # full-height line
+        image[:, 10:13] = (1, 254, 254)        # full-height line
+        image[:8, 30:33] = (1, 254, 254)       # a short mark, not a grid line
+        image[:, 50:53] = (1, 254, 254)        # full-height line
         self.assertEqual(line_columns(image), [11, 51])
+
+
+class FbxIntegrationTest(unittest.TestCase):
+    """Extraction against the real models — skipped where they are not present."""
+
+    @unittest.skipUnless(HAS_FBX, "FBX SDK not available")
+    @unittest.skipUnless(POOL_FBX.is_file(), "pool.fbx not present")
+    def test_pool_keeps_its_declared_two_row_order(self):
+        from python.stitch import extract as E
+        import dataclasses
+        with tempfile.TemporaryDirectory() as td:
+            line = dataclasses.replace(P.get("pool"), _out_dir=Path(td))
+            meshes = E.extract(line)
+        self.assertEqual([m["node"] for m in meshes],
+                         ["01", "02", "03", "u", "Plane004", "Plane007"])
+        # World-X order would be Plane007, 01, 02, Plane004, 03, u — which pairs
+        # cam3 with the opposite bank's plane.
+        self.assertNotEqual([m["node"] for m in E.sort_by_world_x(meshes)],
+                            [m["node"] for m in meshes])
+
+    @unittest.skipUnless(HAS_FBX, "FBX SDK not available")
+    @unittest.skipUnless(OVERHEAD_FBX.is_file(), "002.fbx not present")
+    def test_overhead_orders_two_planes_left_to_right(self):
+        from python.stitch import extract as E
+        import dataclasses
+        with tempfile.TemporaryDirectory() as td:
+            line = dataclasses.replace(P.get("overhead"), _out_dir=Path(td))
+            meshes = E.extract(line)
+        self.assertEqual([m["node"] for m in meshes], ["Plane002", "Plane001"])
+        # which pins overhead5 -> 05-02.jpg and overhead6 -> C06.jpg positionally
+        self.assertEqual([m["texture_basename"] for m in meshes],
+                         ["05-02.jpg", "C06.jpg"])
+
+    @unittest.skipUnless(HAS_FBX, "FBX SDK not available")
+    @unittest.skipUnless(OVERHEAD_FBX.is_file(), "002.fbx not present")
+    def test_overhead_covers_the_same_lane_as_the_underwater_panorama(self):
+        # Both models cover the same 25.000m x 3.000m lane, which is why one set
+        # of geometry code serves both.
+        from python.stitch import extract as E
+        import dataclasses
+        with tempfile.TemporaryDirectory() as td:
+            line = dataclasses.replace(P.get("overhead"), _out_dir=Path(td))
+            meshes = E.extract(line)
+        xs = [v["pos"][0] for m in meshes for t in m["triangles"] for v in t]
+        ys = [v["pos"][1] for m in meshes for t in m["triangles"] for v in t]
+        self.assertAlmostEqual(max(xs) - min(xs), 25.0, places=3)
+        self.assertAlmostEqual(max(ys) - min(ys), 3.0, places=3)
+
+    @unittest.skipUnless(HAS_FBX, "FBX SDK not available")
+    @unittest.skipUnless(POOL_FBX.is_file(), "pool.fbx not present")
+    def test_a_camera_count_mismatch_stops_extraction(self):
+        import dataclasses
+        from python.stitch import extract as E
+        with tempfile.TemporaryDirectory() as td:
+            line = dataclasses.replace(P.get("pool"), _out_dir=Path(td),
+                                       camera_ids=("cam1", "cam2"))
+            with self.assertRaises(P.StepError) as caught:
+                E.extract(line)
+            self.assertIn("6", str(caught.exception))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -32,7 +32,9 @@ inputs/pool/models/*.fbx
 # Agent worktrees and downloaded model weights are local scratch
 .claude/worktrees/
 *.pt
-# Runtime configs generated per machine by python.stitch
+# Runtime configs python.stitch regenerates per machine and per clip directory.
+# The committed ones (macos_*, windows_*) are hand-maintained references.
+inputs/configs/pool_*.conf
 inputs/configs/underwater_*.conf
 inputs/configs/overhead_*.conf
 # Loose model drops straight into inputs/ (before they are filed under a line)

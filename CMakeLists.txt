@@ -22,19 +22,23 @@ configure_file(
 include(cmake/CompilerWarnings.cmake)
 include(cmake/Sanitizers.cmake)
 
-set(RUNTIME_ASSET ${CMAKE_SOURCE_DIR}/build/assets/generated/pool_4k.swasset)
-set(POOL_MESH_JSON ${CMAKE_SOURCE_DIR}/outputs/data/pool_mesh.json)
+# The pool line's runtime asset. Every target depends on it: swim_realtime ships
+# it and swim_core_tests reads it as a real fixture. The mesh JSON it compiles
+# from is gitignored and produced by `python -m python.stitch pool extract`
+# (scripts/install.bat does that on a fresh machine).
+set(RUNTIME_ASSET ${CMAKE_SOURCE_DIR}/build/assets/generated/pool.swasset)
+set(POOL_MESH_JSON ${CMAKE_SOURCE_DIR}/outputs/pool/mesh.json)
 add_custom_command(
   OUTPUT ${RUNTIME_ASSET}
-  COMMAND ${Python3_EXECUTABLE} -m python.assets.compile_runtime_asset
-          ${POOL_MESH_JSON} ${RUNTIME_ASSET}
-          --camera-ids cam3 cam2 cam1 cam4 cam5 cam6 --ppm 100
+  COMMAND ${Python3_EXECUTABLE} -m python.stitch.asset pool
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   # Absolute paths: a relative DEPENDS resolves against the *binary* dir, so an
   # out-of-tree build dir made ninja demand a rule for a file that already exists.
   DEPENDS ${POOL_MESH_JSON}
-          ${CMAKE_SOURCE_DIR}/python/assets/asset_format.py
-          ${CMAKE_SOURCE_DIR}/python/assets/compile_runtime_asset.py
+          ${CMAKE_SOURCE_DIR}/python/stitch/asset.py
+          ${CMAKE_SOURCE_DIR}/python/stitch/asset_format.py
+          ${CMAKE_SOURCE_DIR}/python/stitch/compose.py
+          ${CMAKE_SOURCE_DIR}/python/stitch/profiles.py
   VERBATIM)
 add_custom_target(runtime_asset DEPENDS ${RUNTIME_ASSET})
 

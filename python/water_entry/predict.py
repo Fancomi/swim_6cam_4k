@@ -16,13 +16,14 @@
 产物：outputs/water_entry/predict/<model>/metrics.csv 与 per_frame/<clip>.json。
 """
 import argparse
-import csv
 import json
 import os
 import time
 
 import numpy as np
 
+from python.common.media import read_frames
+from python.common.tables import write_rows
 from python.water_entry import common as C
 
 METRIC_COLS = ["clip", "model", "note", "backstroke_applied", "entry_source",
@@ -56,7 +57,7 @@ def predict_clip(model, clip, pre, post, conf, imgsz, device, batch=16,
     全零不能被当成模型失明写进指标。复算后仍为空才认为是真的检不出。
     """
     frames = clip.window(pre, post)
-    images = C.read_frames(clip.video, frames)
+    images = read_frames(clip.video, frames)
     ordered = [f for f in frames if f in images]
 
     t0 = time.time()
@@ -217,11 +218,8 @@ def main():
                      row["entry_delta"] if row["entry_delta"] != "" else "-",
                      row["seconds"], " [%s]" % fallback if fallback else ""))
 
-        csv_path = os.path.join(out_dir, "metrics.csv")
-        with open(csv_path, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=METRIC_COLS)
-            w.writeheader()
-            w.writerows(rows)
+        csv_path = write_rows(os.path.join(out_dir, "metrics.csv"),
+                              METRIC_COLS, rows)
         deltas = [r["entry_delta"] for r in rows if r["entry_delta"] != ""]
         print("%-12s det=%.3f flight=%.3f entry=%.3f torso=%.3f  "
               "pred_entry %d/%d, |Δ|<=2: %d  ->  %s"

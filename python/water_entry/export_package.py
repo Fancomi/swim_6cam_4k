@@ -15,7 +15,6 @@
   README.txt                    交付说明：口径、标注要点、字段含义
 """
 import argparse
-import csv
 import json
 import os
 import zipfile
@@ -23,6 +22,8 @@ from collections import defaultdict
 
 import cv2
 
+from python.common.media import read_frames, write_image
+from python.common.tables import read_rows, write_rows
 from python.water_entry import common as C
 from python.water_entry.select_frames import MODEL_A, MODEL_B
 
@@ -193,7 +194,7 @@ def export(rows, predict_dir, out_dir, quality):
 
     for clip in sorted(by_clip):
         wanted = sorted({int(r["frame"]) for r in by_clip[clip]})
-        frames = C.read_frames(os.path.join(C.CLIP_DIR, clip + ".mp4"), wanted)
+        frames = read_frames(os.path.join(C.CLIP_DIR, clip + ".mp4"), wanted)
         for row in sorted(by_clip[clip], key=lambda r: int(r["frame"])):
             frame = int(row["frame"])
             if frame not in frames:
@@ -203,8 +204,8 @@ def export(rows, predict_dir, out_dir, quality):
             image_id += 1
             filename = "%s_f%03d.jpg" % (clip, frame)
             image = frames[frame]
-            cv2.imwrite(os.path.join(images_dir, filename), image,
-                        [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+            write_image(os.path.join(images_dir, filename), image,
+                        "package frame")
 
             model, rec = pick_prelabel(payloads[clip], frame)
             stats["prelabel_" + (model or "none")] += 1
@@ -236,10 +237,7 @@ def export(rows, predict_dir, out_dir, quality):
     for row in manifest:
         row["jump_frame"], row["entry_frame"] = heads[row["clip"]]
 
-    with open(os.path.join(out_dir, "manifest.csv"), "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=MANIFEST_COLS)
-        w.writeheader()
-        w.writerows(manifest)
+    write_rows(os.path.join(out_dir, "manifest.csv"), MANIFEST_COLS, manifest)
     with open(os.path.join(out_dir, "prelabel_coco.json"), "w") as f:
         json.dump({"info": {"description": "water-entry incremental annotation "
                                            "candidates (model prelabels)"},
@@ -281,8 +279,7 @@ def main():
     if not os.path.exists(args.candidates):
         raise SystemExit("找不到候选 CSV：%s（先运行 python -m "
                          "python.water_entry.select_frames）" % args.candidates)
-    with open(args.candidates, newline="") as f:
-        rows = list(csv.DictReader(f))
+    rows = read_rows(args.candidates)
     if args.limit:
         rows = rows[:args.limit]
     if not rows:

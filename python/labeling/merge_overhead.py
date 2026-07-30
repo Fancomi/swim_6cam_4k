@@ -7,11 +7,13 @@
 """
 import argparse
 import os
+from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
-from python.annotation_preview import common as C
+from python.common.media import write_image
+from python.labeling import snapshots as S
 
 # 与水下相机无关的三台：两台高空俯视 + 一台 orbbec，快照时刻完全相同。
 CAMERAS = ("overhead5", "overhead6", "orbbec_camera_1")
@@ -33,7 +35,7 @@ def median_background(stack, band_rows=BAND_ROWS):
     return out
 
 
-def merge_frames(stack, background, thresh=C.DIST_THRESH, band_rows=BAND_ROWS):
+def merge_frames(stack, background, thresh=S.DIST_THRESH, band_rows=BAND_ROWS):
     """按时间顺序把每帧前景叠到背景上（后帧覆盖前帧），返回合成图。"""
     n, h, _w, _c = stack.shape
     merged = background.copy()
@@ -52,7 +54,7 @@ def merge_frames(stack, background, thresh=C.DIST_THRESH, band_rows=BAND_ROWS):
     return merged
 
 
-OUT_DIR = os.path.join(C.OUTPUT_ROOT, "overhead-merge")
+OUT_DIR = S.OUTPUT_ROOT / "overhead-merge"
 
 
 class FrameSizeError(Exception):
@@ -74,9 +76,9 @@ def load_stack(paths):
     return np.stack(frames, axis=0)
 
 
-def run_camera(cam, out_dir=OUT_DIR, thresh=C.DIST_THRESH, band_rows=BAND_ROWS):
+def run_camera(cam, out_dir=OUT_DIR, thresh=S.DIST_THRESH, band_rows=BAND_ROWS):
     """跑完一台相机：中值背景 -> 前景叠加，写出两张原始分辨率 PNG。"""
-    frames = C.frames_for_camera(cam)
+    frames = S.frames_for_camera(cam)
     if not frames:
         print("%-16s 无匹配帧，跳过" % cam)
         return []
@@ -86,12 +88,12 @@ def run_camera(cam, out_dir=OUT_DIR, thresh=C.DIST_THRESH, band_rows=BAND_ROWS):
     background = median_background(stack, band_rows=band_rows)
     merged = merge_frames(stack, background, thresh=thresh, band_rows=band_rows)
 
-    os.makedirs(out_dir, exist_ok=True)
     written = []
     for suffix, image in (("background", background), ("merged", merged)):
-        path = os.path.join(out_dir, "%s_%s.png" % (cam, suffix))
-        Image.fromarray(image).save(path)
-        written.append(path)
+        # BGR for write_image, which is cv2 underneath; the stack is RGB.
+        path = write_image(Path(out_dir) / ("%s_%s.png" % (cam, suffix)),
+                           image[:, :, ::-1], "merge")
+        written.append(str(path))
         print("  wrote %s" % path)
     return written
 
@@ -100,18 +102,18 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--cameras", nargs="+", default=list(CAMERAS),
                     help="要处理的相机（默认 %(default)s）")
-    ap.add_argument("--thresh", type=float, default=C.DIST_THRESH,
+    ap.add_argument("--thresh", type=float, default=S.DIST_THRESH,
                     help="前景判定的 RGB 距离阈值（默认 %(default)s）")
     ap.add_argument("--band-rows", type=int, default=BAND_ROWS,
                     help="分带高度，越小越省内存（默认 %(default)s）")
-    ap.add_argument("--out-dir", default=OUT_DIR,
+    ap.add_argument("--out-dir", default=str(OUT_DIR),
                     help="输出目录（默认 %(default)s）")
     args = ap.parse_args(argv)
 
-    if not os.path.isdir(C.SNAP_DIR):
+    if not S.SNAPSHOTS.is_dir():
         raise SystemExit(
-            "缺少快照目录：%s（请通过 ANNOTATION_PREVIEW_DATASET_ROOT 指向有效数据集）"
-            % C.SNAP_DIR)
+            "缺少快照目录：%s（请用 SWIM_UNDER_GRIDS_ROOT 指向有效数据集）"
+            % S.SNAPSHOTS)
 
     total = 0
     try:

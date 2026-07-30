@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from python.validation.summarize_benchmarks import (
+from python.benchmarks.summarize import (
     MatrixValidationError,
     load_records,
     summarize_records,

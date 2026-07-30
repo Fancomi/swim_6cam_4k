@@ -8,15 +8,17 @@
 产物：outputs/water_entry/annotate_preview/{crops/,index.html}
 """
 import argparse
-import csv
-import html
 import json
 import os
 
 import cv2
 
+from python.common.media import read_frames, write_image
+from python.common.page import escape, write_page as write_html
+from python.common.tables import read_rows
 from python.water_entry import common as C
-from python.water_entry.review import crop_around, draw_caption, draw_overlay
+from python.water_entry.review import (crop_around, draw_caption, draw_overlay,
+                                       shared_centre)
 from python.water_entry.select_frames import MODEL_A, MODEL_B
 
 REASON_LABEL = {
@@ -32,8 +34,7 @@ PHASE_LABEL = {"pre": "起跳前", "flight": "飞行段", "entry": "入水±3帧
 
 
 def load_candidates(path, limit):
-    with open(path, newline="") as f:
-        rows = list(csv.DictReader(f))
+    rows = read_rows(path)
     return rows[:limit] if limit else rows
 
 
@@ -54,20 +55,6 @@ def empty_record(frame):
             "kps_xy": None, "kps_conf": None}
 
 
-def shared_centre(rec_a, rec_b, width, height):
-    """两模型检出框中心的均值；都缺检时用画面中心。
-
-    同一行三格必须同中心，否则「A 检出、B 缺检」看的不是同一块画面。
-    """
-    centres = [((r["box"][0] + r["box"][2]) / 2.0,
-                (r["box"][1] + r["box"][3]) / 2.0)
-               for r in (rec_a, rec_b) if r.get("box") is not None]
-    if not centres:
-        return (width / 2.0, height / 2.0)
-    return (sum(c[0] for c in centres) / len(centres),
-            sum(c[1] for c in centres) / len(centres))
-
-
 def render_row(row, predict_dir, crops_dir, side, full):
     """渲染一个候选帧的三格图，返回 (cells, 元信息字典)。"""
     clip, frame = row["clip"], int(row["frame"])
@@ -75,12 +62,12 @@ def render_row(row, predict_dir, crops_dir, side, full):
     rec_a = by_a.get(frame, empty_record(frame))
     rec_b = by_b.get(frame, empty_record(frame))
 
-    images = C.read_frames(os.path.join(C.CLIP_DIR, clip + ".mp4"), [frame])
+    images = read_frames(os.path.join(C.CLIP_DIR, clip + ".mp4"), [frame])
     if frame not in images:
         return [], {}
     image = images[frame]
     height, width = image.shape[:2]
-    centre = shared_centre(rec_a, rec_b, width, height)
+    centre = shared_centre((rec_a, rec_b), width, height)
 
     cells = []
     for label, rec in ((MODEL_A, rec_a), (MODEL_B, rec_b), ("raw", None)):
@@ -93,9 +80,7 @@ def render_row(row, predict_dir, crops_dir, side, full):
         else:
             canvas = draw_caption(canvas, rec, "%s f%d" % (label, frame))
         rel = os.path.join(clip, "f%03d_%s.jpg" % (frame, label))
-        out = os.path.join(crops_dir, rel)
-        os.makedirs(os.path.dirname(out), exist_ok=True)
-        cv2.imwrite(out, canvas, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+        write_image(os.path.join(crops_dir, rel), canvas, "candidate crop")
         cells.append((label, rel))
     return cells, {"entry_frame": payload["entry_frame"],
                    "jump_frame": payload["jump_frame"],
@@ -103,9 +88,6 @@ def render_row(row, predict_dir, crops_dir, side, full):
 
 
 PAGE_CSS = """
-body{background:#14161a;color:#dde3ea;font:13px/1.55 -apple-system,Helvetica,sans-serif;margin:24px}
-h1{font-size:19px;margin:0 0 6px}
-.meta{color:#8d97a5}
 .legend{margin:10px 0 20px;padding:10px 14px;background:#1b1e24;border-radius:6px}
 .legend code{color:#ffd166}
 .item{margin:18px 0;padding-top:10px;border-top:1px solid #2c313a}
@@ -115,52 +97,43 @@ h1{font-size:19px;margin:0 0 6px}
 .head .reasons{color:#7bd88f}
 .head .phase{color:#8d97a5}
 .strip{display:flex;gap:8px}
-figure{margin:0}
-figure img{display:block;width:var(--w);border:2px solid #2c313a;border-radius:4px;background:#000}
 figure.raw img{border-color:#4a5361}
-figcaption{color:#8d97a5;font-size:11px;text-align:center}
 """
 
 
-
 def write_page(path, items, cell_width, source_csv, total):
-    out = ["<!doctype html><html lang=\"zh\"><head><meta charset=\"utf-8\">",
-           "<title>增量标注候选帧质检</title><style>", PAGE_CSS,
-           ":root{--w:%dpx}" % cell_width, "</style></head><body>",
-           "<h1>增量标注候选帧质检</h1>",
-           "<p class=\"meta\">来源 %s ｜ 本页 %d / 候选 %d 帧 ｜ "
-           "三格依次为 swimup 叠加、swimup_bk 叠加、无叠加原图</p>"
-           % (html.escape(os.path.basename(source_csv)), len(items), total),
-           "<div class=\"legend\">信号含义："
-           + " ｜ ".join("<code>%s</code> %s" % (k, v)
-                        for k, v in REASON_LABEL.items())
-           + "<br>橙点为肩中点、粉点为胯中点，<code>sho-hip</code> 由负转正即入水判据；"
-             "<code>MISS</code> 表示该模型此帧没有选中目标。</div>"]
+    body = ["<h1>增量标注候选帧质检</h1>",
+            "<p class=\"meta\">来源 %s ｜ 本页 %d / 候选 %d 帧 ｜ "
+            "三格依次为 swimup 叠加、swimup_bk 叠加、无叠加原图</p>"
+            % (escape(os.path.basename(source_csv)), len(items), total),
+            "<div class=\"legend\">信号含义："
+            + " ｜ ".join("<code>%s</code> %s" % (k, v)
+                         for k, v in REASON_LABEL.items())
+            + "<br>橙点为肩中点、粉点为胯中点，<code>sho-hip</code> 由负转正即入水判据；"
+              "<code>MISS</code> 表示该模型此帧没有选中目标。</div>"]
     for row, cells, info in items:
-        out.append("<div class=\"item\"><div class=\"head\">")
-        out.append("<span class=\"clip\">%s</span>" % html.escape(row["clip"]))
-        out.append("<span>f%s（入水 f%d，偏移 %+d）</span>"
-                   % (row["frame"], info["entry_frame"],
-                      int(row["offset_to_entry"])))
-        out.append("<span class=\"phase\">%s</span>"
-                   % PHASE_LABEL.get(row["phase"], row["phase"]))
-        out.append("<span class=\"reasons\">%s</span>"
-                   % html.escape(" + ".join(
-                       REASON_LABEL.get(r, r) for r in row["reasons"].split("|"))))
-        out.append("<span class=\"score\">score %s</span>" % row["score"])
+        body.append("<div class=\"item\"><div class=\"head\">")
+        body.append("<span class=\"clip\">%s</span>" % escape(row["clip"]))
+        body.append("<span>f%s（入水 f%d，偏移 %+d）</span>"
+                    % (row["frame"], info["entry_frame"],
+                       int(row["offset_to_entry"])))
+        body.append("<span class=\"phase\">%s</span>"
+                    % PHASE_LABEL.get(row["phase"], row["phase"]))
+        body.append("<span class=\"reasons\">%s</span>"
+                    % escape(" + ".join(REASON_LABEL.get(r, r)
+                                        for r in row["reasons"].split("|"))))
+        body.append("<span class=\"score\">score %s</span>" % row["score"])
         if row["note"]:
-            out.append("<span class=\"meta\">note=%s</span>"
-                       % html.escape(row["note"]))
-        out.append("</div><div class=\"strip\">")
+            body.append("<span class=\"meta\">note=%s</span>" % escape(row["note"]))
+        body.append("</div><div class=\"strip\">")
         for label, rel in cells:
-            out.append("<figure class=\"%s\"><img data-src=\"crops/%s\" alt=\"%s\">"
-                       "<figcaption>%s</figcaption></figure>"
-                       % ("raw" if label == "raw" else "", rel,
-                          html.escape(label), html.escape(label)))
-        out.append("</div></div>")
-    out.append("<script>%s</script></body></html>" % C.lazy_img_js(700))
-    with open(path, "w") as f:
-        f.write("\n".join(out))
+            body.append("<figure class=\"%s\"><img data-src=\"crops/%s\" alt=\"%s\">"
+                        "<figcaption>%s</figcaption></figure>"
+                        % ("raw" if label == "raw" else "", rel,
+                           escape(label), escape(label)))
+        body.append("</div></div>")
+    return write_html(path, "增量标注候选帧质检", body, css=PAGE_CSS,
+                      cell_width=cell_width, lazy_margin=700)
 
 
 def main():
@@ -182,8 +155,7 @@ def main():
     if not os.path.exists(args.candidates):
         raise SystemExit("找不到候选 CSV：%s（先运行 python -m "
                          "python.water_entry.select_frames）" % args.candidates)
-    with open(args.candidates, newline="") as f:
-        total = sum(1 for _ in csv.DictReader(f))
+    total = len(read_rows(args.candidates))
     rows = load_candidates(args.candidates, args.limit)
     crops_dir = os.path.join(args.output_dir, "crops")
     os.makedirs(crops_dir, exist_ok=True)

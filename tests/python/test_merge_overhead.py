@@ -1,13 +1,14 @@
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
 from PIL import Image
 
-from python.annotation_preview import common as C
-from python.annotation_preview.merge_overhead import (
+from python.labeling import snapshots as S
+from python.labeling.merge_overhead import (
     BAND_ROWS,
     CAMERAS,
     FrameSizeError,
@@ -147,7 +148,7 @@ class RunCameraTest(unittest.TestCase):
             for i, frame in enumerate((quiet, quiet, loud)):
                 _write_snapshot(snap_dir, "raw_178348017357%d_%d" % (i, i + 1),
                                 "overhead5", frame)
-            with patch.object(C, "SNAP_DIR", snap_dir):
+            with patch.object(S, "SNAPSHOTS", Path(snap_dir)):
                 written = run_camera("overhead5", out_dir=out_dir)
             names = sorted(os.path.basename(p) for p in written)
             self.assertEqual(names, ["overhead5_background.png",
@@ -162,7 +163,7 @@ class RunCameraTest(unittest.TestCase):
             for i in range(3):
                 _write_snapshot(snap_dir, "raw_178348017357%d_%d" % (i, i + 1),
                                 "overhead5", _solid(24, 32, (60, 60, 60)))
-            with patch.object(C, "SNAP_DIR", snap_dir):
+            with patch.object(S, "SNAPSHOTS", Path(snap_dir)):
                 run_camera("overhead5", out_dir=out_dir)
             self.assertEqual(sorted(os.listdir(out_dir)),
                              ["overhead5_background.png", "overhead5_merged.png"])
@@ -174,7 +175,7 @@ class RunCameraTest(unittest.TestCase):
             for i in range(3):
                 _write_snapshot(snap_dir, "raw_178348017357%d_%d" % (i, i + 1),
                                 "overhead5", _solid(24, 32, (60, 60, 60)))
-            with patch.object(C, "SNAP_DIR", snap_dir):
+            with patch.object(S, "SNAPSHOTS", Path(snap_dir)):
                 written = run_camera("overhead5", out_dir=out_dir)
             for path in written:
                 with self.subTest(path=os.path.basename(path)):
@@ -184,7 +185,7 @@ class RunCameraTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             snap_dir = os.path.join(tmp, "snapshots")
             os.makedirs(snap_dir)
-            with patch.object(C, "SNAP_DIR", snap_dir):
+            with patch.object(S, "SNAPSHOTS", Path(snap_dir)):
                 self.assertEqual(run_camera("overhead5", out_dir=os.path.join(tmp, "o")), [])
 
 
@@ -194,8 +195,8 @@ class MainTest(unittest.TestCase):
             snap_dir = os.path.join(tmp, "snapshots")
             os.makedirs(snap_dir)
             seen = []
-            with patch.object(C, "SNAP_DIR", snap_dir), \
-                 patch("python.annotation_preview.merge_overhead.run_camera",
+            with patch.object(S, "SNAPSHOTS", Path(snap_dir)), \
+                 patch("python.labeling.merge_overhead.run_camera",
                        side_effect=lambda cam, **kw: seen.append(cam) or []):
                 main([])
             self.assertEqual(seen, list(CAMERAS))
@@ -205,8 +206,8 @@ class MainTest(unittest.TestCase):
             snap_dir = os.path.join(tmp, "snapshots")
             os.makedirs(snap_dir)
             seen = []
-            with patch.object(C, "SNAP_DIR", snap_dir), \
-                 patch("python.annotation_preview.merge_overhead.run_camera",
+            with patch.object(S, "SNAPSHOTS", Path(snap_dir)), \
+                 patch("python.labeling.merge_overhead.run_camera",
                        side_effect=lambda cam, **kw: seen.append(cam) or []):
                 main(["--cameras", "overhead6"])
             self.assertEqual(seen, ["overhead6"])
@@ -216,8 +217,8 @@ class MainTest(unittest.TestCase):
             snap_dir = os.path.join(tmp, "snapshots")
             os.makedirs(snap_dir)
             captured = {}
-            with patch.object(C, "SNAP_DIR", snap_dir), \
-                 patch("python.annotation_preview.merge_overhead.run_camera",
+            with patch.object(S, "SNAPSHOTS", Path(snap_dir)), \
+                 patch("python.labeling.merge_overhead.run_camera",
                        side_effect=lambda cam, **kw: captured.update(kw) or []):
                 main(["--cameras", "overhead5", "--thresh", "55",
                       "--band-rows", "64", "--out-dir", tmp])
@@ -229,12 +230,12 @@ class MainTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             snap_dir = os.path.join(tmp, "snapshots")
             os.makedirs(snap_dir)
-            with patch.object(C, "SNAP_DIR", snap_dir):
+            with patch.object(S, "SNAPSHOTS", Path(snap_dir)):
                 with self.assertRaises(SystemExit):
                     main(["--scale", "8"])
 
     def test_exits_when_snapshot_dir_missing(self):
-        with patch.object(C, "SNAP_DIR", "/definitely/not/here"):
+        with patch.object(S, "SNAPSHOTS", Path("/definitely/not/here")):
             with self.assertRaises(SystemExit):
                 main([])
 
@@ -245,7 +246,7 @@ class MainTest(unittest.TestCase):
                             _solid(10, 10, (20, 20, 20)))
             _write_snapshot(snap_dir, "raw_1783480173571_2", "overhead5",
                             _solid(12, 10, (20, 20, 20)))
-            with patch.object(C, "SNAP_DIR", snap_dir):
+            with patch.object(S, "SNAPSHOTS", Path(snap_dir)):
                 with self.assertRaises(SystemExit) as ctx:
                     main(["--cameras", "overhead5",
                           "--out-dir", os.path.join(tmp, "out")])

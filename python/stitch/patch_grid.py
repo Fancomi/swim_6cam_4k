@@ -12,14 +12,15 @@ texture pixels through the mesh's own UVs. The result lands on the same
 perspective the neighbouring lines follow, because it goes through the same
 mapping they were drawn under.
 
-    python -m python.stitch.patch_grid --profile overhead
+    python -m python.stitch.patch_grid overhead
 """
 import argparse
-import json
 
 import cv2
 import numpy as np
 
+from python.common.media import read_image, write_image
+from python.stitch import compose as C
 from python.stitch import profiles as P
 from python.stitch.profiles import StepError
 
@@ -133,22 +134,14 @@ def patch(profile, dry_run=False):
     still = profile.out_dir / "stitch.png"
     if not still.is_file():
         raise StepError(f"stitched still missing (run the still step): {still}")
-    if not profile.mesh_json.is_file():
-        raise StepError(f"mesh JSON missing (run the extract step): {profile.mesh_json}")
-    meshes = json.loads(profile.mesh_json.read_text(encoding="utf-8"))["meshes"]
-
-    image = cv2.imread(str(still))
-    if image is None:
-        raise StepError(f"cannot read {still}")
+    meshes = C.load_meshes(profile.mesh_json, neg_v=profile.neg_v)
+    image = read_image(still, "stitched still")
     columns = line_columns(image)
 
-    # The still's canvas origin: render.py pads the world bounds by `margin` px.
-    xs = [vertex["pos"][0] for mesh in meshes
-          for triangle in mesh["triangles"] for vertex in triangle]
-    margin = 2
-    xmin = min(xs) - margin / profile.ppm
-
-    gaps, residual = missing_world_x(columns, xmin, profile.ppm)
+    # The still's canvas origin, matching what render.py used: the world bounds
+    # padded by the profile's margin.
+    canvas = C.Canvas(meshes, profile.ppm, margin=profile.still_margin)
+    gaps, residual = missing_world_x(columns, canvas.xmin, profile.ppm)
     print(f"{len(columns)} lines on a {GRID_STEP_M}m grid "
           f"(fit residual {residual * 1000:.1f}mm)")
     if not gaps:
@@ -159,9 +152,7 @@ def patch(profile, dry_run=False):
     for world_x in gaps:
         mesh = owning_mesh(meshes, world_x)
         texture_path = profile.tex_dir / mesh["texture_basename"]
-        texture = cv2.imread(str(texture_path))
-        if texture is None:
-            raise StepError(f"cannot read texture: {texture_path}")
+        texture = read_image(texture_path, "texture")
         height, width = texture.shape[:2]
         points = texture_polyline(mesh, world_x, width, height)
         if len(points) < 2:
@@ -173,9 +164,7 @@ def patch(profile, dry_run=False):
             continue
         cv2.polylines(texture, [np.int32(points)], False, LINE_BGR,
                       LINE_WIDTH, cv2.LINE_AA)
-        if not cv2.imwrite(str(texture_path), texture):
-            raise StepError(f"cannot write {texture_path}")
-        written.append(texture_path)
+        written.append(write_image(texture_path, texture, "patched texture"))
     if written:
         print(f"patched {len(written)} texture(s); rerun the still step to see it")
     return written
@@ -184,14 +173,15 @@ def patch(profile, dry_run=False):
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Draw a missing calibration line into its source texture")
-    parser.add_argument("--profile", default="overhead",
-                        help="stitch line to patch (default: %(default)s)")
+    parser.add_argument("line", nargs="?", default="overhead",
+                        choices=P.names(),
+                        help="camera line to patch (default: %(default)s)")
     parser.add_argument("--dry-run", action="store_true",
                         help="report the gap and where it would be drawn, "
                              "without touching the texture")
     args = parser.parse_args(argv)
     try:
-        patch(P.get(args.profile), dry_run=args.dry_run)
+        patch(P.get(args.line), dry_run=args.dry_run)
     except StepError as error:
         raise SystemExit(f"error: {error}")
 
