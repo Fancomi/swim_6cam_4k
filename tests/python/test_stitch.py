@@ -1103,3 +1103,78 @@ class LoopSynchronisationTest(unittest.TestCase):
         raw = [cams[cam]["keyframe_ms"] for cam in order]
         self.assertEqual(max(raw) - min(raw), 2656)
         self.assertNotEqual(offsets["underA16"], offsets["underA1"])
+
+
+class DispatcherTest(unittest.TestCase):
+    """One step table, profile as an argument — so a third line costs a profile
+    record and no new CLI surface."""
+
+    def test_step_table_lists_offline_then_realtime(self):
+        from python.stitch import __main__ as cli
+
+        self.assertEqual(list(cli.STEPS),
+                         ["extract", "tex", "still", "video", "asset",
+                          "build", "live"])
+
+    def test_every_step_takes_profile_and_args(self):
+        import inspect
+        from python.stitch import __main__ as cli
+
+        for name, handler in cli.STEPS.items():
+            parameters = list(inspect.signature(handler).parameters)
+            self.assertEqual(parameters, ["profile", "args"],
+                             f"step {name} has signature {parameters}")
+
+    def test_unknown_step_lists_the_valid_ones(self):
+        from python.stitch import __main__ as cli
+
+        with self.assertRaises(SystemExit) as caught:
+            cli.main(["overhead", "polish"])
+        message = str(caught.exception)
+        self.assertIn("polish", message)
+        self.assertIn("extract", message)
+        self.assertIn("live", message)
+
+    def test_unknown_profile_is_rejected_before_any_step_runs(self):
+        from python.stitch import __main__ as cli
+
+        with self.assertRaises(SystemExit) as caught:
+            cli.main(["pool", "extract"])
+        message = str(caught.exception)
+        self.assertIn("pool", message)
+        self.assertIn("underwater", message)
+
+    def test_steps_run_in_the_order_given(self):
+        from python.stitch import __main__ as cli
+
+        order = []
+        original = dict(cli.STEPS)
+        try:
+            for name in ("extract", "asset"):
+                cli.STEPS[name] = (
+                    lambda profile, args, _name=name: order.append(_name))
+            cli.main(["overhead", "asset,extract"])
+        finally:
+            cli.STEPS.clear()
+            cli.STEPS.update(original)
+        self.assertEqual(order, ["asset", "extract"])
+
+    def test_video_and_live_require_a_video_dir(self):
+        from python.stitch import __main__ as cli
+
+        for step in ("video", "live"):
+            with self.assertRaises(SystemExit) as caught:
+                cli.main(["overhead", step])
+            self.assertIn("--video-dir", str(caught.exception))
+
+    def test_tex_requires_a_video_dir_only_when_the_source_is_video(self):
+        from python.stitch import __main__ as cli
+
+        # overhead reads reference textures from clips, so tex needs the dir
+        with self.assertRaises(SystemExit) as caught:
+            cli.main(["overhead", "tex"])
+        self.assertIn("--video-dir", str(caught.exception))
+
+
+if __name__ == "__main__":
+    unittest.main()

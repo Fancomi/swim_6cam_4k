@@ -10,11 +10,6 @@
 #   ./scripts/run_python.sh extract [SRC_FBX] [DST_JSON]
 #   ./scripts/run_python.sh bake SRC_FBX DST_FBX [--ext-px N]
 #   ./scripts/run_python.sh asset [INPUT_JSON] [OUTPUT_SWASSET]
-#   ./scripts/run_python.sh uw-extract          # all.fbx -> 16-plane mesh JSON
-#   ./scripts/run_python.sh uw-tex               # export per-camera first frames
-#   ./scripts/run_python.sh uw-render [BLEND_PX] # stitch (grid textures)
-#   ./scripts/run_python.sh uw-real [BLEND_PX]   # stitch (real first-frame images)
-#   ./scripts/run_python.sh uw-video DIR [BP] [S] # stitch 16 clips -> mp4
 #   ./scripts/run_python.sh we-predict [...]     # water-entry cam: YOLO-pose predict
 #   ./scripts/run_python.sh we-review [...]      # water-entry cam: HTML review page
 #   ./scripts/run_python.sh we-select [...]      # water-entry cam: pick frames to annotate
@@ -41,15 +36,11 @@ Commands:
   extract    Extract pool FBX mesh JSON
   bake       Bake centre-line UV extension into a new FBX
   asset      Compile mesh JSON into GPU runtime .swasset
-  uw-extract Extract all.fbx into 16-plane underwater mesh JSON (--planes-only)
-  uw-tex     Export each camera's first frame as a stitch texture
-  uw-render  Stitch underwater planes with the baked grid textures [BLEND_PX]
-  uw-real    Stitch underwater planes with real first-frame images [BLEND_PX]
-  uw-video   Stitch the 16 live *_underAi.ts clips into one panorama mp4
   we-predict Run YOLO-pose over the water-entry camera clips (multi-model compare)
   we-review  Build the water-entry pose review HTML page from predict results
   we-select  Pick badly-predicted frames as incremental annotation candidates
   we-annotate Render the candidate frames into a QC page before annotation
+  (拼接线路 underwater/overhead 已移到 scripts/run_stitch.sh)
 
 Examples:
   ./scripts/run_python.sh still
@@ -59,9 +50,6 @@ Examples:
   ./scripts/run_python.sh keypoint
   ./scripts/run_python.sh extract
   ./scripts/run_python.sh asset
-  ./scripts/run_python.sh uw-extract
-  ./scripts/run_python.sh uw-tex
-  ./scripts/run_python.sh uw-real 120
   ./scripts/run_python.sh we-predict --limit 5
   ./scripts/run_python.sh we-review --clips 20260725-160224
   ./scripts/run_python.sh we-select
@@ -153,67 +141,6 @@ cmd_asset() {
   echo "done -> $output_swasset"
 }
 
-# --- underwater N-plane stitch (isolated from the 6-camera pool pipeline) -----
-UW_MODELS="$ROOT/inputs/underwater/models"
-UW_OUT="$ROOT/outputs/underwater"
-# Grid stitching uses the dataset's annotation-grids (the canonical grid renders),
-# not the grids baked into all.fbm. Override with UW_GRID_DIR.
-UW_DATASET="${ANNOTATION_PREVIEW_DATASET_ROOT:-/Users/penghaotian/Downloads/DATAS/SWIMMING/swimming-xlj-under-grids}"
-UW_GRID_DIR="${UW_GRID_DIR:-$UW_DATASET/annotation-grids}"
-
-cmd_uw_extract() {
-  "$PY" -m python.stitch.extract \
-    "$UW_MODELS/all.fbx" "$UW_OUT/all_mesh.json" \
-    --tex-dir "$UW_MODELS/all.fbm" --planes-only "$@"
-}
-
-cmd_uw_tex() {
-  "$PY" -m python.stitch.export_ref_tex "$@"
-}
-
-# Render one full-res stitch + fusion heatmap. $1 = blend-px (default 0).
-cmd_uw_render() {
-  local bp="${1:-0}"
-  [[ -d "$UW_GRID_DIR" ]] || {
-    echo "grid texture dir not found: $UW_GRID_DIR" >&2
-    echo "(set UW_GRID_DIR or ANNOTATION_PREVIEW_DATASET_ROOT)" >&2
-    exit 1
-  }
-  "$PY" -m python.stitch.render \
-    --data "$UW_OUT/all_mesh.json" \
-    --tex-dir "$UW_GRID_DIR" \
-    --still "$UW_OUT/all_stitch_bp${bp}.png" \
-    --grid-still "$UW_OUT/all_grid_bp${bp}.png" \
-    --heatmap "$UW_OUT/all_heat_bp${bp}.png" \
-    --full-res --blend-px "$bp"
-}
-
-cmd_uw_real() {
-  local bp="${1:-0}"
-  [[ -d "$UW_OUT/real_tex_all" ]] || cmd_uw_tex
-  "$PY" -m python.stitch.render \
-    --data "$UW_OUT/all_mesh.json" \
-    --tex-dir "$UW_OUT/real_tex_all" \
-    --still "$UW_OUT/all_real_stitch_bp${bp}.png" \
-    --grid-still "$UW_OUT/all_real_grid_bp${bp}.png" \
-    --heatmap "$UW_OUT/all_real_heat_bp${bp}.png" \
-    --full-res --blend-px "$bp"
-}
-
-# Stitch the 16 live clips into one panorama mp4.
-# $1 = video dir, $2 = blend-px (default 120), $3 = seconds (default full clip).
-cmd_uw_video() {
-  local vdir="${1:?usage: uw-video VIDEO_DIR [BLEND_PX] [SECONDS]}"
-  local bp="${2:-120}"
-  local secs="${3:-}"
-  local -a extra=()
-  [[ -n "$secs" ]] && extra+=(--seconds "$secs")
-  "$PY" -m python.stitch.render_video "$vdir" \
-    --data "$UW_OUT/all_mesh.json" \
-    --out "$UW_OUT/all_stitch_bp${bp}.mp4" \
-    --blend-px "$bp" ${extra[@]+"${extra[@]}"}
-}
-
 # --- water-entry camera (underwater plane 0 上方机位) -------------------------
 # 入水检测机位的 YOLO-pose 预测、复核与增量标注选帧；
 # 数据集根用 WATER_ENTRY_DATASET_ROOT 覆盖。
@@ -251,11 +178,6 @@ case "$COMMAND" in
   extract) cmd_extract "$@" ;;
   bake) cmd_bake "$@" ;;
   asset|swasset) cmd_asset "$@" ;;
-  uw-extract) cmd_uw_extract "$@" ;;
-  uw-tex) cmd_uw_tex "$@" ;;
-  uw-render) cmd_uw_render "$@" ;;
-  uw-real) cmd_uw_real "$@" ;;
-  uw-video) cmd_uw_video "$@" ;;
   we-predict) cmd_we_predict "$@" ;;
   we-review) cmd_we_review "$@" ;;
   we-select) cmd_we_select "$@" ;;
