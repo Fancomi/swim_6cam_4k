@@ -16,6 +16,20 @@
 
 namespace {
 
+// setenv/unsetenv are POSIX; MSVC ships _putenv_s, where an empty value
+// removes the variable. One wrapper pair keeps the guard below portable.
+#ifdef _WIN32
+inline void set_env(const char* name, const char* value) {
+  _putenv_s(name, value);
+}
+inline void unset_env(const char* name) { _putenv_s(name, ""); }
+#else
+inline void set_env(const char* name, const char* value) {
+  setenv(name, value, 1);
+}
+inline void unset_env(const char* name) { unsetenv(name); }
+#endif
+
 // RAII guard that restores (or unsets) a process environment variable so
 // tests cannot leak state into one another.
 class EnvVarGuard {
@@ -37,16 +51,16 @@ class EnvVarGuard {
   EnvVarGuard& operator=(const EnvVarGuard&) = delete;
 
   void set(std::string_view value) {
-    setenv(name_.c_str(), std::string(value).c_str(), 1);
+    set_env(name_.c_str(), std::string(value).c_str());
   }
 
-  void unset() { unsetenv(name_.c_str()); }
+  void unset() { unset_env(name_.c_str()); }
 
   ~EnvVarGuard() {
     if (had_previous_) {
-      setenv(name_.c_str(), previous_value_.c_str(), 1);
+      set_env(name_.c_str(), previous_value_.c_str());
     } else {
-      unsetenv(name_.c_str());
+      unset_env(name_.c_str());
     }
   }
 
