@@ -10,7 +10,7 @@
 #   merge  [--cameras…]  把一台相机全时段快照合成一张 UV 参考图（另附中值背景帧）
 #                     -> outputs/labeling/overhead-merge/
 #   keypoint [选项…]  从 COCO-17 标注数据集生成按人裁剪的复核页
-#                     -> outputs/keypoint_preview/index.html（双击即可看）
+#                     -> outputs/keypoints/index.html（双击即可看）
 #
 # 两个标注器都用 ES module，`file://` 下会被浏览器按 CORS 拦截（origin 为 null）
 # 导致白屏，所以必须经这里走 http 打开，不要双击 html。加 --selftest 打开自测页
@@ -44,7 +44,7 @@ case "$COMMAND" in
   merge)      exec "$PY" -m python.labeling.merge_overhead "$@" ;;
   keypoint)
     "$PY" -m python.keypoints "$@"
-    echo "在浏览器打开 outputs/keypoint_preview/index.html（或 --output-dir 指定的目录）"
+    echo "在浏览器打开 outputs/keypoints/index.html（或 --output-dir 指定的目录）"
     ;;
   --help|-h|help) usage; exit 0 ;;
   *) echo "未知子命令：$COMMAND" >&2; usage; exit 2 ;;

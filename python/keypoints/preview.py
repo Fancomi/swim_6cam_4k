@@ -15,6 +15,8 @@ from typing import Iterable, Sequence
 import cv2
 import numpy as np
 
+from python.common.page import escape
+
 
 class DatasetFormatError(ValueError):
     """Raised when a dataset session's JSON payload violates the kpt-label/v1 contract."""
@@ -192,6 +194,12 @@ def discover_dataset(dataset_root: Path) -> DatasetIndex:
     return DatasetIndex(len(staged), person_index, tuple(records))
 
 
+# Deliberately not the same edge list as python/water_entry/common.py's SKELETON,
+# and not shared with it: this page draws annotation ground truth, where
+# visibility is COCO's integer v bit, while water_entry draws model output and
+# gates on a float confidence. That module also adds nose-to-shoulder edges to
+# make the head pose readable mid-dive. Merging the two would change one page's
+# appearance for the other's reason.
 COCO17_EDGES = ((0, 1), (0, 2), (1, 3), (2, 4), (5, 6), (5, 7), (7, 9), (6, 8), (8, 10), (5, 11), (6, 12), (11, 12), (11, 13), (13, 15), (12, 14), (14, 16))
 SKELETON_COLOR = (0, 220, 255)
 KEYPOINT_COLOR = (255, 230, 0)
@@ -255,12 +263,9 @@ def render_person_crop(
 
 
 def _escape_html(value: str) -> str:
-    return (
-        value.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
+    # quote=True escapes " as well, which matters because these values land inside
+    # attribute values (src, alt).
+    return escape(value, quote=True)
 
 
 def _render_card_html(card: dict[str, object], card_index: int) -> str:
@@ -330,6 +335,10 @@ def _render_index_html(cards: list[dict[str, object]], summary: GenerationSummar
   </div>
 </main>
 <script>
+  // Not python.common.page's lazy_loader: this page also marks cards whose image
+  // fails to decode, and keeps a no-IntersectionObserver fallback because its
+  // <img> already carries a real src (native loading="lazy"), so the swap here is
+  // belt-and-braces rather than the only path.
   const cards = {cards_json};
   const grid = document.getElementById("card-grid");
 

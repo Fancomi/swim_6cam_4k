@@ -49,6 +49,9 @@ KP_NAMES = ["nose", "left_eye", "right_eye", "left_ear", "right_ear",
             "left_knee", "right_knee", "left_ankle", "right_ankle"]
 L_SHO, R_SHO, L_HIP, R_HIP = 5, 6, 11, 12
 TORSO_KPS = (L_SHO, R_SHO, L_HIP, R_HIP)
+# 比 python/keypoints/preview.py 的 COCO17_EDGES 多两条鼻-肩连线：空中反弓时头部
+# 朝向是判断姿态的关键，缺了这两条看不出头在哪。两处刻意不共用——那边画的是标注
+# 真值、可见性用 COCO 的整数 v 位，这里画的是模型输出、按浮点置信度过滤。
 SKELETON = [(5, 7), (7, 9), (6, 8), (8, 10), (5, 6), (5, 11), (6, 12),
             (11, 12), (11, 13), (13, 15), (12, 14), (14, 16),
             (0, 1), (0, 2), (1, 3), (2, 4), (0, 5), (0, 6)]

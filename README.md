@@ -261,7 +261,7 @@ RGB 欧氏距离超阈判为前景，按时间顺序叠上去（后帧覆盖前�
 4K 尺寸下 float32 中间量吃满内存；输出始终是相机原始分辨率。
 
 `keypoint` 从外部标注数据集解析 COCO-17，按人物裁出正方形预览图并叠加骨架、关键点与红色
-精准关键点框，产物 `outputs/keypoint_preview/index.html` 双击即可看（图片懒加载，千级裁剪
+精准关键点框，产物 `outputs/keypoints/index.html` 双击即可看（图片懒加载，千级裁剪
 图不会卡死浏览器）。红框之外的留白来自 `--padding-ratio` 与 `--minimum-side` 算出的裁剪范围。
 
 数据集根用 `SWIM_UNDER_GRIDS_ROOT` 覆盖，产物写入 `outputs/labeling/`。

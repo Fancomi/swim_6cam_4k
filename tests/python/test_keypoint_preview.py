@@ -321,6 +321,6 @@ class GeneratorTests(unittest.TestCase):
 
 class CommandLineTests(unittest.TestCase):
     def test_main_rejects_a_missing_dataset_root(self):
-        with patch.object(sys, "argv", ["build_keypoint_preview.py", "--dataset-root", "/path/that/does/not/exist"]):
+        with patch.object(sys, "argv", ["python -m python.keypoints", "--dataset-root", "/path/that/does/not/exist"]):
             with self.assertRaisesRegex(SystemExit, "dataset root does not exist"):
                 main()

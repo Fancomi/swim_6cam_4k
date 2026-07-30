@@ -3,12 +3,13 @@
 import argparse
 from pathlib import Path
 
-from python.common.paths import OUTPUTS
-
+from python.common.paths import OUTPUTS, dataset_root
 from python.keypoints.preview import DatasetFormatError, generate_preview
 
-DEFAULT_DATASET_ROOT = Path("/Users/penghaotian/Downloads/DATAS/SWIMMING/swim-6cam-4k/swim-6cam-4k-2dkp")
-DEFAULT_OUTPUT_DIR = OUTPUTS / "keypoint_preview"
+DEFAULT_DATASET_ROOT = dataset_root(
+    "SWIM_KEYPOINT_DATASET_ROOT",
+    "/Users/penghaotian/Downloads/DATAS/SWIMMING/swim-6cam-4k/swim-6cam-4k-2dkp")
+DEFAULT_OUTPUT_DIR = OUTPUTS / "keypoints"
 
 
 def main() -> None:
