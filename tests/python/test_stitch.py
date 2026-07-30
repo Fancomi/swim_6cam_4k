@@ -62,6 +62,30 @@ def _strip(node, tex, x0):
     return {"node": node, "texture_basename": tex, "triangles": [tri]}
 
 
+def _plane(node, tex, x0, width=1.0, y0=0.0, y1=1.0):
+    """One quad, two triangles, UV spanning the full texture."""
+    corners = [
+        [{"pos": [x0, y0], "uv": [0.0, 0.0]},
+         {"pos": [x0 + width, y0], "uv": [1.0, 0.0]},
+         {"pos": [x0 + width, y1], "uv": [1.0, 1.0]}],
+        [{"pos": [x0, y0], "uv": [0.0, 0.0]},
+         {"pos": [x0 + width, y1], "uv": [1.0, 1.0]},
+         {"pos": [x0, y1], "uv": [0.0, 1.0]}],
+    ]
+    return {"node": node, "texture_basename": tex, "uvset": "UVChannel_1",
+            "const_axis": 2, "kept_axes": [0, 1], "spans": [width, y1 - y0, 0],
+            "triangles": corners}
+
+
+def _two_plane_json(td, planes):
+    """Write a mesh JSON of `planes` (already built by _plane) and return it."""
+    import json
+
+    path = Path(td) / "mesh.json"
+    path.write_text(json.dumps({"source": "test", "meshes": list(planes)}))
+    return path
+
+
 class SelectPoolPlanesTest(unittest.TestCase):
     def test_keeps_one_full_height_plane_per_texture(self):
         meshes = [
@@ -92,14 +116,6 @@ class SelectPoolPlanesTest(unittest.TestCase):
 
 class VideoAlignmentTest(unittest.TestCase):
     """Time alignment must come from the manifest wall clocks, not file order."""
-
-    def test_camera_of_parses_texture_basename(self):
-        from python.stitch.render_video import camera_of
-
-        self.assertEqual(camera_of("underA7-grid.png"), "underA7")
-        self.assertEqual(camera_of("underA16-grid.png"), "underA16")
-        self.assertIsNone(camera_of("pool.png"))
-        self.assertIsNone(camera_of(None))
 
     def test_start_frames_follow_playback_formula(self):
         from python.stitch.render_video import alignment_plan
@@ -762,3 +778,55 @@ class LoopPeriodTest(unittest.TestCase):
             runner.write_config(on, td, "metal", td / "o.h265", align=False,
                                loop=True)
             self.assertIn("loop_sources=true", on.read_text())
+
+
+class VideoCameraOrderTest(unittest.TestCase):
+    """Camera identity comes from the profile's ordered ids, not from parsing a
+    texture filename: the overhead textures are 05-02.jpg and C06.jpg, which no
+    naming rule maps to cam5/cam6."""
+
+    def test_camera_count_must_match_mesh_count(self):
+        import tempfile
+        from python.stitch.render_video import render_video
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            data = _two_plane_json(td, [_plane("a", "05-02.jpg", 0.0),
+                                        _plane("b", "C06.jpg", 0.9)])
+            with self.assertRaises(SystemExit) as caught:
+                render_video(data, td, td / "out.mp4",
+                             camera_ids=("cam5",),          # one id, two meshes
+                             clip_for=lambda d, c: td / "absent.mp4")
+            message = str(caught.exception)
+            self.assertIn("1", message)
+            self.assertIn("2", message)
+
+    def test_clip_lookup_is_delegated_to_the_caller(self):
+        # render_video must not glob for clips itself; the profile owns the
+        # suffix and the ambiguity rules.
+        import tempfile
+        from python.stitch.render_video import render_video
+
+        asked = []
+
+        def fake_clip_for(video_dir, camera):
+            asked.append(camera)
+            raise RuntimeError("stop here")
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            data = _two_plane_json(td, [_plane("a", "05-02.jpg", 0.0),
+                                        _plane("b", "C06.jpg", 0.9)])
+            with self.assertRaises(RuntimeError):
+                render_video(data, td, td / "out.mp4",
+                             camera_ids=("cam5", "cam6"),
+                             clip_for=fake_clip_for)
+        self.assertEqual(asked, ["cam5"])
+
+    def test_camera_of_is_gone(self):
+        # The underA-only regex was the last thing tying the video path to the
+        # underwater naming scheme.
+        import python.stitch.render_video as rv
+
+        self.assertFalse(hasattr(rv, "camera_of"))
+        self.assertFalse(hasattr(rv, "video_for_camera"))

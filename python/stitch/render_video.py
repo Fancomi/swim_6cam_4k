@@ -7,8 +7,9 @@ texture source — instead of one static image per plane, each plane is driven b
 its matching camera clip, and composited frame-by-frame into an h264 mp4 via
 ffmpeg (reusing reference_renderer.open_ffmpeg / finish_encoder).
 
-Camera↔plane mapping: mesh texture basename `underAi-grid.png` -> the clip whose
-filename ends `_underAi.ts` in the source directory.
+Camera↔plane mapping is positional: extract orders meshes left-to-right by world
+X, and the caller passes `camera_ids` in that same order plus a `clip_for`
+lookup (python.stitch.profiles.Profile supplies both).
 
 Time alignment: clips must NOT be assumed to share t=0. Each TS starts at its own
 decodable keyframe, which the recorder placed somewhere inside the lookback
@@ -26,7 +27,6 @@ duration / frame count / size are used only for QC, never as the alignment axis.
 """
 import argparse
 import json
-import re
 import shutil
 import time
 from pathlib import Path
@@ -36,25 +36,10 @@ import numpy as np
 
 from python.validation import reference_renderer as rr
 from python.stitch import render as R
+from python.stitch import profiles as P
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
-
-
-def camera_of(texture_basename):
-    """`underA7-grid.png` -> `underA7`; None if it doesn't match."""
-    m = re.match(r"(underA\d+)", texture_basename or "")
-    return m.group(1) if m else None
-
-
-def video_for_camera(video_dir, cam):
-    """The single clip in `video_dir` whose name ends `_<cam>.ts`, else raise."""
-    hits = sorted(video_dir.glob(f"*_{cam}.ts"))
-    if not hits:
-        raise SystemExit(f"no video for {cam} in {video_dir}")
-    if len(hits) > 1:
-        raise SystemExit(f"ambiguous videos for {cam}: {[h.name for h in hits]}")
-    return hits[0]
 
 
 def load_manifest(video_dir):
@@ -119,9 +104,9 @@ def alignment_plan(align_start_ms, align_end_ms, fps, cams, order):
     return starts, report
 
 
-def render_video(data_path, video_dir, out_path, seconds=None, ppm=None,
-                 unit_scale=1.0, neg_v=False, blend_px=0.0, full_res=True,
-                 align=True):
+def render_video(data_path, video_dir, out_path, camera_ids, clip_for,
+                 seconds=None, ppm=None, unit_scale=1.0, neg_v=False,
+                 blend_px=0.0, full_res=True, align=True):
     data_path = Path(data_path)
     video_dir = Path(video_dir)
     out_path = Path(out_path)
@@ -139,16 +124,18 @@ def render_video(data_path, video_dir, out_path, seconds=None, ppm=None,
         raise SystemExit(f"data file missing 'meshes' key: {data_path}")
     meshes = loaded["meshes"]
 
-    cam_order = []
-    for m in meshes:
-        cam = camera_of(m["texture_basename"])
-        if cam is None:
-            raise SystemExit(f"cannot derive camera from {m['texture_basename']}")
-        cam_order.append(cam)
+    # Camera identity is positional: extract sorts meshes left-to-right by world
+    # X and the profile lists its ids in that same order. Deriving it from the
+    # texture filename instead only ever worked for the underA* naming scheme —
+    # the overhead textures are 05-02.jpg and C06.jpg.
+    cam_order = list(camera_ids)
+    if len(cam_order) != len(meshes):
+        raise SystemExit(f"camera count mismatch: {len(cam_order)} ids for "
+                         f"{len(meshes)} meshes in {data_path}")
 
     caps, src_wh = [], []
     for cam in cam_order:
-        cap = cv2.VideoCapture(str(video_for_camera(video_dir, cam)))
+        cap = cv2.VideoCapture(str(clip_for(video_dir, cam)))
         if not cap.isOpened():
             raise SystemExit(f"cannot open video for {cam}")
         caps.append(cap)
@@ -304,30 +291,51 @@ def render_video(data_path, video_dir, out_path, seconds=None, ppm=None,
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Stitch underwater planes from video")
+    ap = argparse.ArgumentParser(description="Stitch plane textures from video")
     ap.add_argument("video_dir", type=Path,
-                    help="directory holding *_underAi.ts clips + manifest.json")
-    ap.add_argument("--data", type=Path,
-                    default=OUTPUTS_DIR / "underwater" / "all_mesh.json")
-    ap.add_argument("--out", type=Path,
-                    default=OUTPUTS_DIR / "underwater" / "all_stitch.mp4")
+                    help="directory holding one clip per camera")
+    ap.add_argument("--profile", default="underwater",
+                    help="stitch line whose camera ids and clip suffix to use "
+                         "(default: %(default)s)")
+    ap.add_argument("--data", type=Path, default=None,
+                    help="mesh JSON (default: the profile's)")
+    ap.add_argument("--out", type=Path, default=None,
+                    help="output mp4 (default: <profile out_dir>/stitch.mp4)")
     ap.add_argument("--seconds", type=float, default=None,
                     help="cap output duration; default uses the whole align window")
     ap.add_argument("--ppm", type=float, default=None,
                     help="pixels per metre; default adapts to source height in --full-res")
     ap.add_argument("--unit-scale", type=float, default=1.0)
     ap.add_argument("--neg-v", dest="neg_v", action="store_true", default=False)
-    ap.add_argument("--blend-px", type=float, default=0.0,
-                    help="horizontal pixels blended across each vertical seam")
-    ap.add_argument("--no-full-res", dest="full_res", action="store_false", default=True,
+    ap.add_argument("--blend-px", type=float, default=None,
+                    help="horizontal pixels blended across each vertical seam "
+                         "(default: the profile's)")
+    ap.add_argument("--no-full-res", action="store_true",
                     help="skip source-height rescale / bottom auto-crop")
-    ap.add_argument("--no-align", dest="align", action="store_false", default=True,
+    ap.add_argument("--no-align", action="store_true",
                     help="ignore manifest wall clocks and read every clip from "
-                         "frame 0 (only for comparing against the old behaviour)")
+                         "frame 0; already implied for profiles whose "
+                         "recordings carry no wall clock")
     args = ap.parse_args(argv)
-    render_video(args.data, args.video_dir, args.out, seconds=args.seconds,
-                 ppm=args.ppm, unit_scale=args.unit_scale, neg_v=args.neg_v,
-                 blend_px=args.blend_px, full_res=args.full_res, align=args.align)
+
+    profile = P.get(args.profile)
+    # A profile whose recordings have no usable wall clock (sync="none") reads
+    # from frame 0 anyway; --no-align forces that for a manifest-bearing one.
+    align = profile.sync == "manifest" and not args.no_align
+    render_video(
+        args.data or profile.mesh_json,
+        args.video_dir,
+        args.out or profile.out_dir / "stitch.mp4",
+        camera_ids=profile.camera_ids,
+        clip_for=profile.clip_for,
+        seconds=args.seconds,
+        ppm=args.ppm if args.ppm is not None else profile.ppm,
+        unit_scale=args.unit_scale,
+        neg_v=args.neg_v,
+        blend_px=args.blend_px if args.blend_px is not None else profile.blend_px,
+        full_res=profile.full_res and not args.no_full_res,
+        align=align,
+    )
 
 
 if __name__ == "__main__":
