@@ -340,13 +340,13 @@ class Mp4VideoToolboxSource::Impl final {
   // latched on the first call so the offset is relative to the file, matching
   // how the manifest's keyframe timestamp anchors frame 0.
   //
-  // Only the first pass skips. A loop wraps every lane on the same shared
-  // content period, so the lanes are already in step at the wrap point and can
-  // each replay from their own frame 0. Re-skipping would instead re-decode up
-  // to ~3s per lane, and because the offsets differ by that much between lanes
-  // the restart would land at visibly different times.
+  // Every pass skips, including loops. The offset is what puts this lane's
+  // frame 0 of a pass on the common time axis; replaying from the file's own
+  // frame 0 instead would restart each lane at its own keyframe, which are up
+  // to ~3s apart. Re-decoding the skipped span costs real time, and that is
+  // absorbed as a brief late start rather than as content misalignment.
   bool past_start_offset(CMTime pts, CMTime& first_sample_pts) const noexcept {
-    if (source_.start_offset.count() <= 0 || pass_index_ > 0) {
+    if (source_.start_offset.count() <= 0) {
       return true;
     }
     if (!valid_pts(pts)) {
@@ -636,7 +636,6 @@ class Mp4VideoToolboxSource::Impl final {
               decoder.invalidate();
               generation_.store(decoder.generation(),
                                 std::memory_order_release);
-              ++pass_index_;
               // Advance the wall origin by one period so the next pass paces
               // against its own start. Leaving it at the run's start would put
               // every target in the past, and the lane would decode flat out.
@@ -702,9 +701,6 @@ class Mp4VideoToolboxSource::Impl final {
   // Wall time the current pass began, so pacing stays continuous across a loop
   // instead of restarting the clock and emitting a burst.
   std::chrono::steady_clock::time_point pass_wall_origin_{};
-  // Published frames keep increasing across loops; the coordinator uses the
-  // sequence to detect drops, so it must not go backwards.
-  std::uint64_t pass_index_{0};
   // Content span the finished pass actually emitted; only consulted when no
   // shared loop period was configured.
   std::chrono::milliseconds last_pass_span_{0};

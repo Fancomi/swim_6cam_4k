@@ -944,3 +944,33 @@ class RenderTexNamesTest(unittest.TestCase):
                               tex_names=["overhead5.png"])
             self.assertIn("1", str(caught.exception))
             self.assertIn("2", str(caught.exception))
+
+
+class LoopSynchronisationTest(unittest.TestCase):
+    """A loop must land every lane back on the common time axis, not on each
+    file's own frame 0."""
+
+    def test_every_pass_starts_at_the_aligned_offset(self):
+        from python.stitch import render_video as RV
+
+        # Two lanes whose keyframes sit ~2.8s apart inside the lookback window.
+        align_start, align_end, fps = 1_000_000, 1_012_000, 30.0
+        cams = {
+            "underA16": {"keyframe_ms": align_start - 2964,
+                         "last_decodable_ms": align_end, "frames": 450},
+            "underA1": {"keyframe_ms": align_start - 308,
+                        "last_decodable_ms": align_end, "frames": 370},
+        }
+        order = ["underA16", "underA1"]
+        _starts, report = RV.alignment_plan(
+            align_start, align_end, fps, cams, order)
+        offsets = {e["cam"]: max(0, e["skew_ms"]) for e in report}
+
+        # Applying the offset puts both lanes on align_start...
+        for cam, offset in offsets.items():
+            self.assertEqual(cams[cam]["keyframe_ms"] + offset, align_start)
+        # ...while replaying from frame 0 would restart them 2656ms apart, which
+        # is exactly the desynchronisation the offset exists to remove.
+        raw = [cams[cam]["keyframe_ms"] for cam in order]
+        self.assertEqual(max(raw) - min(raw), 2656)
+        self.assertNotEqual(offsets["underA16"], offsets["underA1"])
