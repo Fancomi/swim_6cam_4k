@@ -1232,5 +1232,48 @@ class OverheadExtractTest(unittest.TestCase):
         self.assertEqual(select_pool_planes(meshes), [])
 
 
+class OverheadAssetTest(unittest.TestCase):
+    """The compiled asset must carry the profile's camera ids in mesh order, and
+    the two lines must not collide in the generated directory."""
+
+    def test_camera_ids_are_written_in_mesh_order(self):
+        import tempfile
+        from python.assets.asset_format import CAMERA, HEADER
+        from python.assets.compile_runtime_asset import compile_asset
+        from python.stitch import profiles
+
+        overhead = profiles.get("overhead")
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            asset = td / "overhead.swasset"
+            # real proportions: 10m and 17.5m planes overlapping 2.5m, 3m tall
+            mesh = _two_plane_json(td, [
+                _plane("Plane002", "05-02.jpg", 0.0, 10.0, 0.0, 3.0),
+                _plane("Plane001", "C06.jpg", 7.5, 17.5, 0.0, 3.0)])
+            compile_asset(mesh, asset, overhead.camera_ids,
+                          overhead.ppm, neg_v=False,
+                          blend_px=overhead.blend_px, clip_uv=overhead.clip_uv,
+                          source_size=overhead.source_size,
+                          crop_bottom=overhead.crop_bottom)
+
+            data = asset.read_bytes()
+            header = HEADER.unpack_from(data, 0)
+            self.assertEqual(header[7], 2)                 # camera_count
+            ids = []
+            for index in range(header[7]):
+                record = CAMERA.unpack_from(data, header[2] + index * CAMERA.size)
+                ids.append(record[0].split(b"\0")[0].decode())
+            self.assertEqual(ids, ["overhead5", "overhead6"])
+
+    def test_two_lanes_are_well_within_the_runtime_ceiling(self):
+        # kMaxCameras is 16, sized for the underwater panorama; a two-lane line
+        # needs no C++ change at all.
+        from python.stitch import profiles
+
+        ceiling = 16
+        for name in profiles.names():
+            self.assertLessEqual(len(profiles.get(name).camera_ids), ceiling)
+
+
 if __name__ == "__main__":
     unittest.main()
