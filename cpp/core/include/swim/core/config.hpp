@@ -57,18 +57,6 @@ inline constexpr std::array<std::string_view, 6> kPoolCameraIds{
     "cam3", "cam2", "cam1", "cam4", "cam5", "cam6"};
 
 struct AppConfig {
-  // Restart each lane's clip when it runs out instead of letting the lane fail
-  // (which substitutes a black replacement frame). Lanes restart on a common
-  // content period rather than at their own EOF: recorded clips differ in usable
-  // length by tens of milliseconds, so looping at each file's end would let the
-  // lanes drift apart by that much on every pass. Zero period means "use each
-  // file's natural end", which only stays in sync for equal-length clips.
-  bool loop_sources{false};
-  std::chrono::milliseconds loop_period{0};
-  // End the run cleanly when a clip runs out, instead of reporting the lane as
-  // failed. Only meaningful with loop_sources off.
-  bool stop_at_eof{false};
-
   std::string backend{"metal"};
   RunMode mode{RunMode::realtime};
   BenchmarkStage stage{BenchmarkStage::full};
@@ -89,6 +77,22 @@ struct AppConfig {
   bool preview_visible{true};
   bool encode{false};
   bool diagnostic_replacement{false};
+  // Restart each lane's clip when it runs out instead of letting the lane fail
+  // (which substitutes a black replacement frame). Without it any
+  // --duration-seconds past the shortest clip ends in "MP4 reached EOF before
+  // global render deadline". Live sources never hit EOF, so this only affects
+  // file playback.
+  //
+  // Lanes restart on a common content period, not at their own EOF: recorded
+  // clips differ in usable length by tens of milliseconds, so looping at each
+  // file's end would let them drift apart by that much on every pass. Zero
+  // period means "use each file's natural end", which only stays in sync for
+  // equal-length clips.
+  bool loop_sources{false};
+  std::chrono::milliseconds loop_period{0};
+  // End the run cleanly when a clip runs out, instead of reporting the lane as
+  // failed. Only meaningful with loop_sources off.
+  bool stop_at_eof{false};
   std::filesystem::path encode_path;
   std::chrono::milliseconds stale_after{100};
   std::chrono::milliseconds replace_after{1000};

@@ -12,17 +12,17 @@
 
 仓库也包含与 Metal 平级的 Windows 原生后端 `cpp/backends/d3d11/`：六路 H.264 由 Media Foundation（`IMFSourceReader` + `IMFDXGIDeviceManager`）做 D3D11 硬件解码为 GPU 常驻 NV12 纹理，Direct3D 11 以同一套固定六网格 + FP16 加性累加 shader（`cpp/backends/d3d11/shaders/stitch.hlsl`，从 `stitch.metal` 逐字段移植）合成 `5002x2102`，再经 DXGI 交换链窗口实时预览。与 Metal 路径一致：不依赖 OpenCV/FFmpeg，不把解码像素读回 CPU，各路输入走容量有界的 latest-frame 交换。第一阶段覆盖 `解码 → GPU 拼接 → 预览` 端到端实时；硬件 HEVC 编码与 benchmark 矩阵为后续阶段。
 
-构建前置：需要一个装有 `numpy` 与 `opencv-python` 的 Python 3.10+（用于把 `outputs/data/pool_mesh.json` 编译成 `assets/generated/pool_4k.swasset`），以及 Visual Studio 2022（MSVC，C++20）和 Windows 10 SDK。统一入口是 `scripts/run_win.ps1`：
+构建前置：Visual Studio 2022（MSVC，C++20）、Windows 10/11 SDK，以及一个装有 `numpy`、`opencv-python` 与 `fbx` 的 Python 3.10（用于把 FBX 网格编译成 `.swasset`）。这些都由 `scripts/install.bat` 一键装好，详见「环境依赖」一节。统一入口是 `scripts/run_6cam_4k.ps1`（cmd 包装见下一节的 `scripts\run_win.bat`）：
 
 ```powershell
-# 可视化 demo：DXGI 预览窗口 + 六路实时拼接（默认 30 秒）
-pwsh scripts/run_win.ps1 demo
+# 可视化：DXGI 预览窗口 + 六路实时拼接（默认 30 秒）
+pwsh scripts/run_6cam_4k.ps1
 
 # 无窗口（仍执行真实 GPU 拼接与 present 计量）
-pwsh scripts/run_win.ps1 demo -NoWindow
+pwsh scripts/run_6cam_4k.ps1 -NoWindow
 ```
 
-该脚本在缺少 `.swasset` 时自动编译，随后用 `-G "Visual Studio 17 2022"` 配置并构建 Release，再运行 `swim_realtime --backend d3d11`。六路真实输入路径写在 `configs/windows_20260629.conf`。
+exe 不存在时该脚本会用 `-G "Visual Studio 17 2022"` 配置并构建 Release（`.swasset` 由 CMake 的 `runtime_asset` target 顺带编出），再运行 `swim_realtime`。六路真实输入路径写在 `inputs/configs/windows_20260629.conf`。
 
 ## Windows 实时路径（CUDA/GL：NVDEC + OpenGL）
 
@@ -30,19 +30,31 @@ pwsh scripts/run_win.ps1 demo -NoWindow
 
 依赖（预编译，放在 `third_party/`，已 gitignore）：BtbN 的 FFmpeg shared 构建（含 cuvid/nvenc）、GLFW 3.4 win64，以及本机 CUDA Toolkit（头文件与 `cuda.lib`/`cudart.lib`）。CMake 通过 `SWIM_FFMPEG_DIR` / `SWIM_GLFW_DIR` / `SWIM_CUDA_DIR` 定位；三者齐备时自动启用 `swim_cudagl_backend`（配置日志打印 `CUDA/GL backend: enabled`）。
 
-两个后端共用同一个入口脚本 `scripts\run_win.bat`，第一个参数选后端；运行时 stderr 每秒刷新一行 render / decode / preview 实时 FPS：
+两个后端共用同一条入口：逻辑在 `scripts/run_6cam_4k.ps1`，`scripts\run_win.bat` 只是它的 cmd 包装（双击友好，顶部有个 EDITABLE 区可以直接改默认值），不重复实现任何东西。运行时 stderr 每秒刷新一行 render / decode / preview 实时 FPS：
 
 ```bat
-scripts\run_win.bat                     :: d3d11 后端（默认），预览窗口，30 秒
-scripts\run_win.bat cudagl              :: CUDA/GL（NVDEC+OpenGL）后端
-scripts\run_win.bat cudagl 60           :: 跑 60 秒
-scripts\run_win.bat cudagl 30 nowindow  :: 无窗口（仍执行真实 GPU 拼接）
-scripts\run_win.bat cudagl fps:60       :: 指定渲染帧率 60fps（与输入帧率无关）
+scripts\run_win.bat                      :: d3d11 后端（默认），预览窗口，30 秒
+scripts\run_win.bat cudagl               :: CUDA/GL（NVDEC+OpenGL）后端
+scripts\run_win.bat cudagl 60            :: 跑 60 秒
+scripts\run_win.bat cudagl 30 nowindow   :: 无窗口（仍执行真实 GPU 拼接）
+scripts\run_win.bat cudagl fps:60        :: 指定渲染帧率 60fps（与输入帧率无关）
+scripts\run_win.bat d3d11 600 noloop     :: 片段放完就停，不回到开头
 ```
+
+bat 的参数位置无关，认这几个词：`d3d11` / `cudagl` / `nowindow` / `noloop` / `fps:N` / 纯数字（秒数）。更多开关（`-Rebuild`、`-Config`、`-BuildDir`、`-Metrics`、`-StreamCount` 等）直接调 ps1：
+
+```powershell
+pwsh scripts/run_6cam_4k.ps1 -Backend cudagl -Duration 600
+pwsh scripts/run_6cam_4k.ps1 -Rebuild            # 强制重新配置并构建
+```
+
+exe 不存在时 ps1 会自动配置并构建对应后端的 `build/win-<backend>` 树，并把运行期 DLL（FFmpeg / GLFW / cudart）拷到 exe 旁——CMake 不做这件事，缺了会以 `0xC0000135` 启动失败。
+
+片段放完默认回到开头继续播（底层 `--loop=true`），所以时长可以远超录制长度；加 `noloop` 关掉它，此时时长超过最短那路片段会以 `MP4 reached EOF before global render deadline` 失败。
 
 渲染帧率可用 `fps:N` 指定（底层 `--fps=N`，等价 `fps_num=N fps_den=1`），与输入视频帧率无关：latest-frame 邮箱按该节奏重复或丢弃源帧来满足目标 cadence。也可在 config 用 `fps_num`/`fps_den` 或 CLI `--fps-num`/`--fps-den` 设非整数帧率（如 30000/1001）。
 
-CUDA/GL 的六路真实输入路径写在 `configs/windows_cudagl.conf`（`backend=cudagl`）。运行时需要 FFmpeg（`avcodec/avformat/avutil/swresample/swscale`）、`glfw3.dll`、`cudart64_12.dll` 与 exe 同目录。
+CUDA/GL 的六路真实输入路径写在 `inputs/configs/windows_cudagl.conf`（`backend=cudagl`）。运行时需要 FFmpeg（`avcodec/avformat/avutil/swresample/swscale`）、`glfw3.dll`、`cudart64_12.dll` 与 exe 同目录。
 
 ## 实时 Metal 路径
 
@@ -54,19 +66,19 @@ CUDA/GL 的六路真实输入路径写在 `configs/windows_cudagl.conf`（`backe
 /Users/penghaotian/Downloads/DATAS/SWIMMING/swim-6cam-4k/20260629-4K-raw
 ```
 
-统一入口是 `scripts/run_metal.sh`：
+统一入口是 `scripts/run_6cam_4k.sh`：
 
 ```bash
 # 可视化 demo：AppKit 窗口 + 写出 HEVC（默认 30 秒）
-./scripts/run_metal.sh demo
+./scripts/run_6cam_4k.sh demo
 
 # 无窗口、不写文件（只跑 GPU preview/encode 空 sink）
-./scripts/run_metal.sh demo --no-window --no-encode
+./scripts/run_6cam_4k.sh demo --no-window --no-encode
 
 # 性能矩阵 / soak
-./scripts/run_metal.sh benchmarks --quick
-./scripts/run_metal.sh benchmarks --duration 15
-./scripts/run_metal.sh soak
+./scripts/run_6cam_4k.sh benchmarks --quick
+./scripts/run_6cam_4k.sh benchmarks --duration 15
+./scripts/run_6cam_4k.sh soak
 ```
 
 `demo` 默认 `--preview-visible=true`，会创建 AppKit/CAMetalLayer 窗口显示实时拼接画面，并把硬件 HEVC 写到 `outputs/videos/pool_metal.h265`，指标写到 `outputs/benchmarks/manual.jsonl`。`--no-window` 不是跳过 preview：它仍创建私有 Metal render target，对每个被接受的最新输出执行真实 shader copy/render command，并等待 GPU completion。benchmarks/soak 默认无窗口；需要窗口时加 `--visible`。
@@ -78,13 +90,13 @@ CUDA/GL 的六路真实输入路径写在 `configs/windows_cudagl.conf`（`backe
 一秒功能矩阵由主测试流程执行：
 
 ```bash
-./scripts/run_metal.sh benchmarks --quick
+./scripts/run_6cam_4k.sh benchmarks --quick
 ```
 
 可发布矩阵每个 cell 至少 15 秒：
 
 ```bash
-./scripts/run_metal.sh benchmarks --duration 15
+./scripts/run_6cam_4k.sh benchmarks --duration 15
 ```
 
 结果位于 `outputs/benchmarks/runs/<run_id>/`，成功后 `outputs/benchmarks/latest` 指向该目录：
@@ -104,20 +116,20 @@ CUDA/GL 的六路真实输入路径写在 `configs/windows_cudagl.conf`（`backe
 默认十分钟的六路 paced full soak：
 
 ```bash
-./scripts/run_metal.sh soak
+./scripts/run_6cam_4k.sh soak
 ```
 
 soak 按每条 interval 的真实 `elapsed_s` 累加时间轴，报告 RSS 与 Metal allocation 的每分钟线性斜率，并拒绝 host copy、容量 high-water 越界、编码 callback/drain 错误，以及 warm-up 后连续五个区间低于 29 FPS。默认 RSS 增长上限为 64 MiB/min，Metal allocation 上限为 32 MiB/min；可用 `--max-rss-slope` 和 `--max-gpu-slope` 显式覆盖。
 
 ## 处理流程
 
-1. `./scripts/run_python.sh bake ...` 可选地把中线 UV 延伸写入一个新的 FBX，原始模型不需要被覆盖。
-2. `./scripts/run_python.sh extract` 读取 `inputs/pool/models/pool.fbx`，提取三角形、二维位置和 UV，默认写入 `outputs/data/pool_mesh.json`。
-3. `./scripts/run_python.sh still` / `4k` 使用网格 JSON 与纹理或六路视频生成静态拼接图或 H.264 视频。
-4. `./scripts/run_python.sh asset` 把网格 JSON 编译为 Metal 运行时 `.swasset`。
-5. `./scripts/run_python.sh keypoint` 生成 2D 关键点裁剪复核页。
-6. `./scripts/run_python.sh oh-merge` 把 `overhead5` / `overhead6` / `orbbec_camera_1` 各自全时段快照合成为一张原始分辨率的 UV 参考图（另附中值背景帧），输出到 `outputs/annotation_preview/overhead-merge/`。
-7. `./scripts/run_python.sh label mask` 起本地服务打开保留区域 mask 标注器：选一台相机、逐帧翻、拖拽画胶囊笔画标出该帧要保留的区域，存为数据集根目录下的 `mask_label_project.json`。`label dot` 打开打点标注器。加 `--selftest` 打开该标注器的浏览器自测页。
+1. `./scripts/run_offline.sh bake ...` 可选地把中线 UV 延伸写入一个新的 FBX，原始模型不需要被覆盖。
+2. `./scripts/run_offline.sh extract` 读取 `inputs/pool/models/pool.fbx`，提取三角形、二维位置和 UV，默认写入 `outputs/data/pool_mesh.json`。
+3. `./scripts/run_offline.sh still` / `4k` 使用网格 JSON 与纹理或六路视频生成静态拼接图或 H.264 视频。
+4. `./scripts/run_offline.sh asset` 把网格 JSON 编译为 Metal 运行时 `.swasset`。
+5. `./scripts/run_offline.sh keypoint` 生成 2D 关键点裁剪复核页。
+6. `./scripts/run_offline.sh oh-merge` 把 `overhead5` / `overhead6` / `orbbec_camera_1` 各自全时段快照合成为一张原始分辨率的 UV 参考图（另附中值背景帧），输出到 `outputs/annotation_preview/overhead-merge/`。
+7. `./scripts/run_offline.sh label mask` 起本地服务打开保留区域 mask 标注器：选一台相机、逐帧翻、拖拽画胶囊笔画标出该帧要保留的区域，存为数据集根目录下的 `mask_label_project.json`。`label dot` 打开打点标注器。加 `--selftest` 打开该标注器的浏览器自测页。
 8. `./scripts/run_stitch.sh <profile> <steps>` 跑平面拼接线路（underwater / overhead），见「平面拼接（stitch）」一节。
 
 两个标注器都用 ES module，`file://` 下会被浏览器按 CORS 拦截（origin 为 `null`）导致白屏，所以必须经 `label` 子命令走 http 打开，不要双击 html。
@@ -127,7 +139,9 @@ soak 按每条 interval 的真实 `elapsed_s` 累加时间轴，报告 RSS 与 M
 ```text
 swim_fbx_demo/
 ├── README.md
-├── .venv/                         # 现有 macOS / Python 3.10 虚拟环境
+├── requirements-win.txt           # Windows 核心 Python 依赖
+├── requirements-pose.txt          # 入水检测才需要的 torch/ultralytics
+├── .venv/                         # 项目虚拟环境（Python 3.10，已 gitignore）
 ├── inputs/
 │   ├── pool/
 │   │   ├── models/pool.fbx
@@ -184,13 +198,15 @@ swim_fbx_demo/
 │   ├── python/                     # unittest：test_stitch.py 等
 │   └── cpp/
 ├── scripts/
-│   ├── run_metal.sh              # demo / benchmarks / soak
-│   ├── run_python.sh             # still / 4k / keypoint / extract / bake / asset / we-*
+│   ├── install.bat               # Windows 一键环境安装（C++ 与 Python 两侧）
+│   ├── run_win.bat               # Windows 双击入口
+│   ├── run_6cam_4k.ps1           # 六路 4K 实时拼接（Windows）
+│   ├── run_6cam_4k.sh            # 六路 4K 实时拼接（macOS）+ benchmarks / soak
 │   ├── run_stitch.sh             # 平面拼接统一入口（macOS / Linux）
 │   ├── run_stitch.ps1            # 同上（Windows）
-│   ├── run_win.ps1               # Windows 六路实时启动器
-│   ├── run_win.bat               # 同上（cmd 包装）
-│   └── run_water_entry.sh        # 入水检测机位难例筛选全流程
+│   ├── run_offline.sh            # 离线：still / 4k / keypoint / extract / bake / asset / we-*
+│   ├── run_water_entry.sh        # 入水检测机位难例筛选全流程
+│   └── checks/check_bat_format.ps1  # .bat 编码与格式检查（见 AGENTS.md）
 └── docs/
     └── superpowers/
         ├── plans/
@@ -203,14 +219,30 @@ swim_fbx_demo/
 
 ## 环境依赖
 
-- Python 3.10
+- Python 3.10 —— 硬要求，不是偏好：Autodesk 只为 cp310 发布 FBX Python SDK 轮子
 - Autodesk FBX Python SDK，Python 中需能 `import fbx`
 - NumPy
 - OpenCV，Python 包导入名为 `cv2`
 - FFmpeg，`ffmpeg` 可执行文件需位于 `PATH`
 - 仅入水检测机位（`python/water_entry/`）需要：PyTorch `2.5.1`、TorchVision `0.20.1`、Ultralytics（`8.4.x`，MPS 后端在 Apple Silicon 上可用）
 
-项目现有 `.venv/` 是面向 macOS 和 Python 3.10 的环境，不应直接复制到其他操作系统或其他 Python 版本使用。可先检查当前环境：
+### Windows：一键安装
+
+```bat
+scripts\install.bat            :: 核心环境
+scripts\install.bat pose       :: 追加 torch/torchvision/ultralytics（约 2.5GB，仅入水检测需要）
+scripts\install.bat check      :: 只体检，不改动任何东西
+```
+
+七步全部幂等，已就绪的会打印 `[SKIP]`，可以反复跑：C++ 工具链体检 → 用 winget 装 Python 3.10 → 把 `.venv` 建/重建到 3.10 → 装 `requirements-win.txt` → 下载并安装 FBX Python SDK（弹官方安装界面，一路默认即可，装完自动 pip 装轮子）→ 拉取 `third_party/` 的 FFmpeg+GLFW 并体检 CUDA → 生成网格与 `.swasset`、构建 `swim_realtime.exe`、把运行期 DLL 拷到 exe 旁。
+
+装完 `scripts\run_win.bat`（六路 4K 与水下 16 路都从它进）与 `python -m python.stitch` 直接可用，无需手工激活虚拟环境（启动脚本会优先用 `.venv\Scripts\python.exe`）。
+
+脚本刻意不自动安装 Visual Studio 2022 与 CUDA Toolkit：体积大、需要重启、要选组件，只做体检并给出 winget 命令。缺 CUDA 只是警告，此时 `cudagl` 后端会被跳过，`d3d11` 后端不受影响。
+
+### macOS / Linux：手工准备
+
+FBX Python SDK 的可用发行包与安装方式取决于操作系统、CPU 架构及 Python ABI，非 Windows 平台请自行在目标 Python 3.10 环境里确认下面这些导入通过，再运行 FBX 相关脚本：
 
 ```bash
 .venv/bin/python --version
@@ -218,8 +250,6 @@ swim_fbx_demo/
 .venv/bin/python -c "import torch, ultralytics; print('pose deps OK', torch.backends.mps.is_available())"
 ffmpeg -version
 ```
-
-Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统、CPU 架构及 Python ABI；本项目不提供未经验证的通用安装命令。若不使用现有 `.venv/`，请先在目标 Python 3.10 环境中确认上述导入，再运行 FBX 相关脚本。
 
 三个 Python 入口的实际参数可用以下命令查看：
 
@@ -234,7 +264,7 @@ Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统�
 项目已经包含网格 JSON 和合成纹理。无需重新读取 FBX 即可生成静态拼接图：
 
 ```bash
-./scripts/run_python.sh still
+./scripts/run_offline.sh still
 ```
 
 默认外部 4K 数据集目录是：
@@ -246,7 +276,7 @@ Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统�
 该目录应包含会话 `20260629_172532` 的六个 `camN.mp4` 文件。默认生成 10 秒测试片：
 
 ```bash
-./scripts/run_python.sh 4k
+./scripts/run_offline.sh 4k
 ```
 
 ## 重新提取 FBX 网格
@@ -254,7 +284,7 @@ Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统�
 从默认模型重新生成默认网格 JSON：
 
 ```bash
-./scripts/run_python.sh extract
+./scripts/run_offline.sh extract
 ```
 
 等价的显式调用如下；它会重写 `outputs/data/pool_mesh.json`：
@@ -312,20 +342,20 @@ Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统�
 显式指定 10 秒测试片及输出路径：
 
 ```bash
-./scripts/run_python.sh 4k 10 outputs/videos/pool_4k_test10s.mp4
+./scripts/run_offline.sh 4k 10 outputs/videos/pool_4k_test10s.mp4
 ```
 
 用 `SWIMMING_DATASET_DIR` 覆盖默认数据集目录：
 
 ```bash
 SWIMMING_DATASET_DIR="/Users/penghaotian/Downloads/DATAS/SWIMMING/swim-6cam-4k/20260629-4K-raw" \
-  ./scripts/run_python.sh 4k 10 outputs/videos/pool_4k_test10s.mp4
+  ./scripts/run_offline.sh 4k 10 outputs/videos/pool_4k_test10s.mp4
 ```
 
 请求覆盖整段约 602 秒的素材并写入全长输出：
 
 ```bash
-./scripts/run_python.sh 4k 602 outputs/videos/pool_4k_full.mp4
+./scripts/run_offline.sh 4k 602 outputs/videos/pool_4k_full.mp4
 ```
 
 渲染器在任一路输入先结束时停止，因此最终时长由最短输入决定；当前历史全长输出约为 601.87 秒。4K 全长渲染计算量较大，运行前应确认磁盘空间和可接受的耗时。
@@ -343,7 +373,7 @@ SWIMMING_DATASET_DIR="/Users/penghaotian/Downloads/DATAS/SWIMMING/swim-6cam-4k/2
 | 5 | `Plane004` | `inputs/pool/textures/camera_5_composite.png` | `20260629_172532_cam5.mp4` |
 | 6 | `Plane007` | `inputs/pool/textures/camera_6_composite.png` | `20260629_172532_cam6.mp4` |
 
-也就是固定相机顺序：`cam3 cam2 cam1 cam4 cam5 cam6`。`scripts/run_python.sh 4k` 已按此顺序组装参数；直接调用 `python -m python.validation.reference_renderer --videos` 时也必须保持相同顺序。
+也就是固定相机顺序：`cam3 cam2 cam1 cam4 cam5 cam6`。`scripts/run_offline.sh 4k` 已按此顺序组装参数；直接调用 `python -m python.validation.reference_renderer --videos` 时也必须保持相同顺序。
 
 主要输出如下：
 
@@ -361,7 +391,7 @@ SWIMMING_DATASET_DIR="/Users/penghaotian/Downloads/DATAS/SWIMMING/swim-6cam-4k/2
 `python.assets.keypoint_preview` 从外部标注数据集解析 COCO-17 关键点，按人物裁剪出正方形预览图并叠加骨架、关键点和精准关键点框。脚本入口：
 
 ```bash
-./scripts/run_python.sh keypoint
+./scripts/run_offline.sh keypoint
 ```
 
 生成结果写入 `outputs/keypoint_preview/`，直接在浏览器打开 `outputs/keypoint_preview/index.html` 即可查看，无需额外的静态服务器。页面在桌面宽度下用四列网格展示裁剪卡片，每张卡片下方显示 `图 x/54 · 人 y/554` 形式的图片与人物计数元数据；卡片图片使用 `loading="lazy"` 和 `IntersectionObserver` 懒加载,只在滚动到附近时才请求对应裁剪图。图上红框（红框：精准关键点框）标出该人物可见关键点的精确外接框，黄色骨架线和关键点是叠加的 COCO-17 标注,红框之外的留白来自按 `--padding-ratio` 和 `--minimum-side` 计算的正方形裁剪范围。
@@ -376,7 +406,7 @@ SWIMMING_DATASET_DIR="/Users/penghaotian/Downloads/DATAS/SWIMMING/swim-6cam-4k/2
 例如指向另一台机器上的数据集并放宽裁剪边距：
 
 ```bash
-./scripts/run_python.sh keypoint \
+./scripts/run_offline.sh keypoint \
   --dataset-root "/path/to/游泳6拼接1080P-2D关键点标注" \
   --output-dir outputs/keypoint_preview \
   --padding-ratio 0.8 \
@@ -524,9 +554,9 @@ malformed、HEVC 硬件编码 30.1 fps、预览零丢帧；overhead 2 路 3840×
 `python.water_entry.predict` 对每条片段只推理「起跳前 5 帧 ~ 入水后 20 帧」的窗口，并把 `swimup`（现网）、`swimup_bk`（微调版）、`coco`（通用 `yolo11n-pose`，按需自动下载）三个模型跑在同一窗口上对比：
 
 ```bash
-./scripts/run_python.sh we-predict                       # 全部 115 条 × 3 模型
-./scripts/run_python.sh we-predict --limit 5 --models swimup_bk
-./scripts/run_python.sh we-predict --clips 20260725-160224 --conf 0.05
+./scripts/run_offline.sh we-predict                       # 全部 115 条 × 3 模型
+./scripts/run_offline.sh we-predict --limit 5 --models swimup_bk
+./scripts/run_offline.sh we-predict --clips 20260725-160224 --conf 0.05
 ```
 
 产物：
@@ -543,7 +573,7 @@ malformed、HEVC 硬件编码 30.1 fps、预览零丢帧；overhead 2 路 3840×
 `python.water_entry.review` 不重新推理，只读 per_frame JSON，把入水帧 ±3 帧渲染成叠加骨架的裁剪图，一行一帧、行内按模型横排：
 
 ```bash
-./scripts/run_python.sh we-review --clips 20260725-160224 20260717-101123 --limit 0
+./scripts/run_offline.sh we-review --clips 20260725-160224 20260717-101123 --limit 0
 ```
 
 打开 `outputs/water_entry/review/index.html`。同一行的各模型共用一个裁剪中心（各模型检出框中心的均值），因此「A 检出、B 缺检」两格看的是同一块画面；红框表示该模型此帧缺检，橙点为肩中点、粉点为胯中点，`sho-hip` 由负转正即入水判据触发点。
@@ -579,9 +609,9 @@ MPS 后端偶发把整窗推理返回全零检测（实测复现 1 次，重跑�
 `score` 取命中信号的最大基础分（而非求和，避免一堆弱信号压过一个强信号），叠加其余信号一成加成，再乘阶段权重：入水±3帧 1.6、飞行段 1.25、入水后 1.0、起跳前 0.5。
 
 ```bash
-./scripts/run_python.sh we-select                       # 默认口径，写候选 CSV
-./scripts/run_python.sh we-select --kp-mean-norm 0.10   # 收紧，只要最显著的分歧
-./scripts/run_python.sh we-annotate --limit 100          # 前 100 帧质检页
+./scripts/run_offline.sh we-select                       # 默认口径，写候选 CSV
+./scripts/run_offline.sh we-select --kp-mean-norm 0.10   # 收紧，只要最显著的分歧
+./scripts/run_offline.sh we-annotate --limit 100          # 前 100 帧质检页
 ```
 
 产物 `outputs/water_entry/annotate_candidates.csv`（按分数降序），以及质检页 `outputs/water_entry/annotate_preview/index.html`——每候选帧一行，左中两格是两个模型的骨架叠加，右格是标注员实际要看的无叠加原图。

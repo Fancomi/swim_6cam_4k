@@ -308,6 +308,13 @@ AppConfig load_config(const std::filesystem::path& path) {
     } else if (key == "diagnostic_replacement") {
       config.diagnostic_replacement =
           parse_config_boolean(path, line_number, key, value);
+    } else if (key == "loop_sources") {
+      config.loop_sources = parse_config_boolean(path, line_number, key, value);
+    } else if (key == "stop_at_eof") {
+      config.stop_at_eof = parse_config_boolean(path, line_number, key, value);
+    } else if (key == "loop_period_ms") {
+      config.loop_period = std::chrono::milliseconds{
+          parse_config_unsigned(path, line_number, key, value)};
     } else if (key == "encode_path") {
       config.encode_path = parse_config_path(path, line_number, value);
     } else if (key == "stale_ms") {
@@ -315,14 +322,6 @@ AppConfig load_config(const std::filesystem::path& path) {
           parse_config_unsigned(path, line_number, key, value)};
     } else if (key == "replace_ms") {
       config.replace_after = std::chrono::milliseconds{
-          parse_config_unsigned(path, line_number, key, value)};
-    } else if (key == "loop_sources") {
-      config.loop_sources =
-          parse_config_boolean(path, line_number, key, value);
-    } else if (key == "stop_at_eof") {
-      config.stop_at_eof = parse_config_boolean(path, line_number, key, value);
-    } else if (key == "loop_period_ms") {
-      config.loop_period = std::chrono::milliseconds{
           parse_config_unsigned(path, line_number, key, value)};
     } else if (key == "decode_surface_pool") {
       config.decode_surface_pool =
@@ -402,7 +401,7 @@ AppConfig apply_cli_overrides(
       config.encode = parse_boolean(value, name);
     } else if (name == "--diagnostic-replacement") {
       config.diagnostic_replacement = parse_boolean(value, name);
-    } else if (name == "--loop-sources") {
+    } else if (name == "--loop") {
       config.loop_sources = parse_boolean(value, name);
     } else if (name == "--stop-at-eof") {
       config.stop_at_eof = parse_boolean(value, name);

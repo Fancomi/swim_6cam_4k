@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# Metal 实时路径统一入口：可视化 demo、性能矩阵、soak。
+# 六路 4K 实时拼接（macOS / Metal 后端）：可视化 demo、性能矩阵、soak。
+#
+# 与 Windows 的 scripts/run_6cam_4k.ps1 是同一个任务的两个平台端；水下 16 路
+# 是另一条链路，见 scripts/run_stitch.sh。
 #
 # 用法:
-#   ./scripts/run_metal.sh demo [--duration N] [--no-window] [--no-encode] [...]
-#   ./scripts/run_metal.sh benchmarks [--quick] [--duration N] [--visible] [...]
-#   ./scripts/run_metal.sh soak [--duration N] [--visible] [...]
+#   ./scripts/run_6cam_4k.sh demo [--duration N] [--no-window] [--no-encode] [...]
+#   ./scripts/run_6cam_4k.sh benchmarks [--quick] [--duration N] [--visible] [...]
+#   ./scripts/run_6cam_4k.sh soak [--duration N] [--visible] [...]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,7 +20,7 @@ VISIBLE=false
 
 usage() {
   cat <<'EOF'
-Usage: scripts/run_metal.sh <command> [options]
+Usage: scripts/run_6cam_4k.sh <command> [options]
 
 Commands:
   demo         Six-camera realtime stitch with AppKit preview window

@@ -1,11 +1,17 @@
 # Local environment and OS metadata
 .DS_Store
 .venv
+# install.bat renames a wrong-version .venv aside instead of deleting it
+.venv.bak-*
 .worktrees/
 .superpowers/
 .pytest_cache/
 build/
 outputs/
+# Leftovers from before 87611cc moved generated assets and metrics under build/
+# and outputs/. run_win.ps1 still writes benchmarks/manual_<backend>.jsonl here.
+assets/generated/
+benchmarks/
 
 # Python caches
 __pycache__/
@@ -17,8 +23,11 @@ inputs/underwater/models/
 inputs/overhead/models/
 inputs/pool/models/*.fbx
 
-# Prebuilt CUDA/GL backend deps (FFmpeg+cuvid, GLFW) — large binaries, fetched locally
+# Prebuilt CUDA/GL backend deps (FFmpeg+cuvid, GLFW) — large binaries, fetched
+# locally by install.bat. downloads/ is its installer/zip cache (already covered
+# by the line above, spelled out so its purpose is obvious).
 /third_party/
+/third_party/downloads/
 
 # Agent worktrees and downloaded model weights are local scratch
 .claude/worktrees/

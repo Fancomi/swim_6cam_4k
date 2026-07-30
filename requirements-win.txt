@@ -1,0 +1,11 @@
+# Core Windows runtime for the realtime stitch pipeline.
+#
+# Installed into the project .venv by install.bat, on Python 3.10 (the only ABI
+# Autodesk ships an FBX Python SDK wheel for). The FBX SDK itself is NOT here:
+# it has no PyPI distribution and install.bat pulls its installer from
+# autodesk.com, then pip-installs the wheel that lands on disk.
+#
+# opencv-python-headless, not opencv-python: nothing in python/ opens a cv2
+# window (previews are native Metal/D3D11/GL), so the GUI libs are dead weight.
+numpy>=2.0,<3
+opencv-python-headless>=4.10,<6

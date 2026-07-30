@@ -274,6 +274,9 @@ def step_run(profile, args):
     elif not config.is_file():
         raise StepError(f"config does not exist: {config}")
 
+    # Loop controls are not repeated on the command line: write_config already
+    # emitted loop_sources / stop_at_eof / loop_period_ms, and a --loop here
+    # would silently override whatever a caller-supplied --config asked for.
     command = [executable, "--config", config,
                f"--duration-seconds={args.seconds}",
                f"--preview={'true' if args.preview else 'false'}",

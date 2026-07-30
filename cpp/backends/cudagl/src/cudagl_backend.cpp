@@ -140,7 +140,7 @@ class CudaGlSourceAdapter final : public swim::core::ISource {
   void start(swim::core::LatestFrameMailbox& output) override {
     source_impl_ = std::make_unique<NvdecSource>(
         context_, source_, camera_index_, output, metrics_, config_.mode,
-        config_.decode_surface_pool, &lifecycle_);
+        config_.decode_surface_pool, &lifecycle_, config_.loop_sources);
     source_impl_->start();
   }
 

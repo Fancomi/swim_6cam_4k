@@ -58,7 +58,7 @@ class BenchmarkScriptsTest(unittest.TestCase):
         return config, executable, log
 
     def test_matrix_runner_lists_each_required_cell_once(self):
-        script = ROOT / "scripts" / "run_metal.sh"
+        script = ROOT / "scripts" / "run_6cam_4k.sh"
         result = subprocess.run(
             [str(script), "benchmarks", "--list-cells"],
             cwd=ROOT,
@@ -74,7 +74,7 @@ class BenchmarkScriptsTest(unittest.TestCase):
         self.assertTrue(os.access(script, os.X_OK))
 
     def test_soak_help_exposes_safety_defaults(self):
-        script = ROOT / "scripts" / "run_metal.sh"
+        script = ROOT / "scripts" / "run_6cam_4k.sh"
         result = subprocess.run(
             [str(script), "soak", "--help"],
             cwd=ROOT,
@@ -96,7 +96,7 @@ class BenchmarkScriptsTest(unittest.TestCase):
             environment = dict(os.environ, FAKE_EXEC_LOG=str(log))
             subprocess.run(
                 [
-                    str(ROOT / "scripts" / "run_metal.sh"),
+                    str(ROOT / "scripts" / "run_6cam_4k.sh"),
                     "benchmarks",
                     "--quick", "--config", str(config), "--executable", str(executable),
                     "--output-dir", str(output),
@@ -122,7 +122,7 @@ class BenchmarkScriptsTest(unittest.TestCase):
             environment = dict(os.environ, FAKE_EXEC_LOG=str(log), FAKE_GIT_SHA="c" * 40)
             result = subprocess.run(
                 [
-                    str(ROOT / "scripts" / "run_metal.sh"),
+                    str(ROOT / "scripts" / "run_6cam_4k.sh"),
                     "benchmarks",
                     "--quick", "--config", str(config), "--executable", str(executable),
                     "--output-dir", str(directory / "mismatch"),

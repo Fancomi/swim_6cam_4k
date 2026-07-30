@@ -240,7 +240,7 @@ class MfSource::Impl final {
        std::uint32_t camera_index, swim::core::LatestFrameMailbox& mailbox,
        swim::core::RuntimeCounters& counters, swim::core::RunMode mode,
        std::uint32_t ticket_capacity, std::uint32_t surface_capacity,
-       swim::core::RunLifecycle* lifecycle)
+       swim::core::RunLifecycle* lifecycle, bool loop_sources)
       : context_(std::move(context)),
         source_(std::move(source)),
         camera_index_(camera_index),
@@ -249,6 +249,7 @@ class MfSource::Impl final {
         mode_(mode),
         surface_capacity_(surface_capacity),
         lifecycle_(lifecycle),
+        loop_sources_(loop_sources),
         mf_runtime_(media_foundation_runtime()) {
     static_cast<void>(ticket_capacity);
     if (context_ == nullptr || context_->device == nullptr) {
@@ -439,6 +440,19 @@ class MfSource::Impl final {
     return elapsed_100ns >= offset_100ns;
   }
 
+  // Rewind the reader to the clip start for looping playback. Returns false
+  // when the seek fails, letting the caller fall through to normal EOF
+  // handling rather than spinning on a stream that will not restart.
+  bool seek_to_start(IMFSourceReader* reader) const noexcept {
+    PROPVARIANT position;
+    PropVariantInit(&position);
+    position.vt = VT_I8;
+    position.hVal.QuadPart = 0;
+    const auto hr = reader->SetCurrentPosition(GUID_NULL, position);
+    PropVariantClear(&position);
+    return SUCCEEDED(hr);
+  }
+
   void pace(LONGLONG pts_100ns, LONGLONG& first_pts,
             std::chrono::steady_clock::time_point& first_wall) const {
     if (mode_ != swim::core::RunMode::realtime || pts_100ns < 0) {
@@ -565,6 +579,19 @@ class MfSource::Impl final {
       }
       if ((stream_flags & MF_SOURCE_READERF_ENDOFSTREAM) != 0) {
         const auto now = std::chrono::steady_clock::now();
+        // Looping playback: seek back to the clip start and keep publishing.
+        // Everything the first pass derived from sample timestamps is reset, so
+        // the lane replays its manifest start offset and re-anchors pacing to
+        // the rewound sample. Replaying the offset is deliberate: it reproduces
+        // the same inter-lane alignment pass 2 that pass 1 had, instead of
+        // collapsing every lane onto its own frame 0.
+        if (loop_sources_ && seek_to_start(reader.Get())) {
+          first_pts = -1;
+          first_sample_pts = -1;
+          first_wall = {};
+          counters_.reconnects.fetch_add(1, std::memory_order_relaxed);
+          continue;
+        }
         if (lifecycle_ != nullptr) {
           const auto disposition = lifecycle_->classify_eof(now);
           if (disposition ==
@@ -647,6 +674,7 @@ class MfSource::Impl final {
   swim::core::RunMode mode_;
   std::uint32_t surface_capacity_{};
   swim::core::RunLifecycle* lifecycle_{};
+  bool loop_sources_{false};
   std::shared_ptr<MediaFoundationRuntime> mf_runtime_;
   std::shared_ptr<DecodedSurfacePool> pool_;
   // Set from the stream's media type before the first frame is published.
@@ -670,11 +698,11 @@ MfSource::MfSource(std::shared_ptr<D3D11Context> context,
                    swim::core::RuntimeCounters& counters,
                    swim::core::RunMode mode, std::uint32_t ticket_capacity,
                    std::uint32_t surface_capacity,
-                   swim::core::RunLifecycle* lifecycle)
+                   swim::core::RunLifecycle* lifecycle, bool loop_sources)
     : impl_(std::make_unique<Impl>(std::move(context), std::move(source),
                                    camera_index, mailbox, counters, mode,
                                    ticket_capacity, surface_capacity,
-                                   lifecycle)) {}
+                                   lifecycle, loop_sources)) {}
 
 MfSource::~MfSource() = default;
 

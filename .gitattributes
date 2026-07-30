@@ -1,0 +1,29 @@
+# Keep Windows batch files parseable by cmd.exe (CRLF, and never a BOM --
+# see AGENTS.md "Windows bat 脚本编码规范").
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Shell scripts run on macOS/Linux; CRLF would break the shebang.
+*.sh text eol=lf
+
+# Let git normalize the rest so mixed-platform edits do not churn diffs.
+*.cpp text
+*.hpp text
+*.h text
+*.mm text
+*.metal text
+*.hlsl text
+*.py text
+*.md text
+*.json text
+*.conf text
+*.cmake text
+CMakeLists.txt text
+
+# Binary assets: never touch line endings.
+*.fbx binary
+*.png binary
+*.mp4 binary
+*.ts binary
+*.swasset binary
+*.pt binary

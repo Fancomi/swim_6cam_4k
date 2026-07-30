@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
-# Python 离线应用统一入口：静图/4K 拼接、关键点预览、FBX 提取与运行时资产。
+# 离线工具统一入口（非实时）：静图/4K 拼接、FBX 提取、运行时资产编译、
+# 关键点与标注预览。实时拼接走 run_6cam_4k.{ps1,sh} / run_stitch.{sh,ps1}。
 #
 # 用法:
-#   ./scripts/run_python.sh still
-#   ./scripts/run_python.sh 4k [SECONDS] [OUTPUT_MP4]
-#   ./scripts/run_python.sh keypoint [--dataset-root PATH] [...]
-#   ./scripts/run_python.sh oh-merge [--cameras ...] [--thresh N]
-#   ./scripts/run_python.sh label mask|dot [--port N] [--selftest]
-#   ./scripts/run_python.sh extract [SRC_FBX] [DST_JSON]
-#   ./scripts/run_python.sh bake SRC_FBX DST_FBX [--ext-px N]
-#   ./scripts/run_python.sh asset [INPUT_JSON] [OUTPUT_SWASSET]
-#   ./scripts/run_python.sh we-predict [...]     # water-entry cam: YOLO-pose predict
-#   ./scripts/run_python.sh we-review [...]      # water-entry cam: HTML review page
-#   ./scripts/run_python.sh we-select [...]      # water-entry cam: pick frames to annotate
-#   ./scripts/run_python.sh we-annotate [...]    # water-entry cam: candidate QC page
+#   ./scripts/run_offline.sh still
+#   ./scripts/run_offline.sh 4k [SECONDS] [OUTPUT_MP4]
+#   ./scripts/run_offline.sh keypoint [--dataset-root PATH] [...]
+#   ./scripts/run_offline.sh oh-merge [--cameras ...] [--thresh N]
+#   ./scripts/run_offline.sh label mask|dot [--port N] [--selftest]
+#   ./scripts/run_offline.sh extract [SRC_FBX] [DST_JSON]
+#   ./scripts/run_offline.sh bake SRC_FBX DST_FBX [--ext-px N]
+#   ./scripts/run_offline.sh asset [INPUT_JSON] [OUTPUT_SWASSET]
+#   ./scripts/run_offline.sh we-predict [...]     # water-entry cam: YOLO-pose predict
+#   ./scripts/run_offline.sh we-review [...]      # water-entry cam: HTML review page
+#   ./scripts/run_offline.sh we-select [...]      # water-entry cam: pick frames to annotate
+#   ./scripts/run_offline.sh we-annotate [...]    # water-entry cam: candidate QC page
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -25,7 +26,7 @@ SESSION="20260629_172532"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/run_python.sh <command> [args]
+Usage: scripts/run_offline.sh <command> [args]
 
 Commands:
   still      Render static stitch PNG from composite textures
@@ -43,17 +44,17 @@ Commands:
   (拼接线路 underwater/overhead 已移到 scripts/run_stitch.sh)
 
 Examples:
-  ./scripts/run_python.sh still
-  ./scripts/run_python.sh 4k
-  ./scripts/run_python.sh 4k 30
-  ./scripts/run_python.sh 4k 602 outputs/videos/pool_4k_full.mp4
-  ./scripts/run_python.sh keypoint
-  ./scripts/run_python.sh extract
-  ./scripts/run_python.sh asset
-  ./scripts/run_python.sh we-predict --limit 5
-  ./scripts/run_python.sh we-review --clips 20260725-160224
-  ./scripts/run_python.sh we-select
-  ./scripts/run_python.sh we-annotate --limit 100
+  ./scripts/run_offline.sh still
+  ./scripts/run_offline.sh 4k
+  ./scripts/run_offline.sh 4k 30
+  ./scripts/run_offline.sh 4k 602 outputs/videos/pool_4k_full.mp4
+  ./scripts/run_offline.sh keypoint
+  ./scripts/run_offline.sh extract
+  ./scripts/run_offline.sh asset
+  ./scripts/run_offline.sh we-predict --limit 5
+  ./scripts/run_offline.sh we-review --clips 20260725-160224
+  ./scripts/run_offline.sh we-select
+  ./scripts/run_offline.sh we-annotate --limit 100
 EOF
 }
 
@@ -123,7 +124,7 @@ cmd_extract() {
 
 cmd_bake() {
   if (($# < 2)); then
-    echo "usage: scripts/run_python.sh bake SRC_FBX DST_FBX [--ext-px N] [--tex-dir DIR]" >&2
+    echo "usage: scripts/run_offline.sh bake SRC_FBX DST_FBX [--ext-px N] [--tex-dir DIR]" >&2
     exit 2
   fi
   "$PY" -m python.assets.bake_uv "$@"

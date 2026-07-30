@@ -16,6 +16,20 @@
 
 namespace {
 
+// setenv/unsetenv are POSIX; MSVC ships _putenv_s, where an empty value
+// removes the variable. One wrapper pair keeps the guard below portable.
+#ifdef _WIN32
+inline void set_env(const char* name, const char* value) {
+  _putenv_s(name, value);
+}
+inline void unset_env(const char* name) { _putenv_s(name, ""); }
+#else
+inline void set_env(const char* name, const char* value) {
+  setenv(name, value, 1);
+}
+inline void unset_env(const char* name) { unsetenv(name); }
+#endif
+
 // RAII guard that restores (or unsets) a process environment variable so
 // tests cannot leak state into one another.
 class EnvVarGuard {
@@ -37,16 +51,16 @@ class EnvVarGuard {
   EnvVarGuard& operator=(const EnvVarGuard&) = delete;
 
   void set(std::string_view value) {
-    setenv(name_.c_str(), std::string(value).c_str(), 1);
+    set_env(name_.c_str(), std::string(value).c_str());
   }
 
-  void unset() { unsetenv(name_.c_str()); }
+  void unset() { unset_env(name_.c_str()); }
 
   ~EnvVarGuard() {
     if (had_previous_) {
-      setenv(name_.c_str(), previous_value_.c_str(), 1);
+      set_env(name_.c_str(), previous_value_.c_str());
     } else {
-      unsetenv(name_.c_str());
+      unset_env(name_.c_str());
     }
   }
 
@@ -96,6 +110,7 @@ std::string valid_config_with_cam3(std::string_view cam3_path) {
       "preview=true\n"
       "encode=false\n"
       "diagnostic_replacement=false\n"
+      "loop_sources=true\n"
       "encode_path=outputs/test-output.h265\n"
       "stale_ms=100\n"
       "replace_ms=1000\n"
@@ -248,6 +263,7 @@ TEST_CASE(loads_exact_camera_order_and_all_config_values) {
   CHECK(config.preview);
   CHECK(!config.encode);
   CHECK(!config.diagnostic_replacement);
+  CHECK(config.loop_sources);
   CHECK_EQ(config.encode_path,
            std::filesystem::path{"outputs/test-output.h265"});
   CHECK_EQ(config.stale_after, 100ms);
@@ -355,12 +371,15 @@ TEST_CASE(loads_sixteen_underwater_sources_in_declared_order) {
 
 TEST_CASE(applies_every_supported_cli_override) {
   AppConfig config;
-  const std::array<std::string_view, 11> arguments{
+  const std::array<std::string_view, 14> arguments{
       "--validate-only",
       "--preview=false",
       "--preview-visible=false",
       "--encode=true",
       "--diagnostic-replacement=true",
+      "--loop=true",
+      "--loop-period-ms=5000",
+      "--stop-at-eof=true",
       "--encode-path=outputs/override.h265",
       "--encode-sink=null",
       "--duration-seconds=27",
@@ -377,6 +396,9 @@ TEST_CASE(applies_every_supported_cli_override) {
   CHECK(!config.preview_visible);
   CHECK(config.encode);
   CHECK(config.diagnostic_replacement);
+  CHECK(config.loop_sources);
+  CHECK_EQ(config.loop_period, 5000ms);
+  CHECK(config.stop_at_eof);
   CHECK_EQ(config.encode_path,
            std::filesystem::path{"outputs/override.h265"});
   CHECK_EQ(config.encode_sink, EncodeSink::null_sink);
@@ -618,25 +640,13 @@ TEST_CASE(loads_loop_controls_with_a_shared_period) {
   const auto config = swim::core::load_config(fixture("underwater_loop.conf"));
   CHECK(config.loop_sources);
   CHECK_EQ(config.loop_period, 11961ms);
-}
-
-TEST_CASE(loop_controls_default_to_off) {
-  const auto config = swim::core::load_config(fixture("valid.conf"));
-  CHECK(!config.loop_sources);
-  CHECK_EQ(config.loop_period, 0ms);
-}
-
-TEST_CASE(applies_loop_cli_overrides) {
-  const std::array arguments{"--loop-sources=true"sv, "--loop-period-ms=5000"sv};
-  const auto config =
-      swim::core::apply_cli_overrides(AppConfig{}, arguments);
-  CHECK(config.loop_sources);
-  CHECK_EQ(config.loop_period, 5000ms);
-}
-
-TEST_CASE(loads_stop_at_eof) {
-  const auto config = swim::core::load_config(fixture("underwater_loop.conf"));
   CHECK(!config.stop_at_eof);
-  const std::array arguments{"--stop-at-eof=true"sv};
-  CHECK(swim::core::apply_cli_overrides(AppConfig{}, arguments).stop_at_eof);
+}
+
+TEST_CASE(loop_period_and_stop_at_eof_default_to_off) {
+  // valid.conf sets loop_sources=true but names no period, which is the
+  // "restart at each file's own end" case.
+  const auto config = swim::core::load_config(fixture("valid.conf"));
+  CHECK_EQ(config.loop_period, 0ms);
+  CHECK(!config.stop_at_eof);
 }

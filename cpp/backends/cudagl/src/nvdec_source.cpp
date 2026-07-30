@@ -100,7 +100,8 @@ class NvdecSource::Impl final {
   Impl(std::shared_ptr<CudaGlContext> context, swim::core::SourceConfig source,
        std::uint32_t camera_index, swim::core::LatestFrameMailbox& mailbox,
        swim::core::RuntimeCounters& counters, swim::core::RunMode mode,
-       std::uint32_t surface_capacity, swim::core::RunLifecycle* lifecycle)
+       std::uint32_t surface_capacity, swim::core::RunLifecycle* lifecycle,
+       bool loop_sources)
       : context_(std::move(context)),
         source_(std::move(source)),
         camera_index_(camera_index),
@@ -108,7 +109,8 @@ class NvdecSource::Impl final {
         counters_(counters),
         mode_(mode),
         surface_capacity_(surface_capacity),
-        lifecycle_(lifecycle) {
+        lifecycle_(lifecycle),
+        loop_sources_(loop_sources) {
     if (source_.path.empty()) {
       throw std::invalid_argument("NVDEC source path must not be empty");
     }
@@ -181,6 +183,20 @@ class NvdecSource::Impl final {
       std::chrono::steady_clock::time_point now) const noexcept {
     return stop_requested_.load(std::memory_order_acquire) ||
            (lifecycle_ != nullptr && lifecycle_->should_stop(now));
+  }
+
+  // Rewind the container to the start and flush the decoder for looping
+  // playback. Returns false when the seek fails, letting the caller fall
+  // through to normal EOF handling instead of spinning.
+  bool rewind_stream(AVFormatContext* fmt, AVCodecContext* dec,
+                     int video_stream) const noexcept {
+    if (av_seek_frame(fmt, video_stream, 0, AVSEEK_FLAG_BACKWARD) < 0) {
+      return false;
+    }
+    // The decoder just returned EOF, so it is drained; flushing clears that
+    // state and lets it accept packets from the rewound position.
+    avcodec_flush_buffers(dec);
+    return true;
   }
 
   // True once `pts` reaches the lane's aligned start, measured from the clip's
@@ -360,6 +376,9 @@ class NvdecSource::Impl final {
     const AVRational tb = stream->time_base;
 
     while (!termination_requested(std::chrono::steady_clock::now())) {
+      // Set when this iteration hit EOF and rewound instead of finishing, so
+      // the end-of-iteration EOF check below does not end the lane.
+      bool looped = false;
       ret = av_read_frame(fmt, packet);
       if (ret == AVERROR_EOF) {
         avcodec_send_packet(dec, nullptr);  // flush
@@ -386,7 +405,17 @@ class NvdecSource::Impl final {
           break;
         }
         if (recv == AVERROR_EOF) {
-          // EOF handling per lifecycle.
+          // Looping playback: rewind and keep going. Mirrors mf_source.cpp —
+          // everything derived from sample timestamps is reset so the lane
+          // replays its manifest start offset and re-anchors pacing.
+          if (loop_sources_ && rewind_stream(fmt, dec, video_stream)) {
+            first_pts = AV_NOPTS_VALUE;
+            first_sample_pts = AV_NOPTS_VALUE;
+            first_wall = {};
+            counters_.reconnects.fetch_add(1, std::memory_order_relaxed);
+            looped = true;
+            break;
+          }
           const auto now = std::chrono::steady_clock::now();
           if (lifecycle_ != nullptr) {
             const auto disposition = lifecycle_->classify_eof(now);
@@ -422,7 +451,7 @@ class NvdecSource::Impl final {
         publish_frame(frame, sequence++);
         av_frame_unref(frame);
       }
-      if (ret == AVERROR_EOF) {
+      if (ret == AVERROR_EOF && !looped) {
         return;
       }
     }
@@ -469,6 +498,7 @@ class NvdecSource::Impl final {
   swim::core::RunMode mode_;
   std::uint32_t surface_capacity_{};
   swim::core::RunLifecycle* lifecycle_{};
+  bool loop_sources_{false};
   mutable std::mutex thread_mutex_;
   std::thread worker_;
   std::atomic_bool stop_requested_{false};
@@ -485,10 +515,12 @@ NvdecSource::NvdecSource(std::shared_ptr<CudaGlContext> context,
                          swim::core::RuntimeCounters& counters,
                          swim::core::RunMode mode,
                          std::uint32_t surface_capacity,
-                         swim::core::RunLifecycle* lifecycle)
+                         swim::core::RunLifecycle* lifecycle,
+                         bool loop_sources)
     : impl_(std::make_unique<Impl>(std::move(context), std::move(source),
                                    camera_index, mailbox, counters, mode,
-                                   surface_capacity, lifecycle)) {}
+                                   surface_capacity, lifecycle,
+                                   loop_sources)) {}
 
 NvdecSource::~NvdecSource() = default;
 
