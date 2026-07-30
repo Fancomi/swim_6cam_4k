@@ -25,12 +25,14 @@ function Resolve-Python {
   throw 'no Python interpreter found; run scripts\install.bat first'
 }
 
-if ($args.Count -lt 2) {
+$asking = $args.Count -ge 1 -and $args[0] -in @('--help', '-h', 'help')
+if ($args.Count -lt 2 -or $asking) {
   # 说明只有一份：把本文件顶部的注释块打出来。
-  Get-Content $PSCommandPath | Select-Object -Skip 1 -First 13 |
+  Get-Content $PSCommandPath | Select-Object -First 13 |
     ForEach-Object { $_ -replace '^# ?', '' } | Write-Host
   Write-Host '完整选项：python -m python.stitch --help'
-  exit 2
+  # 显式求助是成功，参数不足是用法错误。
+  exit $(if ($asking) { 0 } else { 2 })
 }
 
 $python = Resolve-Python

@@ -32,10 +32,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="$ROOT/.venv/bin/python"
 [[ -x "$PY" ]] || PY="$(command -v python3)"
 
-if (($# < 2)); then
+if (($# < 2)) || [[ "${1:-}" == --help || "${1:-}" == -h || "${1:-}" == help ]]; then
   # 用法说明只有一份：把本文件顶部的注释块打出来，不再复制一遍。
   sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
   echo "完整选项：python -m python.stitch --help" >&2
+  # 显式求助是成功，参数不足是用法错误。
+  [[ "${1:-}" == --help || "${1:-}" == -h || "${1:-}" == help ]] && exit 0
   exit 2
 fi
 
