@@ -1,13 +1,17 @@
-"""One-command underwater realtime stitch: extract, compile, build, run.
+"""One-command plane stitch: extract, compile, build, run.
 
 Cross-platform by construction — every step is the same Python here, and the
 platform only decides which CMake generator, backend name, and executable path
 to use. macOS gets Metal, Windows gets D3D11 (or CUDA/GL with --backend cudagl).
 
+Which model, how many lanes, what pixel density, whether the clips carry a wall
+clock: all of that is the profile's, not this module's. Adding a stitch line
+does not touch this file.
+
 Each step is skipped when its output is already newer than its inputs, so the
 common case (rerun after changing nothing) goes straight to the run.
 
-    python -m python.stitch.run --video-dir DIR            # full pipeline
+    python -m python.stitch.run --profile overhead --video-dir DIR
     python -m python.stitch.run --video-dir DIR --seconds 30 --encode
     python -m python.stitch.run --steps asset,run          # skip extraction
 """
@@ -19,29 +23,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from python.stitch import profiles as P
 from python.stitch import render_video as RV
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-OUTPUTS = PROJECT_ROOT / "outputs" / "underwater"
-MODELS = PROJECT_ROOT / "inputs" / "underwater" / "models"
-CONFIGS = PROJECT_ROOT / "inputs" / "configs"
-
-MESH_JSON = OUTPUTS / "all_mesh.json"
-ASSET = PROJECT_ROOT / "build" / "assets" / "generated" / "underwater_16.swasset"
-# Records the asset-shaping options the current .swasset was built with, so
-# changing any of them re-compiles even though the mesh JSON is untouched.
-ASSET_STAMP = ASSET.with_suffix(".stamp")
-# Left-to-right, matching the mesh order the extractor produces.
-CAMERA_IDS = [f"underA{index}" for index in range(16, 0, -1)]
-ASSET_PPM = 240.0
-ASSET_BLEND_PX = 120.0
-SOURCE_SIZE = (1280, 720)
+from python.stitch.profiles import CONFIGS, PROJECT_ROOT, StepError
 
 STEPS = ("extract", "asset", "build", "run")
-
-
-class StepError(RuntimeError):
-    """A pipeline step failed; the message is already user-facing."""
 
 
 def is_windows():
@@ -94,44 +80,58 @@ def newer_than(target, *sources):
                for s in sources)
 
 
-def step_extract(args):
-    fbx = Path(args.fbx)
-    tex_dir = Path(args.tex_dir)
-    if not fbx.is_file():
-        raise StepError(f"FBX does not exist: {fbx}")
-    if newer_than(MESH_JSON, fbx) and not args.force:
-        print(f"mesh up to date: {MESH_JSON}")
+def stamp_path(profile):
+    """Where the asset's shaping fingerprint lives, one file per profile."""
+    return profile.asset.with_suffix(".stamp")
+
+
+def step_extract(profile, args):
+    if not profile.fbx.is_file():
+        raise StepError(f"FBX does not exist: {profile.fbx}")
+    if newer_than(profile.mesh_json, profile.fbx) and not args.force:
+        print(f"mesh up to date: {profile.mesh_json}")
         return
-    run([python_bin(), "-m", "python.stitch.extract", fbx, MESH_JSON,
-         "--tex-dir", tex_dir, "--planes-only"])
+    command = [python_bin(), "-m", "python.stitch.extract",
+               profile.fbx, profile.mesh_json, "--tex-dir", profile.tex_dir]
+    if profile.planes_only:
+        command.append("--planes-only")
+    run(command)
 
 
-def asset_options(args):
-    """The asset-shaping arguments, plus a stamp string identifying them."""
+def asset_options(profile, args):
+    """The asset-shaping arguments, plus a stamp string identifying them.
+
+    The stamp leads with the profile name so two lines writing sibling .stamp
+    files can never satisfy each other's up-to-date check."""
     options = ["--ppm", str(args.asset_ppm), "--no-neg-v",
                "--blend-px", str(args.blend_px),
                "--crop-bottom", str(args.crop_bottom),
-               "--source-size", str(SOURCE_SIZE[0]), str(SOURCE_SIZE[1])]
+               "--source-size", str(profile.source_size[0]),
+               str(profile.source_size[1])]
     if args.clip_uv:
         options.append("--clip-uv")
-    return options, " ".join(options)
+    return options, " ".join([profile.name, *options])
 
 
-def step_asset(args):
-    if not MESH_JSON.is_file():
-        raise StepError(f"mesh JSON missing (run the extract step): {MESH_JSON}")
-    options, stamp = asset_options(args)
-    current = ASSET_STAMP.read_text() if ASSET_STAMP.is_file() else None
-    if (newer_than(ASSET, MESH_JSON) and current == stamp and not args.force):
-        print(f"asset up to date: {ASSET}")
+def step_asset(profile, args):
+    if not profile.mesh_json.is_file():
+        raise StepError(
+            f"mesh JSON missing (run the extract step): {profile.mesh_json}")
+    options, stamp = asset_options(profile, args)
+    stamp_file = stamp_path(profile)
+    current = stamp_file.read_text() if stamp_file.is_file() else None
+    if (newer_than(profile.asset, profile.mesh_json) and current == stamp
+            and not args.force):
+        print(f"asset up to date: {profile.asset}")
         return
-    ASSET.parent.mkdir(parents=True, exist_ok=True)
+    profile.asset.parent.mkdir(parents=True, exist_ok=True)
     run([python_bin(), "-m", "python.assets.compile_runtime_asset",
-         MESH_JSON, ASSET, "--camera-ids", *CAMERA_IDS, *options])
-    ASSET_STAMP.write_text(stamp)
+         profile.mesh_json, profile.asset,
+         "--camera-ids", *profile.camera_ids, *options])
+    stamp_file.write_text(stamp)
 
 
-def step_build(args):
+def step_build(profile, args):        # noqa: ARG001 - signature parity
     build_dir = build_dir_for(args.backend)
     executable = executable_for(build_dir)
     if executable.is_file() and not args.force:
@@ -156,23 +156,27 @@ def step_build(args):
     run(build)
 
 
-def lane_start_offsets(video_dir):
+def lane_start_offsets(profile, video_dir):
     """Per-camera milliseconds into each clip where the common time axis starts.
 
-    Recorded clips do not share a t=0: each stream begins at its own decodable
-    keyframe, placed inside the lookback window with GOP granularity, so the
-    per-lane skew reaches seconds. The sample manifest carries the wall-clock
-    truth; this reuses render_video's reading of it so the realtime path aligns
-    by exactly the same formula the offline renderer and the player use.
+    Recorded clips do not always share a t=0: each stream begins at its own
+    decodable keyframe, placed inside the lookback window with GOP granularity,
+    so the per-lane skew reaches seconds. Profiles whose samples carry that
+    wall-clock truth (sync="manifest") reuse render_video's reading of it, so the
+    realtime path aligns by exactly the same formula as the offline renderer.
 
-    Returns {} when the sample has no usable manifest — live sources have none,
-    and the runtime treats a missing offset as "read from the first frame"."""
+    Profiles with sync="none" return {} without looking: their recordings have
+    no manifest by design, and reporting that as an exception every run would be
+    noise. A manifest-bearing profile whose manifest is missing degrades to the
+    same empty result, but says so."""
+    if profile.sync != "manifest":
+        return {}
     try:
         align_start, align_end, fps, cams = RV.load_manifest(video_dir)
     except SystemExit as error:
         print(f"  no wall-clock alignment: {error}")
         return {}
-    order = [camera for camera in CAMERA_IDS if camera in cams]
+    order = [camera for camera in profile.camera_ids if camera in cams]
     starts, report = RV.alignment_plan(align_start, align_end, fps, cams, order)
     offsets = {}
     for camera, entry in zip(order, report):
@@ -189,7 +193,7 @@ def lane_start_offsets(video_dir):
     return offsets
 
 
-def loop_period_ms(video_dir, offsets):
+def loop_period_ms(profile, video_dir, offsets):
     """Shortest usable span across lanes, in ms — the common content period.
 
     Each lane can play from its aligned start to its own last decodable frame.
@@ -215,32 +219,24 @@ def loop_period_ms(video_dir, offsets):
     return max(0, min(spans))
 
 
-def write_config(path, video_dir, backend, encode_path, align=True,
+def write_config(profile, path, video_dir, backend, encode_path, align=True,
                  loop=True):
-    """Emit a runtime config naming the 16 lanes in left-to-right order.
+    """Emit a runtime config naming the profile's lanes left-to-right.
 
     Written fresh each run so the clip directory and backend always match what
     was asked for; the C++ loader takes camera identity straight from these
     `source.<id>` lines."""
-    clips = {}
-    for camera in CAMERA_IDS:
-        matches = sorted(Path(video_dir).glob(f"*_{camera}.ts"))
-        if not matches:
-            raise StepError(f"no clip for {camera} in {video_dir}")
-        if len(matches) > 1:
-            raise StepError(
-                f"ambiguous clips for {camera}: {[m.name for m in matches]}")
-        clips[camera] = matches[0]
-
-    offsets = lane_start_offsets(video_dir) if align else {}
-    period = loop_period_ms(video_dir, offsets) if loop else 0
+    clips = {camera: profile.clip_for(video_dir, camera)
+             for camera in profile.camera_ids}
+    offsets = lane_start_offsets(profile, video_dir) if align else {}
+    period = loop_period_ms(profile, video_dir, offsets) if loop else 0
     if loop:
         print(f"  looping every {period}ms" if period
               else "  looping at each file's own end (no manifest)")
 
     lines = [f"backend={backend}", "mode=realtime", "stage=full",
-             f"asset={ASSET.as_posix()}"]
-    for camera in CAMERA_IDS:
+             f"asset={profile.asset.as_posix()}"]
+    for camera in profile.camera_ids:
         lines.append(f"source.{camera}={clips[camera].as_posix()}")
         if offsets.get(camera):
             lines.append(f"source.{camera}.start_ms={offsets[camera]}")
@@ -254,27 +250,26 @@ def write_config(path, video_dir, backend, encode_path, align=True,
               "decode_surface_pool=8", "decode_ticket_pool=16",
               "render_inflight=3", "output_pool=4",
               "duration_seconds=10",
-              f"metrics={(OUTPUTS / 'realtime.jsonl').as_posix()}"]
+              f"metrics={profile.metrics.as_posix()}"]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    aligned = sum(1 for camera in CAMERA_IDS if offsets.get(camera))
-    print(f"wrote config {path} ({len(CAMERA_IDS)} lanes, "
+    aligned = sum(1 for camera in profile.camera_ids if offsets.get(camera))
+    print(f"wrote config {path} ({len(profile.camera_ids)} lanes, "
           f"{aligned} with a start offset)")
 
 
-def step_run(args):
+def step_run(profile, args):
     build_dir = build_dir_for(args.backend)
     executable = executable_for(build_dir)
     if not executable.is_file():
         raise StepError(f"executable missing (run the build step): {executable}")
-    if not ASSET.is_file():
-        raise StepError(f"asset missing (run the asset step): {ASSET}")
+    if not profile.asset.is_file():
+        raise StepError(f"asset missing (run the asset step): {profile.asset}")
 
     encode_path = Path(args.encode_path)
-    config = Path(args.config) if args.config else (
-        CONFIGS / f"underwater_16_{args.backend}.conf")
+    config = Path(args.config) if args.config else profile.config_path(args.backend)
     if args.config is None:
-        write_config(config, args.video_dir, args.backend, encode_path,
+        write_config(profile, config, args.video_dir, args.backend, encode_path,
                      align=args.align, loop=args.loop)
     elif not config.is_file():
         raise StepError(f"config does not exist: {config}")
@@ -299,11 +294,12 @@ def step_run(args):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="One-command underwater realtime stitch (macOS + Windows)")
+        description="One-command plane stitch (macOS + Windows)")
+    parser.add_argument("--profile", default="underwater",
+                        choices=P.names(),
+                        help="stitch line to run (default: %(default)s)")
     parser.add_argument("--video-dir", type=Path,
-                        help="directory holding the 16 *_underAi.ts clips")
-    parser.add_argument("--fbx", type=Path, default=MODELS / "all.fbx")
-    parser.add_argument("--tex-dir", type=Path, default=MODELS / "all.fbm")
+                        help="directory holding one clip per camera")
     parser.add_argument("--backend", default=default_backend(),
                         choices=("metal", "d3d11", "cudagl"))
     parser.add_argument("--steps", default=",".join(STEPS),
@@ -317,11 +313,11 @@ def parse_args(argv=None):
                         default=True, help="render offscreen (no preview window)")
     parser.add_argument("--encode", action="store_true",
                         help="also write HEVC to --encode-path")
-    parser.add_argument("--encode-path", type=Path,
-                        default=PROJECT_ROOT / "outputs" / "videos" /
-                        "underwater_realtime.h265")
-    parser.add_argument("--metrics", type=Path,
-                        default=OUTPUTS / "realtime.jsonl")
+    parser.add_argument("--encode-path", type=Path, default=None,
+                        help="HEVC destination (default: "
+                             "outputs/videos/<profile>_realtime.h265)")
+    parser.add_argument("--metrics", type=Path, default=None,
+                        help="metrics JSONL (default: the profile's)")
     parser.add_argument("--config", type=Path, default=None,
                         help="use this runtime config instead of generating one")
     parser.add_argument("--force", action="store_true",
@@ -330,22 +326,22 @@ def parse_args(argv=None):
     shaping = parser.add_argument_group(
         "composite shaping",
         "These control how the .swasset is baked, so the realtime stitch "
-        "matches what python.stitch.render_video produces offline. "
-        "Changing any of them recompiles the asset.")
-    shaping.add_argument("--asset-ppm", type=float, default=ASSET_PPM,
-                         help="output pixels per metre (default: %(default)s)")
-    shaping.add_argument("--blend-px", type=float, default=ASSET_BLEND_PX,
+        "matches what python.stitch.render_video produces offline. Each "
+        "defaults to the profile's value; changing any recompiles the asset.")
+    shaping.add_argument("--asset-ppm", type=float, default=None,
+                         help="output pixels per metre")
+    shaping.add_argument("--blend-px", type=float, default=None,
                          help="vertical seam transition width in pixels; "
-                              "0 is a hard cut (default: %(default)s)")
+                              "0 is a hard cut")
     shaping.add_argument("--no-clip-uv", dest="clip_uv", action="store_false",
                          default=True,
                          help="keep pixels whose UV falls outside the source "
                               "image (the GPU mirror-samples them); clipping "
                               "is on by default to match the offline renderer")
-    shaping.add_argument("--crop-bottom", default="auto",
+    shaping.add_argument("--crop-bottom", default=None,
                          metavar="auto|none|N",
                          help="drop bottom rows the shorter planes leave "
-                              "uncovered (default: %(default)s)")
+                              "uncovered")
     shaping.add_argument("--no-loop", dest="loop", action="store_false",
                          default=True,
                          help="stop when the clips run out instead of "
@@ -359,6 +355,21 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
+    profile = P.get(args.profile)
+    # Unset shaping options fall back to the profile, so `--profile overhead`
+    # alone bakes exactly what the design specifies.
+    if args.asset_ppm is None:
+        args.asset_ppm = profile.ppm
+    if args.blend_px is None:
+        args.blend_px = profile.blend_px
+    if args.crop_bottom is None:
+        args.crop_bottom = profile.crop_bottom
+    if args.metrics is None:
+        args.metrics = profile.metrics
+    if args.encode_path is None:
+        args.encode_path = (PROJECT_ROOT / "outputs" / "videos" /
+                            f"{profile.name}_realtime.h265")
+
     steps = [step.strip() for step in args.steps.split(",") if step.strip()]
     unknown = [step for step in steps if step not in STEPS]
     if unknown:
@@ -372,7 +383,7 @@ def main(argv=None):
     try:
         for step in steps:
             print(f"\n=== {step} ===", flush=True)
-            handlers[step](args)
+            handlers[step](profile, args)
     except StepError as error:
         raise SystemExit(f"error: {error}")
     print("\ndone.")

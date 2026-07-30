@@ -428,13 +428,15 @@ class OneClickRunnerTest(unittest.TestCase):
     def test_generated_config_declares_sixteen_lanes_right_to_left(self):
         import tempfile
         import python.stitch.run as runner
+        from python.stitch import profiles
 
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
             for index in range(1, 17):
                 (td / f"swb_test_underA{index}.ts").write_bytes(b"")
             config = td / "generated.conf"
-            runner.write_config(config, td, "metal", td / "out.h265")
+            runner.write_config(profiles.get("underwater"), config, td, "metal",
+                                td / "out.h265", align=False)
 
             lines = config.read_text().splitlines()
             sources = [line.split("=", 1)[0].removeprefix("source.")
@@ -446,13 +448,15 @@ class OneClickRunnerTest(unittest.TestCase):
     def test_missing_clip_is_reported_not_silently_skipped(self):
         import tempfile
         import python.stitch.run as runner
+        from python.stitch import profiles
 
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
             for index in range(1, 16):          # underA16 absent
                 (td / f"swb_test_underA{index}.ts").write_bytes(b"")
             with self.assertRaises(runner.StepError):
-                runner.write_config(td / "c.conf", td, "metal", td / "o.h265")
+                runner.write_config(profiles.get("underwater"), td / "c.conf",
+                                    td, "metal", td / "o.h265", align=False)
 
     def test_newer_than_treats_missing_target_as_stale(self):
         import tempfile
@@ -584,14 +588,129 @@ class LaneAlignmentConfigTest(unittest.TestCase):
     def test_config_omits_start_ms_when_alignment_is_disabled(self):
         import tempfile
         import python.stitch.run as runner
+        from python.stitch import profiles
 
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
             for index in range(1, 17):
                 (td / f"swb_test_underA{index}.ts").write_bytes(b"")
             config = td / "c.conf"
-            runner.write_config(config, td, "metal", td / "o.h265", align=False)
+            runner.write_config(profiles.get("underwater"), config, td, "metal",
+                                td / "o.h265", align=False)
             self.assertNotIn("start_ms", config.read_text())
+
+
+class RunProfileTest(unittest.TestCase):
+    """The runner reads every path and lane from the profile, so two lines can
+    share it without either one's artefacts leaking into the other's."""
+
+    def test_config_lanes_and_asset_come_from_the_profile(self):
+        import tempfile
+        import python.stitch.run as runner
+        from python.stitch import profiles
+
+        overhead = profiles.get("overhead")
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            for camera in overhead.camera_ids:
+                (td / f"20260629_172532_{camera}{overhead.clip_suffix}"
+                 ).write_bytes(b"")
+            config = td / "overhead.conf"
+            runner.write_config(overhead, config, td, "metal", td / "o.h265",
+                                align=False)
+
+            lines = config.read_text().splitlines()
+            sources = [line.split("=", 1)[0].removeprefix("source.")
+                       for line in lines if line.startswith("source.")]
+            self.assertEqual(sources, ["overhead5", "overhead6"])
+            self.assertIn(f"asset={overhead.asset.as_posix()}", lines)
+            self.assertIn(f"metrics={overhead.metrics.as_posix()}", lines)
+
+    def test_sync_manifest_applies_to_overhead_too(self):
+        # overhead's clips carry the same wall-clock manifest the underwater
+        # samples do (profiles.py: sync="manifest" for both), so a missing
+        # manifest degrades to "read from frame 0" rather than being skipped.
+        import tempfile
+        import python.stitch.run as runner
+        from python.stitch import profiles
+
+        called = []
+
+        def fake(video_dir):
+            called.append(video_dir)
+            raise SystemExit("no manifest here")
+
+        original = runner.RV.load_manifest
+        try:
+            runner.RV.load_manifest = fake
+            with tempfile.TemporaryDirectory() as td:
+                offsets = runner.lane_start_offsets(profiles.get("overhead"),
+                                                    Path(td))
+            self.assertEqual(offsets, {})
+            self.assertEqual(len(called), 1)
+        finally:
+            runner.RV.load_manifest = original
+
+    def test_sync_manifest_still_reads_the_manifest(self):
+        import tempfile
+        import python.stitch.run as runner
+        from python.stitch import profiles
+
+        called = []
+
+        def fake(video_dir):
+            called.append(video_dir)
+            raise SystemExit("no manifest here")
+
+        original = runner.RV.load_manifest
+        try:
+            runner.RV.load_manifest = fake
+            with tempfile.TemporaryDirectory() as td:
+                offsets = runner.lane_start_offsets(profiles.get("underwater"),
+                                                    Path(td))
+            # a missing manifest degrades to "read from frame 0" for the
+            # realtime path, but it must have been attempted
+            self.assertEqual(offsets, {})
+            self.assertEqual(len(called), 1)
+        finally:
+            runner.RV.load_manifest = original
+
+    def test_asset_stamp_is_per_profile(self):
+        import python.stitch.run as runner
+        from python.stitch import profiles
+
+        underwater = runner.stamp_path(profiles.get("underwater"))
+        overhead = runner.stamp_path(profiles.get("overhead"))
+        self.assertNotEqual(underwater, overhead)
+        self.assertEqual(underwater.name, "underwater.stamp")
+        self.assertEqual(overhead.name, "overhead.stamp")
+
+    def test_asset_stamp_records_the_profile_and_its_shaping(self):
+        import argparse
+        import python.stitch.run as runner
+        from python.stitch import profiles
+
+        overhead = profiles.get("overhead")
+        args = argparse.Namespace(asset_ppm=overhead.ppm,
+                                  blend_px=overhead.blend_px,
+                                  crop_bottom=overhead.crop_bottom,
+                                  clip_uv=overhead.clip_uv)
+        options, stamp = runner.asset_options(overhead, args)
+
+        self.assertTrue(stamp.startswith("overhead "))
+        self.assertIn("170.0", stamp)
+        self.assertIn("85.0", stamp)
+        self.assertIn("none", stamp)
+        self.assertIn("--clip-uv", options)
+        self.assertIn("3840", options)          # source size reaches the compiler
+
+    def test_config_path_is_named_after_the_profile(self):
+        from python.stitch import profiles
+
+        self.assertEqual(profiles.get("overhead").config_path("metal").name,
+                         "overhead_metal.conf")
+        self.assertEqual(profiles.get("underwater").config_path("d3d11").name,
+                         "underwater_d3d11.conf")
 
 
 class ProfileTest(unittest.TestCase):
@@ -733,6 +852,7 @@ class LoopPeriodTest(unittest.TestCase):
 
     def test_period_is_the_shortest_usable_span(self):
         import python.stitch.run as runner
+        from python.stitch import profiles
 
         # spans after the aligned start: 900, 950, 880 -> the shortest wins
         cams = {
@@ -744,12 +864,16 @@ class LoopPeriodTest(unittest.TestCase):
         original = runner.RV.load_manifest
         try:
             runner.RV.load_manifest = lambda _d: (0, 1000, 30.0, cams)
-            self.assertEqual(runner.loop_period_ms("ignored", offsets), 880)
+            self.assertEqual(
+                runner.loop_period_ms(profiles.get("underwater"), "ignored",
+                                      offsets),
+                880)
         finally:
             runner.RV.load_manifest = original
 
     def test_period_is_zero_without_a_manifest(self):
         import python.stitch.run as runner
+        from python.stitch import profiles
 
         original = runner.RV.load_manifest
         try:
@@ -757,27 +881,32 @@ class LoopPeriodTest(unittest.TestCase):
                 raise SystemExit("no manifest")
             runner.RV.load_manifest = missing
             # zero tells the runtime to use each file's own end
-            self.assertEqual(runner.loop_period_ms("ignored", {}), 0)
+            self.assertEqual(
+                runner.loop_period_ms(profiles.get("underwater"), "ignored", {}),
+                0)
         finally:
             runner.RV.load_manifest = original
 
     def test_config_carries_loop_controls_only_when_requested(self):
         import tempfile
         import python.stitch.run as runner
+        from python.stitch import profiles
 
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
             for index in range(1, 17):
                 (td / f"swb_test_underA{index}.ts").write_bytes(b"")
+            underwater = profiles.get("underwater")
             # looping is the default; --no-loop ends the run at EOF instead
             on = td / "on.conf"
-            runner.write_config(on, td, "metal", td / "o.h265", align=False)
+            runner.write_config(underwater, on, td, "metal", td / "o.h265",
+                                align=False)
             self.assertIn("loop_sources=true", on.read_text())
             self.assertIn("stop_at_eof=false", on.read_text())
 
             off = td / "off.conf"
-            runner.write_config(off, td, "metal", td / "o.h265", align=False,
-                                loop=False)
+            runner.write_config(underwater, off, td, "metal", td / "o.h265",
+                                align=False, loop=False)
             self.assertIn("loop_sources=false", off.read_text())
             self.assertIn("stop_at_eof=true", off.read_text())
 
