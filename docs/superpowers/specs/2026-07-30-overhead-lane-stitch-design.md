@@ -138,7 +138,7 @@ class Profile:
 | --- | --- | --- |
 | `fbx` | `inputs/underwater/models/all.fbx` | `inputs/overhead/models/002.fbx` |
 | `tex_dir` | `.../all.fbm` | `inputs/overhead/models/002.fbm` |
-| `still_tex_dir` | `$DATASET/annotation-grids`（env 可覆盖） | `inputs/overhead/models/002.fbm` |
+| `still_tex_dir` | `$DATASET/annotation-grids`（`STITCH_GRID_DIR` / `ANNOTATION_PREVIEW_DATASET_ROOT` 可覆盖） | `inputs/overhead/models/002.fbm` |
 | `camera_ids` | `underA16` … `underA1`（16） | `("cam5", "cam6")` |
 | `clip_suffix` | `.ts` | `.mp4` |
 | `ppm` | 240.0 | 170.0 |
@@ -165,7 +165,10 @@ class Profile:
 **`tex_dir` ≠ `still_tex_dir`**。前者是 FBX 提取时解析贴图 basename 的目录（`.fbm`）；
 后者是渲静图实际读的图。水下这两者不同 —— `run_python.sh:161-162` 用数据集的
 `annotation-grids/`（权威网格渲染）而非烘进 `all.fbm` 的那份，注释也写明了。overhead
-两者同为 `002.fbm`（设计师的标定图就在里面）。
+两者同为 `002.fbm`（设计师的标定图就在里面）。水下那条 env 覆盖链
+（`UW_GRID_DIR` → `ANNOTATION_PREVIEW_DATASET_ROOT` → 硬编码本机路径）从 shell 变量
+搬进 `profiles.py`，变量名改为 `STITCH_GRID_DIR`；缺目录时的报错也一并搬过去，
+仍然提示这两个环境变量。
 
 **`full_res` 与 `ppm` 并存**。水下静图走 `--full-res`（缩回源高 360，产物 3278×360）、
 而 `.swasset` 用 ppm=240（画布 6005×725）—— 两个口径本就不同，前者给人看、后者给 GPU。
@@ -233,8 +236,12 @@ python -m python.stitch <profile> <step>[,<step>…] [选项]
 参数，不是每次要对比的变量；需要横向对比时显式传 `--still <path>` 到低层 CLI。
 
 现有 `run.py --steps extract,asset,build,run` 就是这个机制，只是步骤表停在实时四步，
-`still`/`video`/`tex` 另有各自 CLI 和各自 shell 包装。合并成一张表后，`newer_than`
-的「产物比输入新就跳过」对离线步骤同样生效 —— 现在 `uw-render` 每次都重算。
+`still`/`video`/`tex` 另有各自 CLI 和各自 shell 包装。
+
+跳过策略按步骤性质分两类，不一刀切：`extract`/`tex`/`asset` 是中间产物，产物比输入新
+就跳过（`asset` 另有 stamp 比对 shaping 参数），`--force` 强制重做；`still`/`video`
+每次都渲 —— 它们的产物就是你要看的东西，而且 shaping 参数可以从命令行覆盖，
+`newer_than` 看不见那种变化，跳过会是个陷阱。`build` 沿用现有的「可执行文件存在即跳过」。
 
 各模块自己的 argparse 全部保留：那是低层显式接口（`python -m python.stitch.render
 --ppm 313 --crop-bottom-px 40` 这种一次性口径），单测也直接调函数。dispatcher 只做
