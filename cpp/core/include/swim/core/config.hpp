@@ -57,6 +57,15 @@ inline constexpr std::array<std::string_view, 6> kPoolCameraIds{
     "cam3", "cam2", "cam1", "cam4", "cam5", "cam6"};
 
 struct AppConfig {
+  // Restart each lane's clip when it runs out instead of letting the lane fail
+  // (which substitutes a black replacement frame). Lanes restart on a common
+  // content period rather than at their own EOF: recorded clips differ in usable
+  // length by tens of milliseconds, so looping at each file's end would let the
+  // lanes drift apart by that much on every pass. Zero period means "use each
+  // file's natural end", which only stays in sync for equal-length clips.
+  bool loop_sources{false};
+  std::chrono::milliseconds loop_period{0};
+
   std::string backend{"metal"};
   RunMode mode{RunMode::realtime};
   BenchmarkStage stage{BenchmarkStage::full};

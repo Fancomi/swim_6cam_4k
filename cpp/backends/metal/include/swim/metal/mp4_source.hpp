@@ -28,7 +28,12 @@ class Mp4VideoToolboxSource final {
       std::chrono::milliseconds run_duration = std::chrono::milliseconds{0},
       std::uint32_t ticket_capacity = 16,
       std::uint32_t surface_capacity = 8,
-      swim::core::RunLifecycle* lifecycle = nullptr);
+      swim::core::RunLifecycle* lifecycle = nullptr,
+      // Restart the clip instead of failing when it runs out. `loop_period`
+      // is the shared content period every lane wraps on; zero uses this
+      // file's own end, which only stays in sync for equal-length clips.
+      bool loop_sources = false,
+      std::chrono::milliseconds loop_period = std::chrono::milliseconds{0});
   ~Mp4VideoToolboxSource();
 
   Mp4VideoToolboxSource(const Mp4VideoToolboxSource&) = delete;

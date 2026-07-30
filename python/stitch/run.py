@@ -189,7 +189,34 @@ def lane_start_offsets(video_dir):
     return offsets
 
 
-def write_config(path, video_dir, backend, encode_path, align=True):
+def loop_period_ms(video_dir, offsets):
+    """Shortest usable span across lanes, in ms — the common content period.
+
+    Each lane can play from its aligned start to its own last decodable frame.
+    Those spans differ by tens of milliseconds, so restarting each lane at its
+    own end would let them drift apart on every pass. Wrapping every lane on the
+    shortest span keeps them locked together indefinitely.
+
+    Returns 0 when there is no manifest, which tells the runtime to use each
+    file's natural end."""
+    try:
+        _align_start, _align_end, _fps, cams = RV.load_manifest(video_dir)
+    except SystemExit:
+        return 0
+    spans = []
+    for camera, info in cams.items():
+        last = info.get("last_decodable_ms")
+        anchor = info.get("keyframe_ms")
+        if last is None or anchor is None:
+            continue
+        spans.append(last - anchor - offsets.get(camera, 0))
+    if not spans:
+        return 0
+    return max(0, min(spans))
+
+
+def write_config(path, video_dir, backend, encode_path, align=True,
+                 loop=False):
     """Emit a runtime config naming the 16 lanes in left-to-right order.
 
     Written fresh each run so the clip directory and backend always match what
@@ -206,6 +233,10 @@ def write_config(path, video_dir, backend, encode_path, align=True):
         clips[camera] = matches[0]
 
     offsets = lane_start_offsets(video_dir) if align else {}
+    period = loop_period_ms(video_dir, offsets) if loop else 0
+    if loop:
+        print(f"  looping every {period}ms" if period
+              else "  looping at each file's own end (no manifest)")
 
     lines = [f"backend={backend}", "mode=realtime", "stage=full",
              f"asset={ASSET.as_posix()}"]
@@ -213,7 +244,9 @@ def write_config(path, video_dir, backend, encode_path, align=True):
         lines.append(f"source.{camera}={clips[camera].as_posix()}")
         if offsets.get(camera):
             lines.append(f"source.{camera}.start_ms={offsets[camera]}")
-    lines += ["fps_num=30000", "fps_den=1001",
+    lines += [f"loop_sources={'true' if loop else 'false'}",
+              f"loop_period_ms={period}",
+              "fps_num=30000", "fps_den=1001",
               "preview=true", "encode=false", "diagnostic_replacement=false",
               f"encode_path={Path(encode_path).as_posix()}",
               "stale_ms=100", "replace_ms=1000",
@@ -241,7 +274,7 @@ def step_run(args):
         CONFIGS / f"underwater_16_{args.backend}.conf")
     if args.config is None:
         write_config(config, args.video_dir, args.backend, encode_path,
-                     align=args.align)
+                     align=args.align, loop=args.loop)
     elif not config.is_file():
         raise StepError(f"config does not exist: {config}")
 
@@ -312,6 +345,11 @@ def parse_args(argv=None):
                          metavar="auto|none|N",
                          help="drop bottom rows the shorter planes leave "
                               "uncovered (default: %(default)s)")
+    shaping.add_argument("--loop", action="store_true",
+                         help="restart each clip when it runs out instead of "
+                              "showing the black replacement frame; every lane "
+                              "wraps on the shortest usable span so they stay "
+                              "in sync")
     shaping.add_argument("--no-align", dest="align", action="store_false",
                          default=True,
                          help="ignore the manifest wall clocks and read every "

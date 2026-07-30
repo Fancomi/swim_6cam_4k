@@ -43,6 +43,8 @@ class LaneFailure final : public std::runtime_error {
 enum class ReaderOutcome : std::uint8_t {
   stopped_or_duration_reached,
   normal_eof,
+  // The pass covered the configured loop period; restart from the aligned start.
+  loop_period_reached,
 };
 
 std::string ns_error(NSString* prefix, NSError* error) {
@@ -99,7 +101,8 @@ class Mp4VideoToolboxSource::Impl final {
        swim::core::RuntimeCounters& counters, swim::core::RunMode mode,
        std::chrono::milliseconds run_duration,
        std::uint32_t ticket_capacity, std::uint32_t surface_capacity,
-       swim::core::RunLifecycle* lifecycle)
+       swim::core::RunLifecycle* lifecycle, bool loop_sources,
+       std::chrono::milliseconds loop_period)
       : context_(std::move(context)),
         source_(std::move(source)),
         camera_index_(camera_index),
@@ -109,7 +112,9 @@ class Mp4VideoToolboxSource::Impl final {
         run_duration_(run_duration),
         ticket_capacity_(ticket_capacity),
         surface_capacity_(surface_capacity),
-        lifecycle_(lifecycle) {
+        lifecycle_(lifecycle),
+        loop_sources_(loop_sources),
+        loop_period_(loop_period) {
     if (context_ == nullptr || context_->device == nil ||
         context_->texture_cache == nullptr) {
       throw std::invalid_argument("MP4 source requires a valid Metal context");
@@ -269,13 +274,25 @@ class Mp4VideoToolboxSource::Impl final {
   }
 
   void pace(CMTime pts, CMTime& first_pts,
-            std::chrono::steady_clock::time_point& first_wall) const {
+            std::chrono::steady_clock::time_point& first_wall) {
     if (mode_ != swim::core::RunMode::realtime || !valid_pts(pts)) {
       return;
     }
     if (!valid_pts(first_pts)) {
       first_pts = pts;
-      first_wall = std::chrono::steady_clock::now();
+      // Looping passes inherit the wall origin recorded when the pass began, so
+      // the cadence continues instead of restarting and emitting a burst.
+      const auto now = std::chrono::steady_clock::now();
+      if (pass_wall_origin_ == std::chrono::steady_clock::time_point{}) {
+        first_wall = now;
+      } else {
+        // Re-opening the reader and re-decoding up to the aligned start costs
+        // real time (hundreds of ms on lanes with a large offset). Charging the
+        // new pass from the nominal boundary would make its first frames late
+        // and provoke a catch-up burst, so the origin absorbs the overrun.
+        first_wall = std::max(pass_wall_origin_, now);
+        pass_wall_origin_ = first_wall;
+      }
       return;
     }
     const auto seconds = CMTimeGetSeconds(CMTimeSubtract(pts, first_pts));
@@ -293,11 +310,42 @@ class Mp4VideoToolboxSource::Impl final {
     }
   }
 
+  // How far the wall clock advances per pass. With a shared loop period every
+  // lane advances by exactly that; without one each lane advances by whatever
+  // its own file spanned, which is why unequal clips drift.
+  std::chrono::steady_clock::duration pass_wall_advance() const noexcept {
+    return std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        loop_period_.count() > 0 ? loop_period_ : last_pass_span_);
+  }
+
+  // True once this pass has covered the common loop period, measured from the
+  // lane's aligned start. Every lane shares the period, so they wrap on the same
+  // content boundary even though their files differ in usable length by tens of
+  // milliseconds. Zero period means "play to the file's own end".
+  bool pass_period_elapsed(CMTime pts, CMTime first_emitted_pts) const noexcept {
+    if (!loop_sources_ || loop_period_.count() <= 0 ||
+        !valid_pts(pts) || !valid_pts(first_emitted_pts)) {
+      return false;
+    }
+    const auto seconds =
+        CMTimeGetSeconds(CMTimeSubtract(pts, first_emitted_pts));
+    if (!std::isfinite(seconds)) {
+      return false;
+    }
+    return seconds >= std::chrono::duration<double>(loop_period_).count();
+  }
+
   // True once `pts` reaches the lane's aligned start. `first_sample_pts` is
   // latched on the first call so the offset is relative to the file, matching
   // how the manifest's keyframe timestamp anchors frame 0.
+  //
+  // Only the first pass skips. A loop wraps every lane on the same shared
+  // content period, so the lanes are already in step at the wrap point and can
+  // each replay from their own frame 0. Re-skipping would instead re-decode up
+  // to ~3s per lane, and because the offsets differ by that much between lanes
+  // the restart would land at visibly different times.
   bool past_start_offset(CMTime pts, CMTime& first_sample_pts) const noexcept {
-    if (source_.start_offset.count() <= 0) {
+    if (source_.start_offset.count() <= 0 || pass_index_ > 0) {
       return true;
     }
     if (!valid_pts(pts)) {
@@ -412,6 +460,9 @@ class Mp4VideoToolboxSource::Impl final {
       CMTime first_pts = kCMTimeInvalid;
       // The clip's own first PTS; the aligned start is measured from it.
       CMTime first_sample_pts = kCMTimeInvalid;
+      // Last PTS this pass published, used to measure the pass span when no
+      // shared loop period was configured.
+      CMTime last_emitted_pts = kCMTimeInvalid;
       std::chrono::steady_clock::time_point first_wall{};
       while (!termination_requested(std::chrono::steady_clock::now())) {
         CMSampleBufferRef sample = [output copyNextSampleBuffer];
@@ -462,8 +513,16 @@ class Mp4VideoToolboxSource::Impl final {
         // chain stays intact, and pacing starts at the aligned frame so the
         // realtime cadence is not charged for the skipped span.
         const bool emit = past_start_offset(pts, first_sample_pts);
+        if (emit && pass_period_elapsed(pts, first_pts)) {
+          // Every lane has covered the shared period; end the pass here so the
+          // restart happens on the same content boundary for all of them.
+          CFRelease(sample);
+          [reader cancelReading];
+          return ReaderOutcome::loop_period_reached;
+        }
         if (emit) {
           pace(pts, first_pts, first_wall);
+          last_emitted_pts = pts;
         }
         auto format = static_cast<CMVideoFormatDescriptionRef>(
             CMSampleBufferGetFormatDescription(sample));
@@ -506,6 +565,20 @@ class Mp4VideoToolboxSource::Impl final {
         return ReaderOutcome::stopped_or_duration_reached;
       }
       if (reader.status == AVAssetReaderStatusCompleted) {
+        if (loop_sources_) {
+          if (valid_pts(first_pts) && valid_pts(last_emitted_pts)) {
+            const auto seconds =
+                CMTimeGetSeconds(CMTimeSubtract(last_emitted_pts, first_pts));
+            if (std::isfinite(seconds) && seconds > 0.0) {
+              last_pass_span_ =
+                  std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::duration<double>{seconds});
+            }
+          }
+          // Looping is the caller's answer to "the clip is shorter than the
+          // run": restart rather than substituting the black replacement frame.
+          return ReaderOutcome::loop_period_reached;
+        }
         if (lifecycle_ != nullptr) {
           const auto disposition = lifecycle_->classify_eof(finished_at);
           if (disposition == swim::core::SourceEofDisposition::normal_after_stop ||
@@ -541,9 +614,26 @@ class Mp4VideoToolboxSource::Impl final {
                                   surface_capacity_, mailbox_, counters_);
       try {
         swim::core::CameraHealthTracker health;
+        // The pass wall origin anchors pacing across loops so a restart does not
+        // reset the cadence clock; it is set once, before the first pass.
+        pass_wall_origin_ = std::chrono::steady_clock::now();
         while (!termination_requested(std::chrono::steady_clock::now())) {
           try {
             const auto outcome = run_reader_once(decoder, health);
+            if (outcome == ReaderOutcome::loop_period_reached) {
+              // Reconfiguring on the next pass advances the decoder generation,
+              // which resets its PTS monotonicity guard — the restarted clip
+              // replays timestamps this lane already published.
+              decoder.invalidate();
+              generation_.store(decoder.generation(),
+                                std::memory_order_release);
+              ++pass_index_;
+              // Advance the wall origin by one period so the next pass paces
+              // against its own start. Leaving it at the run's start would put
+              // every target in the past, and the lane would decode flat out.
+              pass_wall_origin_ += pass_wall_advance();
+              continue;
+            }
             if (outcome == ReaderOutcome::normal_eof) {
               completed_.store(true, std::memory_order_release);
             }
@@ -595,6 +685,19 @@ class Mp4VideoToolboxSource::Impl final {
   std::uint32_t ticket_capacity_{};
   std::uint32_t surface_capacity_{};
   swim::core::RunLifecycle* lifecycle_{};
+  const bool loop_sources_{false};
+  // Common content period every lane restarts on. Zero falls back to each
+  // file's own end, which only stays in sync for equal-length clips.
+  const std::chrono::milliseconds loop_period_{0};
+  // Wall time the current pass began, so pacing stays continuous across a loop
+  // instead of restarting the clock and emitting a burst.
+  std::chrono::steady_clock::time_point pass_wall_origin_{};
+  // Published frames keep increasing across loops; the coordinator uses the
+  // sequence to detect drops, so it must not go backwards.
+  std::uint64_t pass_index_{0};
+  // Content span the finished pass actually emitted; only consulted when no
+  // shared loop period was configured.
+  std::chrono::milliseconds last_pass_span_{0};
   std::chrono::steady_clock::time_point deadline_{};
   mutable std::mutex thread_mutex_;
   std::thread worker_;
@@ -615,11 +718,12 @@ Mp4VideoToolboxSource::Mp4VideoToolboxSource(
     std::uint32_t camera_index, swim::core::LatestFrameMailbox& mailbox,
     swim::core::RuntimeCounters& counters, swim::core::RunMode mode,
     std::chrono::milliseconds run_duration, std::uint32_t ticket_capacity,
-    std::uint32_t surface_capacity, swim::core::RunLifecycle* lifecycle)
+    std::uint32_t surface_capacity, swim::core::RunLifecycle* lifecycle,
+    bool loop_sources, std::chrono::milliseconds loop_period)
     : impl_(std::make_unique<Impl>(
           std::move(context), std::move(source), camera_index, mailbox,
           counters, mode, run_duration, ticket_capacity, surface_capacity,
-          lifecycle)) {}
+          lifecycle, loop_sources, loop_period)) {}
 
 Mp4VideoToolboxSource::~Mp4VideoToolboxSource() = default;
 

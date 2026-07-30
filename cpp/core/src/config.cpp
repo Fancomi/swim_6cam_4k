@@ -316,6 +316,12 @@ AppConfig load_config(const std::filesystem::path& path) {
     } else if (key == "replace_ms") {
       config.replace_after = std::chrono::milliseconds{
           parse_config_unsigned(path, line_number, key, value)};
+    } else if (key == "loop_sources") {
+      config.loop_sources =
+          parse_config_boolean(path, line_number, key, value);
+    } else if (key == "loop_period_ms") {
+      config.loop_period = std::chrono::milliseconds{
+          parse_config_unsigned(path, line_number, key, value)};
     } else if (key == "decode_surface_pool") {
       config.decode_surface_pool =
           parse_config_unsigned(path, line_number, key, value);
@@ -394,6 +400,11 @@ AppConfig apply_cli_overrides(
       config.encode = parse_boolean(value, name);
     } else if (name == "--diagnostic-replacement") {
       config.diagnostic_replacement = parse_boolean(value, name);
+    } else if (name == "--loop-sources") {
+      config.loop_sources = parse_boolean(value, name);
+    } else if (name == "--loop-period-ms") {
+      config.loop_period =
+          std::chrono::milliseconds{parse_unsigned(value, name)};
     } else if (name == "--encode-path") {
       config.encode_path = parse_cli_path(value, name);
     } else if (name == "--encode-sink") {

@@ -613,3 +613,23 @@ TEST_CASE(rejects_stream_count_uint32_overflow) {
   CHECK_THROWS_WITH(swim::core::apply_cli_overrides(AppConfig{}, arguments),
                     "--stream-count must be an unsigned integer");
 }
+
+TEST_CASE(loads_loop_controls_with_a_shared_period) {
+  const auto config = swim::core::load_config(fixture("underwater_loop.conf"));
+  CHECK(config.loop_sources);
+  CHECK_EQ(config.loop_period, 11961ms);
+}
+
+TEST_CASE(loop_controls_default_to_off) {
+  const auto config = swim::core::load_config(fixture("valid.conf"));
+  CHECK(!config.loop_sources);
+  CHECK_EQ(config.loop_period, 0ms);
+}
+
+TEST_CASE(applies_loop_cli_overrides) {
+  const std::array arguments{"--loop-sources=true"sv, "--loop-period-ms=5000"sv};
+  const auto config =
+      swim::core::apply_cli_overrides(AppConfig{}, arguments);
+  CHECK(config.loop_sources);
+  CHECK_EQ(config.loop_period, 5000ms);
+}

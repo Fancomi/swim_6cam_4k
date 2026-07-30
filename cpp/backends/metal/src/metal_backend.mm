@@ -274,7 +274,8 @@ class MetalSourceAdapter final : public swim::core::ISource {
     source_impl_ = std::make_unique<Mp4VideoToolboxSource>(
         context_, source_, camera_index_, output, metrics_, config_.mode,
         std::chrono::milliseconds{0},
-        config_.decode_ticket_pool, config_.decode_surface_pool, &lifecycle_);
+        config_.decode_ticket_pool, config_.decode_surface_pool, &lifecycle_,
+        config_.loop_sources, config_.loop_period);
     source_impl_->start();
   }
 

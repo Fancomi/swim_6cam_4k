@@ -709,3 +709,56 @@ class ProfileTest(unittest.TestCase):
             (td / "b_cam5.mp4").write_bytes(b"")
             with self.assertRaises(profiles.StepError):
                 overhead.clip_for(td, "cam5")
+
+
+class LoopPeriodTest(unittest.TestCase):
+    """Every lane must wrap on the same content period, or they drift apart by
+    the difference in their usable spans on every pass."""
+
+    def test_period_is_the_shortest_usable_span(self):
+        import python.stitch.run as runner
+
+        # spans after the aligned start: 900, 950, 880 -> the shortest wins
+        cams = {
+            "underA3": {"keyframe_ms": 0, "last_decodable_ms": 1200},
+            "underA2": {"keyframe_ms": 0, "last_decodable_ms": 1150},
+            "underA1": {"keyframe_ms": 0, "last_decodable_ms": 1080},
+        }
+        offsets = {"underA3": 300, "underA2": 200, "underA1": 200}
+        original = runner.RV.load_manifest
+        try:
+            runner.RV.load_manifest = lambda _d: (0, 1000, 30.0, cams)
+            self.assertEqual(runner.loop_period_ms("ignored", offsets), 880)
+        finally:
+            runner.RV.load_manifest = original
+
+    def test_period_is_zero_without_a_manifest(self):
+        import python.stitch.run as runner
+
+        original = runner.RV.load_manifest
+        try:
+            def missing(_d):
+                raise SystemExit("no manifest")
+            runner.RV.load_manifest = missing
+            # zero tells the runtime to use each file's own end
+            self.assertEqual(runner.loop_period_ms("ignored", {}), 0)
+        finally:
+            runner.RV.load_manifest = original
+
+    def test_config_carries_loop_controls_only_when_requested(self):
+        import tempfile
+        import python.stitch.run as runner
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            for index in range(1, 17):
+                (td / f"swb_test_underA{index}.ts").write_bytes(b"")
+            off = td / "off.conf"
+            runner.write_config(off, td, "metal", td / "o.h265", align=False,
+                                loop=False)
+            self.assertIn("loop_sources=false", off.read_text())
+
+            on = td / "on.conf"
+            runner.write_config(on, td, "metal", td / "o.h265", align=False,
+                               loop=True)
+            self.assertIn("loop_sources=true", on.read_text())
