@@ -2675,3 +2675,990 @@ those are not stitch lines.
 EOF
 ```
 
+---
+
+## Task 7: FBX 落位与 overhead 离线全链路
+
+**Files:**
+- Create: `inputs/overhead/models/002.fbx`（从 `inputs/002.fbx` 移入）
+- Create: `inputs/overhead/models/002.fbm/05-02.jpg`、`C06.jpg`（从 `inputs/002.fbm/` 移入）
+- Modify: `.gitignore`（加 `inputs/overhead/models/`；config glob 泛化；注释更名）
+- Test: `tests/python/test_stitch.py`（追加 `OverheadExtractTest`）
+
+**Interfaces:**
+- Consumes: Task 2 `profiles.get("overhead")`、Task 4 `export_ref_tex`、Task 6 dispatcher。
+- Produces: `outputs/overhead/mesh.json`（2 块，顺序 `Plane002`→`Plane001`）、
+  `stitch.png` / `grid.png` / `heat.png`（4255×515）、`ref_tex/cam5.png`、`ref_tex/cam6.png`、
+  `stitch.mp4`。后续任务不依赖这些产物的具体像素，只依赖 `mesh.json` 存在。
+
+- [ ] **Step 1: 写失败的测试**
+
+追加到 `tests/python/test_stitch.py` 末尾：
+
+```python
+MODEL_002 = PROJECT_ROOT / "inputs" / "overhead" / "models" / "002.fbx"
+TEXDIR_002 = PROJECT_ROOT / "inputs" / "overhead" / "models" / "002.fbm"
+
+
+class OverheadExtractTest(unittest.TestCase):
+    @unittest.skipUnless(HAS_FBX, "FBX SDK not available")
+    @unittest.skipUnless(MODEL_002.is_file(), "002.fbx not present")
+    def test_extracts_two_planes_left_to_right(self):
+        import tempfile
+        from python.stitch.extract import extract_to_json
+
+        with tempfile.TemporaryDirectory() as td:
+            dst = Path(td) / "mesh.json"
+            meshes = extract_to_json(MODEL_002, dst, TEXDIR_002)
+
+            self.assertEqual(len(meshes), 2)
+            # world X ascending: Plane002 starts at -35.22, Plane001 at -27.72
+            self.assertEqual([m["node"] for m in meshes],
+                             ["Plane002", "Plane001"])
+            # which pins cam5 -> 05-02.jpg and cam6 -> C06.jpg positionally
+            self.assertEqual([m["texture_basename"] for m in meshes],
+                             ["05-02.jpg", "C06.jpg"])
+
+    @unittest.skipUnless(HAS_FBX, "FBX SDK not available")
+    @unittest.skipUnless(MODEL_002.is_file(), "002.fbx not present")
+    def test_spans_one_lane_the_same_size_as_the_underwater_panorama(self):
+        # Both models cover the same 25.000m x 3.000m lane; that is why one set
+        # of geometry code serves both.
+        import tempfile
+        from python.stitch.extract import extract_to_json
+
+        with tempfile.TemporaryDirectory() as td:
+            meshes = extract_to_json(MODEL_002, Path(td) / "m.json", TEXDIR_002)
+
+        xs = [v["pos"][0] for m in meshes for t in m["triangles"] for v in t]
+        ys = [v["pos"][1] for m in meshes for t in m["triangles"] for v in t]
+        self.assertAlmostEqual(max(xs) - min(xs), 25.0, places=3)
+        self.assertAlmostEqual(max(ys) - min(ys), 3.0, places=3)
+
+    @unittest.skipUnless(HAS_FBX, "FBX SDK not available")
+    @unittest.skipUnless(MODEL_002.is_file(), "002.fbx not present")
+    def test_planes_only_is_unnecessary_for_this_model(self):
+        # 002.fbx carries exactly the two planes — no rigging, no lane strips —
+        # so the profile sets planes_only=False. Prove the filter is a no-op
+        # here rather than trusting the flag.
+        import tempfile
+        from python.stitch.extract import extract_to_json
+
+        with tempfile.TemporaryDirectory() as td:
+            plain = extract_to_json(MODEL_002, Path(td) / "a.json", TEXDIR_002)
+        self.assertEqual(len(plain), 2)
+```
+
+- [ ] **Step 2: 运行测试确认跳过（模型还没落位）**
+
+Run:
+```bash
+.venv/bin/python -m unittest tests.python.test_stitch.OverheadExtractTest -v 2>&1 | grep -E "skipped|^(Ran|OK)"
+```
+Expected: 三个用例都 `skipped '002.fbx not present'` —— 确认 skip 条件本身有效，
+落位后才会真正运行。
+
+- [ ] **Step 3: 移动 FBX 与贴图**
+
+```bash
+mkdir -p inputs/overhead/models
+mv inputs/002.fbx inputs/overhead/models/002.fbx
+mv inputs/002.fbm inputs/overhead/models/002.fbm
+ls -la inputs/overhead/models/ inputs/overhead/models/002.fbm/
+```
+Expected: `002.fbx`（约 6.8 MB）、`002.fbm/` 下 `05-02.jpg` 与 `C06.jpg`。
+
+- [ ] **Step 4: 改 `.gitignore`**
+
+`.gitignore` 现有的 `inputs/*.fbx` 与 `inputs/*.fbm/`（第 27-28 行）**不再匹配**移入
+子目录后的文件（`*` 不跨层级），那个 6.8 MB 的重资产会变成可提交状态。按仓库既有惯例
+补一条整目录忽略。
+
+把 `.gitignore` 的这一段：
+
+```
+# Controlled inputs that are local-only (heavy FBX assets, not the committed
+# pool fixture already tracked at inputs/pool/models/pool.fbx).
+inputs/underwater/models/
+inputs/pool/models/*.fbx
+```
+
+改为：
+
+```
+# Controlled inputs that are local-only (heavy FBX assets, not the committed
+# pool fixture already tracked at inputs/pool/models/pool.fbx).
+inputs/underwater/models/
+inputs/overhead/models/
+inputs/pool/models/*.fbx
+```
+
+把末尾这一段：
+
+```
+# Runtime configs generated per machine by python.underwater.run
+inputs/configs/underwater_16_*.conf
+inputs/*.fbx
+inputs/*.fbm/
+```
+
+改为：
+
+```
+# Runtime configs generated per machine by python.stitch
+inputs/configs/underwater_*.conf
+inputs/configs/overhead_*.conf
+# Loose model drops straight into inputs/ (before they are filed under a line)
+inputs/*.fbx
+inputs/*.fbm/
+```
+
+- [ ] **Step 5: 确认忽略生效、无重资产入库**
+
+Run:
+```bash
+git check-ignore -v inputs/overhead/models/002.fbx
+git check-ignore -v inputs/overhead/models/002.fbm/C06.jpg
+git status --short | grep -E "002|overhead" || echo "no overhead assets staged"
+```
+Expected: 前两条各输出一行 `.gitignore:NN:inputs/overhead/models/  ...`；
+第三条输出 `no overhead assets staged`。
+
+- [ ] **Step 6: 运行测试确认真正跑起来并通过**
+
+Run:
+```bash
+.venv/bin/python -m unittest tests.python.test_stitch.OverheadExtractTest -v 2>&1 | grep -E "^(Ran|OK|FAILED|test_)"
+```
+Expected: 三个用例都 `ok`（不再是 skipped）：
+```
+Ran 3 tests in ...s
+OK
+```
+
+- [ ] **Step 7: 跑全量测试**
+
+Run:
+```bash
+.venv/bin/python -m unittest discover -s tests/python -t . 2>&1 | grep -E "^(Ran|OK|FAILED)"
+```
+Expected:
+```
+Ran 216 tests in ...s
+OK
+```
+213（Task 6 后）+ 3 = 216。
+
+- [ ] **Step 8: 端到端 —— 提取网格**
+
+Run:
+```bash
+.venv/bin/python -m python.stitch overhead extract
+```
+Expected:
+```
+=== overhead: extract ===
+$ ... -m python.stitch.extract .../002.fbx .../outputs/overhead/mesh.json --tex-dir .../002.fbm
+Plane002     tris= 120 tex=05-02.jpg uvset=UVChannel_1
+Plane001     tris= 204 tex=C06.jpg uvset=UVChannel_1
+wrote .../outputs/overhead/mesh.json
+
+done.
+```
+注意**没有** `--planes-only`（profile 里是 `False`）。
+
+- [ ] **Step 9: 端到端 —— 标定图静图**
+
+Run:
+```bash
+.venv/bin/python -m python.stitch overhead still
+```
+Expected:
+```
+=== overhead: still ===
+canvas 4255x515 @ 170.00px/m
+wrote still .../outputs/overhead/stitch.png
+wrote grid still .../outputs/overhead/grid.png
+wrote fusion heatmap .../outputs/overhead/heat.png
+
+done.
+```
+
+- [ ] **Step 10: 目视检查静图与热图**
+
+Run:
+```bash
+.venv/bin/python -c "
+import cv2
+for name in ('stitch', 'grid', 'heat'):
+    image = cv2.imread(f'outputs/overhead/{name}.png')
+    print(f'{name:7s} {image.shape}')
+    h, w = image.shape[:2]
+    cv2.imwrite(f'/tmp/oh_{name}_view.png',
+                cv2.resize(image, (1400, int(h * 1400 / w))))
+print('缩略图写到 /tmp/oh_*_view.png')
+"
+```
+Expected: 三张都是 `(515, 4255, 3)`。逐张打开 `/tmp/oh_*_view.png` 确认：
+
+- `stitch.png`：一条连续水道，左端到右端泳道线不断裂、不错位；接缝处（约横向
+  30% 位置）泳道浮标连续。
+- `heat.png`：只有两个色块（红=cam5 在左、绿=cam6 在右），中间一条竖直过渡带；
+  **不应**出现水平方向的锯齿或斜向分界 —— 那说明 `seam_weights` 的竖直缝判据失效。
+- `grid.png`：三角网格与底图内容对齐。
+
+- [ ] **Step 11: 端到端 —— 参考贴图与真实首帧静图**
+
+```bash
+DATA4K=/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K
+.venv/bin/python -m python.stitch overhead tex,still --real --video-dir "$DATA4K"
+.venv/bin/python -c "
+import cv2
+for name in ('stitch_real', 'heat_real'):
+    image = cv2.imread(f'outputs/overhead/{name}.png')
+    print(f'{name:12s} {image.shape}')
+    h, w = image.shape[:2]
+    cv2.imwrite(f'/tmp/oh_{name}_view.png',
+                cv2.resize(image, (1400, int(h * 1400 / w))))
+"
+```
+Expected:
+```
+=== overhead: tex ===
+  cam5      <- 20260629_172532_cam5.mp4
+  cam6      <- 20260629_172532_cam6.mp4
+wrote 2 reference textures -> .../outputs/overhead/ref_tex
+=== overhead: still ===
+canvas 4255x515 @ 170.00px/m
+wrote still .../outputs/overhead/stitch_real.png
+...
+stitch_real  (515, 4255, 3)
+heat_real    (515, 4255, 3)
+```
+打开 `/tmp/oh_stitch_real_view.png`：应看到真实泳池画面（无黄色标定线），接缝处水面
+纹理连续。这是关键一步 —— **它验证「贴图↔相机」的位置对应是对的**：若 cam5/cam6 弄反，
+接缝会出现明显错位（探索阶段已渲图确认过反向的样子）。
+
+- [ ] **Step 12: 端到端 —— 离线拼接视频**
+
+```bash
+DATA4K=/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K
+.venv/bin/python -m python.stitch overhead video \
+  --video-dir "$DATA4K" --seconds-float 10
+```
+Expected（关键是第二行的 `NO time alignment`）：
+```
+=== overhead: video ===
+canvas 4255x515 @ 170.00px/m -> output 4255x515 (bottom crop 0px)
+NO time alignment: reading every clip from frame 0 (base 29.97fps)
+299 output frames (~10.0s)
+  100/299  ... fps
+  200/299  ... fps
+wrote video .../outputs/overhead/stitch.mp4: 299 frames in ...s -> ... fps
+```
+4K 逐帧 remap 很慢（预期个位数 fps），10 秒片段约需数十秒到几分钟。
+
+- [ ] **Step 13: 抽帧检查视频**
+
+Run:
+```bash
+.venv/bin/python -c "
+import cv2
+cap = cv2.VideoCapture('outputs/overhead/stitch.mp4')
+print('fps', round(cap.get(cv2.CAP_PROP_FPS), 3),
+      'frames', int(cap.get(cv2.CAP_PROP_FRAME_COUNT)),
+      'size', int(cap.get(3)), 'x', int(cap.get(4)))
+cap.set(cv2.CAP_PROP_POS_FRAMES, 150)
+ok, frame = cap.read()
+cap.release()
+assert ok, 'cannot read mid frame'
+h, w = frame.shape[:2]
+cv2.imwrite('/tmp/oh_video_f150.png', cv2.resize(frame, (1400, int(h*1400/w))))
+print('mid frame ->', frame.shape)
+"
+```
+Expected: `size 4256 x 516`（h264 的 `yuv420p` 要求偶数宽高，ffmpeg 的 `pad` 各补 1px），
+`frames` 约 299。打开 `/tmp/oh_video_f150.png` 确认运动员横跨接缝时不断裂。
+
+- [ ] **Step 14: 提交**
+
+```bash
+git add .gitignore tests/python/test_stitch.py
+git commit -F - <<'EOF'
+feat(overhead): file the designer's 002.fbx and stitch it offline
+
+Extraction, still, reference textures and the offline mp4 all run through the
+shared code with only the profile changed — no geometry work was needed, because
+002.fbx covers the same 25.000m x 3.000m lane as the 16 underwater planes.
+
+The .gitignore change is not cosmetic: inputs/*.fbx and inputs/*.fbm/ were
+ignoring the loose drop at inputs/002.fbx, and moving it under
+inputs/overhead/models/ escapes those globs (* does not cross a separator), so
+the 6.8MB asset would have become committable. inputs/overhead/models/ now
+matches how inputs/underwater/models/ is handled.
+
+The extraction test asserts the mesh order (Plane002 then Plane001) rather than
+just the count, because that order is what pins cam5 to 05-02.jpg and cam6 to
+C06.jpg — the mapping is positional now, so a silent reordering would swap two
+cameras and show up only as a mis-registered seam.
+EOF
+```
+
+---
+
+## Task 8: overhead 实时链路
+
+**Files:**
+- Test: `tests/python/test_stitch.py`（追加 `OverheadAssetTest`）
+- 产物（均不入库）：`build/assets/generated/overhead.swasset`、`overhead.stamp`、
+  `inputs/configs/overhead_metal.conf`、`outputs/overhead/realtime.jsonl`
+
+**Interfaces:**
+- Consumes: Task 7 的 `outputs/overhead/mesh.json`；Task 5 的 `step_asset` /
+  `step_build` / `step_run`；Task 6 的 dispatcher。
+- Produces: 无新符号。C++ 侧零改动（`kMaxCameras=16` 容得下 2 路；相机身份取自 config 的
+  `source.<id>` 声明顺序）。
+
+- [ ] **Step 1: 写失败的测试**
+
+追加到 `tests/python/test_stitch.py` 末尾：
+
+```python
+class OverheadAssetTest(unittest.TestCase):
+    """The compiled asset must carry the profile's camera ids in mesh order, and
+    the two lines must not collide in the generated directory."""
+
+    def _mesh_json(self, td):
+        import json
+
+        def plane(node, basename, x0, width):
+            quad = [
+                [{"pos": [x0, 0.0], "uv": [0.0, 0.0]},
+                 {"pos": [x0 + width, 0.0], "uv": [1.0, 0.0]},
+                 {"pos": [x0 + width, 3.0], "uv": [1.0, 1.0]}],
+                [{"pos": [x0, 0.0], "uv": [0.0, 0.0]},
+                 {"pos": [x0 + width, 3.0], "uv": [1.0, 1.0]},
+                 {"pos": [x0, 3.0], "uv": [0.0, 1.0]}],
+            ]
+            return {"node": node, "texture_basename": basename,
+                    "uvset": "UVChannel_1", "const_axis": 2,
+                    "kept_axes": [0, 1], "spans": [width, 3, 0],
+                    "triangles": quad}
+
+        path = td / "mesh.json"
+        path.write_text(json.dumps({"source": "002.fbx", "meshes": [
+            plane("Plane002", "05-02.jpg", 0.0, 10.0),
+            plane("Plane001", "C06.jpg", 7.5, 17.5)]}))
+        return path
+
+    def test_camera_ids_are_written_in_mesh_order(self):
+        import tempfile
+        from python.assets.asset_format import CAMERA, HEADER
+        from python.assets.compile_runtime_asset import compile_asset
+        from python.stitch import profiles
+
+        overhead = profiles.get("overhead")
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            asset = td / "overhead.swasset"
+            compile_asset(self._mesh_json(td), asset, overhead.camera_ids,
+                          overhead.ppm, neg_v=False,
+                          blend_px=overhead.blend_px, clip_uv=overhead.clip_uv,
+                          source_size=overhead.source_size,
+                          crop_bottom=overhead.crop_bottom)
+
+            data = asset.read_bytes()
+            header = HEADER.unpack_from(data, 0)
+            self.assertEqual(header[7], 2)                 # camera_count
+            ids = []
+            for index in range(header[7]):
+                record = CAMERA.unpack_from(data, header[2] + index * CAMERA.size)
+                ids.append(record[0].split(b"\0")[0].decode())
+            self.assertEqual(ids, ["cam5", "cam6"])
+
+    def test_two_lanes_are_well_within_the_runtime_ceiling(self):
+        # kMaxCameras is 16, sized for the underwater panorama; a two-lane line
+        # needs no C++ change at all.
+        from python.stitch import profiles
+
+        ceiling = 16
+        for name in profiles.names():
+            self.assertLessEqual(len(profiles.get(name).camera_ids), ceiling)
+```
+
+- [ ] **Step 2: 运行测试确认通过或失败**
+
+Run:
+```bash
+.venv/bin/python -m unittest tests.python.test_stitch.OverheadAssetTest -v 2>&1 | grep -E "^(Ran|OK|FAILED)"
+```
+Expected:
+```
+Ran 2 tests in ...s
+OK
+```
+这两条测的是既有编译器加 Task 2 的 profile，本身不需要新代码 —— 它们是回归守卫，
+用来锁住「相机 ID 按 mesh 顺序写入」这个位置对应关系。
+
+- [ ] **Step 3: 编译 overhead 资产**
+
+Run:
+```bash
+.venv/bin/python -m python.stitch overhead asset
+```
+Expected:
+```
+=== overhead: asset ===
+$ ... -m python.assets.compile_runtime_asset .../outputs/overhead/mesh.json \
+    .../build/assets/generated/overhead.swasset --camera-ids cam5 cam6 \
+    --ppm 170.0 --no-neg-v --blend-px 85.0 --crop-bottom none \
+    --source-size 3840 2160 --clip-uv
+2 cameras, canvas 4251x511 - crop 0 -> logical 4251x511 -> encoded 4252x512
+
+done.
+```
+
+- [ ] **Step 4: 核对资产头部与相机表**
+
+Run:
+```bash
+.venv/bin/python -c "
+from python.assets.asset_format import CAMERA, HEADER
+data = open('build/assets/generated/overhead.swasset', 'rb').read()
+header = HEADER.unpack_from(data, 0)
+print('magic', header[0], 'version', header[1])
+print(f'logical {header[3]}x{header[4]}  encoded {header[5]}x{header[6]}  '
+      f'cameras {header[7]}')
+for index in range(header[7]):
+    record = CAMERA.unpack_from(data, header[2] + index * CAMERA.size)
+    print(f'  [{index}] id={record[0].split(bchr(0))[0].decode():8s} '
+          f'node={record[1].split(bchr(0))[0].decode():10s} '
+          f'verts={record[2]:4d} indices={record[3]:4d} '
+          f'weight=({record[4]},{record[5]}) {record[6]}x{record[7]}')
+print('file', len(data), 'bytes')
+".replace('bchr(0)', "b'\\\\0'")
+```
+
+若上面的引号嵌套在你的 shell 里别扭，用等价的两行：
+
+```bash
+cat > /tmp/oh_asset_dump.py <<'PY'
+from python.assets.asset_format import CAMERA, HEADER
+data = open('build/assets/generated/overhead.swasset', 'rb').read()
+header = HEADER.unpack_from(data, 0)
+print('magic', header[0], 'version', header[1])
+print(f'logical {header[3]}x{header[4]}  encoded {header[5]}x{header[6]}  '
+      f'cameras {header[7]}')
+for index in range(header[7]):
+    record = CAMERA.unpack_from(data, header[2] + index * CAMERA.size)
+    camera_id = record[0].split(b'\0')[0].decode()
+    node = record[1].split(b'\0')[0].decode()
+    print(f'  [{index}] id={camera_id:8s} node={node:10s} '
+          f'verts={record[2]:4d} indices={record[3]:4d} '
+          f'weight=({record[4]},{record[5]}) {record[6]}x{record[7]}')
+print('file', len(data), 'bytes')
+PY
+.venv/bin/python /tmp/oh_asset_dump.py
+```
+Expected:
+```
+magic b'SW4KAST\x00' version 1
+logical 4251x511  encoded 4252x512  cameras 2
+  [0] id=cam5     node=Plane002   verts=  84 indices= 360 weight=(0,0) 1531x511
+  [1] id=cam6     node=Plane001   verts= 148 indices= 612 weight=(1446,0) 2805x511
+file 4439352 bytes
+```
+关键是 `cam5` 配 `Plane002`、`cam6` 配 `Plane001` —— 与 Task 7 的 mesh 顺序一致，
+且两块权重的横向范围有重叠（1446 < 1531），正是那条竖直接缝。
+
+- [ ] **Step 5: 确认 stamp 写出且带 profile 名**
+
+Run:
+```bash
+cat build/assets/generated/overhead.stamp; echo
+ls -la build/assets/generated/*.stamp
+```
+Expected: 内容以 `overhead ` 开头，含 `--ppm 170.0`、`--blend-px 85.0`、
+`--crop-bottom none`、`--source-size 3840 2160`、`--clip-uv`。
+
+- [ ] **Step 6: 确认重跑会跳过**
+
+Run:
+```bash
+.venv/bin/python -m python.stitch overhead asset
+```
+Expected:
+```
+=== overhead: asset ===
+asset up to date: .../build/assets/generated/overhead.swasset
+
+done.
+```
+
+- [ ] **Step 7: 确认改 shaping 参数会重编**
+
+Run:
+```bash
+.venv/bin/python -m python.stitch overhead asset --blend-px 0 2>&1 | tail -3
+.venv/bin/python -m python.stitch overhead asset 2>&1 | tail -3
+```
+Expected: 第一条重新编译（打印 `2 cameras, canvas ...`），第二条又重新编译
+（因为 stamp 现在记的是 `--blend-px 0.0`，与 profile 的 85.0 不符）。这证明 stamp
+机制对 overhead 生效 —— 改参数不会被 mtime 误判为「已是最新」。
+
+- [ ] **Step 8: 构建 swim_realtime**
+
+Run:
+```bash
+.venv/bin/python -m python.stitch overhead build
+```
+Expected: 若 `build/metal-release/swim_realtime` 已存在，打印
+`executable present: .../swim_realtime`；否则跑 cmake configure + build，最后无错误退出。
+首次构建需数分钟。
+
+- [ ] **Step 9: 实时跑 10 秒（无窗口，先确认能起来）**
+
+```bash
+DATA4K=/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K
+.venv/bin/python -m python.stitch overhead live \
+  --video-dir "$DATA4K" --seconds 10 --no-window
+```
+Expected: 先打印 `wrote config .../inputs/configs/overhead_metal.conf (2 lanes, 0 with a start offset)`
+——`0 with a start offset` 正是 `sync="none"` 的体现，且**不应**出现
+`no wall-clock alignment` 那行提示。随后 `swim_realtime` 每秒刷一行
+render/decode/preview FPS，10 秒后正常退出，最后打印 `metrics -> .../realtime.jsonl`。
+
+- [ ] **Step 10: 核对生成的 config**
+
+Run:
+```bash
+cat inputs/configs/overhead_metal.conf
+```
+Expected: 恰好两条 `source.` 行（`source.cam5=` 与 `source.cam6=`，按此顺序），
+`asset=` 指向 `overhead.swasset`，`metrics=` 指向 `outputs/overhead/realtime.jsonl`，
+**没有**任何 `start_ms` 行。
+
+- [ ] **Step 11: 核对实时指标**
+
+Run:
+```bash
+.venv/bin/python -c "
+import json
+from pathlib import Path
+lines = Path('outputs/overhead/realtime.jsonl').read_text().splitlines()
+print('intervals', len(lines))
+last = json.loads(lines[-1])
+for key in sorted(last):
+    value = last[key]
+    if isinstance(value, (int, float, str, bool)) or value is None:
+        print(f'  {key} = {value!r}')
+"
+```
+Expected: 至少若干条 interval 记录；最后一条里渲染帧率接近 30（4K 两路解码比 16 路
+720p 重，若明显低于 30 需记录实测值而不是当作失败 —— 这是本轮第一次跑 4K 实时）。
+
+- [ ] **Step 12: 带窗口跑一次，目视确认画面**
+
+```bash
+DATA4K=/Users/penghaotian/Downloads/DATAS/SWIMMING/20260629-4K
+.venv/bin/python -m python.stitch overhead live \
+  --video-dir "$DATA4K" --seconds 15
+```
+Expected: 弹出预览窗口，显示一条横向水道全景（4252×512 的宽幅），运动员游过接缝时
+不断裂。目视确认后窗口自行关闭。
+
+- [ ] **Step 13: 确认水下实时链路未被破坏**
+
+```bash
+UWDIR=/Users/penghaotian/Downloads/DATAS/SWIMMING/swimming-xlj-under-videos/swb_20260728-150356_6
+.venv/bin/python -m python.stitch underwater extract,asset --force 2>&1 | tail -4
+.venv/bin/python -m python.stitch underwater live \
+  --video-dir "$UWDIR" --seconds 10 --no-window 2>&1 | grep -E "wrote config|align window|lane skew"
+```
+Expected: asset 打印 `16 cameras, canvas 6001x721 - crop 65 -> logical 6001x656`；
+live 打印 `wall-clock align window 30.000s; lane skew ...ms` 与
+`wrote config ... (16 lanes, N with a start offset)`，其中 N > 0 —— 水下的墙钟对齐
+必须仍然生效。
+
+- [ ] **Step 14: 跑全量测试**
+
+Run:
+```bash
+.venv/bin/python -m unittest discover -s tests/python -t . 2>&1 | grep -E "^(Ran|OK|FAILED)"
+```
+Expected:
+```
+Ran 218 tests in ...s
+OK
+```
+216（Task 7 后）+ 2 = 218。
+
+- [ ] **Step 15: 清理并提交**
+
+```bash
+rm -f /tmp/oh_asset_dump.py /tmp/oh_*_view.png /tmp/oh_video_f150.png
+git add tests/python/test_stitch.py
+git commit -F - <<'EOF'
+feat(overhead): compile and run the two-lane asset on Metal
+
+No C++ changed. kMaxCameras is already 16 and camera identity already comes from
+the config's source.<id> declaration order, so a two-lane line is data the
+runtime accepts as-is.
+
+The asset test asserts the ids land in mesh order (cam5 on Plane002, cam6 on
+Plane001) rather than merely that two ids exist: the texture-to-camera mapping is
+positional now, so a reordering would silently swap the two cameras and only
+surface as a mis-registered seam in the rendered panorama.
+
+Verified that the shaping stamp works for this line too — recompiling with
+--blend-px 0 and then without it rebuilds both times, so a changed parameter is
+never mistaken for an up-to-date asset.
+EOF
+```
+
+---
+
+## Task 9: README 与收尾
+
+**Files:**
+- Modify: `README.md`（「水下拼接」一节改写为「平面拼接」；目录树；已知限制）
+- Test: `tests/python/test_stitch.py`（追加 `DocsTest`）
+
+**Interfaces:**
+- Consumes: 全部前置任务。
+- Produces: 无新符号。
+
+- [ ] **Step 1: 写失败的测试**
+
+追加到 `tests/python/test_stitch.py` 末尾：
+
+```python
+class DocsTest(unittest.TestCase):
+    """The README must not point at commands that no longer exist."""
+
+    def test_readme_has_no_retired_commands(self):
+        readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+        for retired in ("uw-extract", "uw-tex", "uw-render", "uw-real",
+                        "uw-video", "run_underwater.sh", "run_underwater.ps1",
+                        "python.underwater", "underwater_16.swasset"):
+            self.assertNotIn(retired, readme, f"README still mentions {retired}")
+
+    def test_readme_documents_both_stitch_lines(self):
+        readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("run_stitch.sh", readme)
+        self.assertIn("overhead", readme)
+        self.assertIn("002.fbx", readme)
+```
+
+- [ ] **Step 2: 运行测试确认失败**
+
+Run:
+```bash
+.venv/bin/python -m unittest tests.python.test_stitch.DocsTest -v 2>&1 | grep -E "README still|^(Ran|OK|FAILED)"
+```
+Expected: `test_readme_has_no_retired_commands` FAIL，报出第一个仍被提及的旧命令。
+
+- [ ] **Step 3: 改 README 的目录树**
+
+`README.md` 第 176-183 行的 `scripts/` 部分：
+
+```text
+├── scripts/
+│   ├── run_metal.sh              # demo / benchmarks / soak
+│   ├── run_python.sh             # still / 4k / keypoint / extract / bake / asset / we-*
+│   ├── run_stitch.sh             # 平面拼接统一入口（macOS / Linux）
+│   ├── run_stitch.ps1            # 同上（Windows）
+│   ├── run_win.ps1               # Windows 六路实时启动器
+│   ├── run_win.bat               # 同上（cmd 包装）
+│   └── run_water_entry.sh        # 入水检测机位难例筛选全流程
+```
+
+同时在 `inputs/` 部分补上新目录（第 128-137 行附近）：
+
+```text
+├── inputs/
+│   ├── pool/models/pool.fbx
+│   ├── pool/textures/camera_[1-6]_composite.png
+│   ├── underwater/models/all.fbx + all.fbm/     # 16 块水下平面（本地，未入库）
+│   └── overhead/models/002.fbx + 002.fbm/       # 2 块俯视平面（本地，未入库）
+```
+
+- [ ] **Step 4: 用新一节替换 README 的「水下拼接」整节**
+
+把 `README.md` 第 376 行 `## 水下拼接（underwater stitch）` 起、到第 459 行
+（`## 入水检测机位（water entry）` 之前）的整节替换为：
+
+````markdown
+## 平面拼接（stitch）
+
+`python/stitch/` 实现「N 块平面横向一字排开」的拼接通路。它不复制算法，而是 import 复用
+pool 的提取与渲染函数（`python.assets.extract_fbx`、`python.validation.reference_renderer`），
+产物按线路分目录写入 `outputs/<profile>/`，互不交叉。
+
+两条线路的差异全部是 `python/stitch/profiles.py` 里的数据，代码不分叉：
+
+| | underwater | overhead |
+| --- | --- | --- |
+| 模型 | `all.fbx`（16 块，含杂物需过滤） | `002.fbx`（2 块，干净） |
+| 相机 | `underA16` … `underA1` | `cam5`、`cam6` |
+| 片段 | `*_underAi.ts` | `*_camN.mp4` |
+| 源尺寸 | 1280×720 | 3840×2160 |
+| 每米像素 | 240 | 170 |
+| 接缝过渡 | 120 px（0.5 m） | 85 px（0.5 m） |
+| 时间对齐 | manifest 墙钟 | 无（同一 PTP 同步域，帧级偏差） |
+| 静图 | 缩回源高 360（3278×360） | 原生 ppm（4255×515） |
+| 资产 | `underwater.swasset`（6001×656） | `overhead.swasset`（4251×511） |
+
+两条线路覆盖的是**同一条 25.000 m × 3.000 m 水道**，一个从水下看、一个从水上看 ——
+这是同一套几何代码能服务两者的原因，也是 overhead 变体存在的目的：让水上视角与水下
+16 路关注同一名运动员。
+
+`overhead` 的两张贴图 `05-02.jpg` / `C06.jpg` 是设计师在 overhead5 / overhead6 机位标定
+的帧。用 SIFT + RANSAC 与 `20260629-4K` 的 cam5 / cam6 首帧配准，内点 99 / 187、单应近似
+恒等（四角位移均值 2.9 px / 0.3 px），确认为同一对物理相机 —— 所以视频侧用这两路 4K。
+overhead5 / overhead6 自身目前只有 50 组快照 jpg，没有原始视频。
+
+### 统一入口
+
+```bash
+./scripts/run_stitch.sh PROFILE STEPS [选项…]      # macOS / Linux
+pwsh scripts/run_stitch.ps1 PROFILE STEPS [选项…]  # Windows
+```
+
+七个步骤，逗号分隔、按给出顺序执行：
+
+| 步骤 | 作用 |
+| --- | --- |
+| `extract` | FBX → `outputs/<profile>/mesh.json` |
+| `tex` | 导出每台相机的参考贴图 `ref_tex/<camera>.png`（首帧，无标定线） |
+| `still` | 静图 + 网格诊断图 + 融合热图；`--real` 用参考贴图，产物加 `_real` 后缀 |
+| `video` | 每路片段 → 全景 mp4 |
+| `asset` | mesh JSON → GPU `.swasset` |
+| `build` | 构建 `swim_realtime` |
+| `live` | 实时拼接（预览 / HEVC / 指标） |
+
+`extract` / `tex` / `asset` 的产物比输入新时跳过（`asset` 另比对 shaping 参数的 stamp），
+`--force` 强制重做；`still` / `video` 每次都渲 —— 它们的口径可从命令行覆盖，按 mtime
+跳过会让人看到一张过期却像是新的图。
+
+```bash
+# 水下 16 路：一条命令跑完提取 → 编译 → 构建 → 实时
+./scripts/run_stitch.sh underwater extract,asset,build,live \
+  --video-dir /path/to/swb_20260728-150356_6 --seconds 30 --encode
+
+# 俯视两路：离线静图与拼接视频
+./scripts/run_stitch.sh overhead extract,still
+./scripts/run_stitch.sh overhead tex,still --real \
+  --video-dir /path/to/20260629-4K
+./scripts/run_stitch.sh overhead video --video-dir /path/to/20260629-4K \
+  --seconds-float 10
+
+# 俯视两路：实时
+./scripts/run_stitch.sh overhead extract,asset,build,live \
+  --video-dir /path/to/20260629-4K --seconds 15
+```
+
+常用选项：`--seconds N`（live 时长）、`--seconds-float N`（video 时长）、`--encode`、
+`--no-window`（离屏）、`--fps N`、`--blend-px N`、`--ppm N`、`--real`、`--force`、
+`--config PATH`（用现成 config）、`--backend metal|d3d11|cudagl`。
+
+平台差异全部由 Python 处理：macOS 用 Ninja + `metal` 后端 + `build/metal-release/swim_realtime`；
+Windows 用 Visual Studio 17 2022 (x64) + `d3d11` 后端 +
+`build/win-d3d11/Release/swim_realtime.exe`（有 CUDA/FFmpeg/GLFW 时可 `--backend cudagl`）。
+运行时 config 每次按片段目录重新生成到 `inputs/configs/<profile>_<backend>.conf`，
+`source.<camera>=` 的声明顺序即通道顺序。
+
+### 分步细节
+
+网格按每块世界 X 最小值升序排列（左→右），不依赖 FBX 节点声明顺序。相机身份由此**按位置**
+对应 —— profile 的 `camera_ids` 与 mesh 顺序一一配对，不解析贴图文件名（overhead 的
+`05-02.jpg` / `C06.jpg` 无从解析出 `cam5` / `cam6`）。
+
+`all.fbx` 含全部 16 块平面，但同时夹带无纹理的支架框、泳道标记条与重复网格，所以
+underwater 的 profile 打开 `planes_only`：只保留「每个纹理一块、位于泳池 Y 带内的全高
+平面」。`002.fbx` 恰好只有两块平面，不需要过滤。
+
+静图默认用标注网格图（underwater 取数据集的 `annotation-grids/`，可用 `STITCH_GRID_DIR`
+或 `ANNOTATION_PREVIEW_DATASET_ROOT` 覆盖；overhead 取 `002.fbm` 里设计师的标定图）。
+`--real` 换成 `tex` 导出的相机首帧。参考贴图按 `<camera_id>.png` 命名而非沿用 mesh 的
+`texture_basename`：后者对 overhead 是设计师的工作文件名（看不出哪台相机），且把无损解码
+写回 `.jpg` 会二次编码（实测 cam5 最大通道误差 35）。
+
+`--full-res`（underwater 默认开）输出高度对齐源图高度、宽度等比缩放；缩放前会**自动砍掉
+最下方存在黑色（无纹理）像素的整行**（矮平面的透视地面缺口），再等比缩放。overhead 两块
+都是全高平面、`ppm` 已是原生密度，所以关掉。
+
+离线拼接视频的时间轴按 profile 的 `sync` 决定。`sync="manifest"`（underwater）：各路
+`.ts` 的第 0 帧不是同一时刻 —— 录制器把关键帧放在 lookback 窗口内的任意位置，GOP 粒度
+使各路偏差可达数秒；按 manifest 的 `align_start_ms` 与各路 `keyframe_timestamp_ms` 换算
+每路起始帧，与前端播放器同一套公式，manifest 缺失或没有 align 窗口会直接报错退出。
+`sync="none"`（overhead）：4K 会话的 manifest 没有可用墙钟（`sync_summary.status` 是
+`waiting_for_syncbridge_events`、`mappings[].offset_us` 全为 `null`），六路 ZCAM 同处一个
+EzLink/IEEE1588 同步域、同一次录制，偏差在帧级，各路从第 0 帧读。`--no-align` 可强制
+前者也不对齐（用于与旧行为对比）。
+
+### 能力边界
+
+pool 六路**不在** profile 注册表里，这是有意的：它的网格是**两排**（`01/02/03` 一排、
+`u/Plane004/Plane007` 另一排），相机顺序 `cam3 cam2 cam1 cam4 cam5 cam6` 不是 world-X
+升序，且用距离变换羽化而非竖直硬缝。把它塞进来会让 profile 长出三个只为一条线路存在的
+字段。pool 继续走 `python.validation.reference_renderer` 与 `CMakeLists.txt` 里的
+`pool_4k.swasset` 规则。
+
+macOS/Metal 实测（underwater）：16 路 1280×720 MPEG-TS → 6002×656，渲染 30.1fps、解码
+4848 帧零 malformed、HEVC 硬件编码 30.1fps、预览零丢帧。相机数量、相机 ID、输出尺寸、
+解码分辨率全部来自 config 与 `.swasset`，三个后端（Metal / D3D11 / CUDA-GL）共用同一套
+`swim_core` 逻辑。
+````
+
+- [ ] **Step 5: 补一条已知限制**
+
+在 README 的「已知限制」段（原第 579 行起）里，把这一条：
+
+```
+- 六路输入数量必须与六块网格一致，且必须保持 `cam3 cam2 cam1 cam4 cam5 cam6` 的固定位置顺序。
+```
+
+之后插入：
+
+```
+- 拼接线路（`python/stitch/`）的相机身份是**位置**对应：profile 的 `camera_ids` 按顺序
+  配 mesh（world-X 升序）。改动 FBX 里平面的相对位置、或改 profile 的 id 顺序，会把相机
+  错配到别的平面上，症状是接缝处错位而不是报错。
+- overhead 线路的视频侧用 `20260629-4K` 的 cam5/cam6（已用 SIFT 配准确认与设计师标定的
+  overhead5/overhead6 同机位）。overhead5/overhead6 自身只有 50 组快照 jpg，没有原始视频；
+  拿到后只需在 `profiles.py` 新增一条记录（同一个 `002.fbx`，换 `camera_ids` 与
+  `clip_suffix`，`sync` 改回 `manifest`）。
+- 4K 两路实时的解码负载明显高于 16 路 720p（像素总量约 2.4 倍），实测帧率见
+  `outputs/overhead/realtime.jsonl`。
+```
+
+- [ ] **Step 6: 运行测试确认通过**
+
+Run:
+```bash
+.venv/bin/python -m unittest tests.python.test_stitch.DocsTest -v 2>&1 | grep -E "^(Ran|OK|FAILED)"
+```
+Expected:
+```
+Ran 2 tests in ...s
+OK
+```
+
+- [ ] **Step 7: 跑全量测试**
+
+Run:
+```bash
+.venv/bin/python -m unittest discover -s tests/python -t . 2>&1 | grep -E "^(Ran|OK|FAILED)"
+```
+Expected:
+```
+Ran 220 tests in ...s
+OK
+```
+216（Task 7 后）+ 2（Task 8）+ 2（Task 9）= 220。
+
+- [ ] **Step 8: 全仓扫一遍残留引用**
+
+Run:
+```bash
+grep -rn "python\.underwater\|uw-extract\|uw-render\|uw-real\|uw-video\|uw-tex\|run_underwater\|underwater_16" \
+  --include='*.py' --include='*.sh' --include='*.ps1' --include='*.md' \
+  --include='*.txt' --include='*.cmake' --include='CMakeLists.txt' \
+  . 2>/dev/null | grep -v '^./docs/superpowers/' || echo "no stale references"
+```
+Expected: `no stale references`
+
+（`docs/superpowers/` 下的历史 spec 与 plan 记录的是当时的状态，不改。）
+
+- [ ] **Step 9: 清理临时文件**
+
+Run:
+```bash
+rm -rf /tmp/probe002 /tmp/plancheck /tmp/oh_* /tmp/uw_*
+ls /tmp | grep -E "probe002|plancheck|oh_|uw_" || echo "clean"
+```
+Expected: `clean`
+
+- [ ] **Step 10: 确认工作区干净、无意外入库**
+
+Run:
+```bash
+git status --short
+git log --oneline -9
+```
+Expected: `git status` 只剩 README 与测试文件待提交（无 `.fbx`、`.png`、`.mp4`、
+`.swasset`、`.conf`）；`git log` 能看到 Task 1-8 的八个提交。
+
+- [ ] **Step 11: 提交**
+
+```bash
+git add README.md tests/python/test_stitch.py
+git commit -F - <<'EOF'
+docs(stitch): document both lines under one section
+
+The README described a single underwater task and pointed at five uw-* commands
+and two wrapper scripts that no longer exist. It now describes the shared
+pipeline with a table of what the two profiles differ in, which is also the
+honest summary of the refactor: fourteen values, no forked code.
+
+A test asserts the retired names are absent. Documentation that names a command
+which no longer exists is worse than no documentation, and this one had twenty
+such references.
+
+Records the two things a reader cannot infer from the code: that the overhead
+textures were pinned to cam5/cam6 by SIFT registration rather than by their
+filenames, and that camera identity is positional — so reordering planes in the
+FBX mis-registers a seam instead of raising.
+EOF
+```
+
+---
+
+## 自检
+
+**规格覆盖。** 逐节对照 `docs/superpowers/specs/2026-07-30-overhead-lane-stitch-design.md`：
+
+| 规格小节 | 落在哪个任务 |
+| --- | --- |
+| profile：一条拼接线路的全部差异 | Task 2 |
+| 目录改名 | Task 1 |
+| 删除写死水下的三处（正则 / 常量 / manifest） | Task 3（正则、manifest 分支）、Task 5（常量） |
+| 步骤 dispatcher | Task 6 |
+| shell 入口收敛 | Task 6 |
+| 能力边界：pool 不进注册表 | Task 2（模块文档串）、Task 9（README） |
+| 资产命名 | Task 2（profile 字段）、Task 8（实际编译验证） |
+| FBX 落位与 .gitignore | Task 7 |
+| 数据流（extract→still→tex→video→asset→live） | Task 7（前四步）、Task 8（后两步） |
+| 几何参数依据（ppm/blend/crop/neg_v） | Task 2（写进 profile 并附理由注释） |
+| 错误处理（7 条） | Task 2（profile 未注册、clip 缺失/歧义）、Task 3（相机数不符）、Task 5（sync 分支）、Task 6（未知步骤、缺 --video-dir） |
+| 测试（7 项新增） | Task 2/3/4/5/6/7/8/9 各自的测试类 |
+| 验证（9 步） | Task 7 Step 8-13、Task 8 Step 3-13、Task 9 Step 7-8 |
+| 后续扩展成本 | Task 9（README 已知限制） |
+| README | Task 9 |
+
+规格里「水下静图逐像素不变」这条回归要求，在 Task 1 Step 12、Task 4 Step 8、
+Task 6 Step 13 各验证一次（改名后、改贴图命名后、走新入口后）。
+
+**占位符扫描。** 无 TBD / TODO / 「类似 Task N」/ 「适当处理错误」。每个改代码的步骤
+都给了完整代码块；每个跑命令的步骤都给了预期输出。
+
+**类型一致性。**
+
+- `write_config(profile, path, video_dir, backend, encode_path, align=True)` ——
+  Task 5 定义，Task 5 Step 1 的三处测试调用与 Task 6 的 `realtime.step_run` 间接调用一致。
+- `render_video(data_path, video_dir, out_path, camera_ids, clip_for, ...)` ——
+  Task 3 定义，Task 6 `step_video` 按此调用（`camera_ids=`、`clip_for=` 均关键字传参）。
+- `export_ref_tex.export(profile, out_dir=None, video_dir=None)` 与
+  `tex_names(profile)` —— Task 4 定义，Task 6 `step_tex` / `step_still` 按此调用。
+- `render_stills(..., tex_names=None)` —— Task 4 加参数，Task 6 `step_still` 使用。
+- 四个 `step_*(profile, args)`（Task 5）与三个新 step（Task 6）签名一致，
+  Task 6 的 `test_every_step_takes_profile_and_args` 用 `inspect.signature` 锁住。
+- `StepError` 单一来源 `profiles`（Task 2），`run.py` 重新导出（Task 5），
+  Task 4/6 从 `profiles` 导入 —— 全仓一个类，不存在两个同名异物。
+- `profile.mesh_json` / `ref_tex_dir` / `metrics` / `config_path()` / `clip_for()` ——
+  Task 2 定义，Task 3/4/5/6 引用的名字与之逐字相同。
+
+**测试计数账。** 180（基线）→ 192（+12 Task 2）→ 194（−1 +3 Task 3）→ 200（+6 Task 4）
+→ 206（+6 Task 5）→ 213（+7 Task 6）→ 216（+3 Task 7）→ 218（+2 Task 8）→ 220（+2 Task 9）。
+
