@@ -1,0 +1,12 @@
+# Pose-estimation extras, needed ONLY by python/water_entry/ (the single Orbbec
+# camera above plane 0, used for backstroke start arch/entry detection).
+#
+# Installed by `install.bat pose`, not by the default install: this pulls ~2.5GB
+# and the underwater/pool stitch paths never import torch.
+#
+# Versions pinned to what README documents as verified. On Windows this resolves
+# to the CPU build from PyPI; if you want CUDA, install torch separately from
+# the pytorch.org index first and this file will leave it alone.
+torch==2.5.1
+torchvision==0.20.1
+ultralytics~=8.4.0
