@@ -171,9 +171,13 @@ class Profile:
 仍然提示这两个环境变量。
 
 **`full_res` 与 `ppm` 并存**。水下静图走 `--full-res`（缩回源高 360，产物 3278×360）、
-而 `.swasset` 用 ppm=240（画布 6005×725）—— 两个口径本就不同，前者给人看、后者给 GPU。
-overhead 两者统一为 170，`full_res=False`。profile 把这个差异记下来，不再靠调用方
-记得给哪个 CLI 传 `--full-res`。
+而 `.swasset` 用 ppm=240（画布 6001×721，裁底 65 行后 logical 6001×656）—— 两个口径本就
+不同，前者给人看、后者给 GPU。overhead 两者统一为 170，`full_res=False`。profile 把这个
+差异记下来，不再靠调用方记得给哪个 CLI 传 `--full-res`。
+
+注意静图画布比资产画布各维大 4px：`render.py` 加了 `margin=2` 的边缘 padding（防止
+浮点舍入让顶点落到画布外），`compile_runtime_asset` 不加。这是既有差异、两条线路一致，
+本轮不动。所以 overhead 的静图是 4255×515 而资产是 4251×511。
 
 ### 目录改名
 
@@ -344,7 +348,9 @@ outputs/overhead/mesh.json
    ├─ video ─ 20260629-4K cam5/cam6 mp4 ──→ stitch.mp4（sync=none）
    │
    └─ asset ──────────────────────────────→ build/assets/generated/overhead.swasset
-              （--camera-ids cam5 cam6 --ppm 170 --no-neg-v --blend-px 85）
+              （--camera-ids cam5 cam6 --ppm 170 --no-neg-v --blend-px 85
+                --clip-uv --source-size 3840 2160 --crop-bottom none
+                → 2 cameras, logical 4251×511, encoded 4252×512）
                         │
                         ▼  build + live
               inputs/configs/overhead_metal.conf
@@ -356,7 +362,8 @@ outputs/overhead/mesh.json
 
 ## 几何参数依据
 
-**`ppm=170`**：贴原生密度上界 168.7 px/m，不放大、不丢细节。画布 4255×515。
+**`ppm=170`**：贴原生密度上界 168.7 px/m，不放大、不丢细节。静图画布 4255×515，
+资产画布 4251×511（差 4px 是 `render.py` 的 `margin=2` padding，见上）。
 
 **不走 `--full-res`、`crop_bottom="none"`**：`full_res=False` 时声明的 `ppm` 直接生效，
 不再自适应。实测 `bottom_dirty_rows=2`，而顶部同样是 2 —— 那是 `render.py` 的
@@ -416,7 +423,8 @@ pool 的 `neg_v=True` 不适用。
    仍对齐（已在探索阶段用 `/tmp` 冒烟验证过）。
 6. `run_stitch.sh overhead video --video-dir <4K> --seconds 10` — 10 s mp4，
    日志出现 `NO time alignment`。
-7. `run_stitch.sh overhead asset` — 报出 `2 cameras, canvas 4255x515`。
+7. `run_stitch.sh overhead asset` — 报出
+   `2 cameras, canvas 4251x511 - crop 0 -> logical 4251x511 -> encoded 4252x512`。
 8. `run_stitch.sh overhead extract,asset,build,live --video-dir <4K> --seconds 10`
    — Metal 实时跑通，记录解码 / 渲染 / 预览 FPS。
 9. pool 回归：`run_python.sh still` 与 `asset` 不受影响。
