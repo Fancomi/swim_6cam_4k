@@ -1294,3 +1294,59 @@ class DocsTest(unittest.TestCase):
         self.assertIn("run_stitch.sh", readme)
         self.assertIn("overhead5", readme)
         self.assertIn("002.fbx", readme)
+
+
+class PatchGridTest(unittest.TestCase):
+    """The missing calibration line is derived from the grid the present lines
+    form, not eyeballed: snap each line to a 0.5m slot, report the empty slot."""
+
+    def test_finds_the_empty_grid_slot(self):
+        from python.stitch.patch_grid import missing_world_x
+
+        # eight slots at 0.5m from world X 0, with slot 3 (X=1.5) absent
+        ppm = 100.0
+        present = [0.0, 0.5, 1.0, 2.0, 2.5, 3.0]
+        columns = [int(round(x * ppm)) for x in present]
+        gaps, residual = missing_world_x(columns, 0.0, ppm)
+
+        self.assertEqual([round(x, 3) for x in gaps], [1.5])
+        self.assertLess(residual, 0.01)
+
+    def test_no_gap_reports_nothing(self):
+        from python.stitch.patch_grid import missing_world_x
+
+        columns = [0, 50, 100, 150]
+        gaps, _residual = missing_world_x(columns, 0.0, 100.0)
+        self.assertEqual(gaps, [])
+
+    def test_lines_off_the_grid_are_refused(self):
+        from python.stitch.patch_grid import missing_world_x
+        from python.stitch.profiles import StepError
+
+        # 0.31m spacing fits no 0.5m grid
+        columns = [0, 31, 62, 93]
+        with self.assertRaises(StepError):
+            missing_world_x(columns, 0.0, 100.0)
+
+    def test_refuses_to_patch_inside_an_overlap(self):
+        # A gap where two planes both reach is covered by the neighbour, so
+        # painting one plane's texture would be wrong.
+        from python.stitch.patch_grid import owning_mesh
+        from python.stitch.profiles import StepError
+
+        left = _plane("left", "a.jpg", 0.0, 10.0)
+        right = _plane("right", "b.jpg", 7.5, 10.0)
+        self.assertEqual(owning_mesh([left, right], 2.0)["node"], "left")
+        self.assertEqual(owning_mesh([left, right], 15.0)["node"], "right")
+        with self.assertRaises(StepError):
+            owning_mesh([left, right], 8.0)
+
+    def test_line_columns_ignores_short_marks(self):
+        import numpy as np
+        from python.stitch.patch_grid import line_columns
+
+        image = np.zeros((100, 60, 3), np.uint8)
+        image[:, 10:13] = (1, 254, 254)      # full-height line
+        image[:8, 30:33] = (1, 254, 254)     # a short mark, not a grid line
+        image[:, 50:53] = (1, 254, 254)      # full-height line
+        self.assertEqual(line_columns(image), [11, 51])
