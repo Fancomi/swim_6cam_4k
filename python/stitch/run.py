@@ -75,7 +75,7 @@ def stamp_path(profile):
 def shaping_stamp(profile, args):
     """A string identifying every option the baked asset depends on.
 
-    Leads with the line name so two lines writing sibling .stamp files can never
+    Leads with the line name so lines writing sibling .stamp files can never
     satisfy each other's up-to-date check. mtime alone cannot see a changed
     --ppm, so without this a reshaped asset would be skipped as current."""
     return " ".join(str(part) for part in (

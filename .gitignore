@@ -8,10 +8,6 @@
 .pytest_cache/
 build/
 outputs/
-# Leftovers from before 87611cc moved generated assets and metrics under build/
-# and outputs/. run_win.ps1 still writes benchmarks/manual_<backend>.jsonl here.
-assets/generated/
-benchmarks/
 
 # Python caches
 __pycache__/

@@ -3,9 +3,9 @@
 The Autodesk SDK is imported here and nowhere else, so a machine without the
 `fbx` wheel can still run everything that reads an already-extracted mesh JSON.
 
-`pick_uv_element` and the mesh walk each existed in three copies before this
-(extract_fbx, bake_uv, stitch.extract) — byte-identical in two cases and subtly
-different in the third, which is how the multi-material bug below survived.
+The UV-element pick and the mesh walk each existed in three copies before this —
+byte-identical in two and subtly different in the third, which is how the
+multi-material bug below survived.
 """
 import sys
 from collections import Counter

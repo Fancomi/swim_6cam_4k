@@ -88,7 +88,7 @@ class BenchmarkScriptsTest(unittest.TestCase):
         self.assertIn("33554432", result.stdout)
         self.assertTrue(os.access(script, os.X_OK))
 
-    def test_external_executable_is_preflighted_and_latest_targets_custom_output(self):
+    def test_external_executable_is_preflighted_and_latest_stays_inside_outputs(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             config, executable, log = self.make_fake_run(directory)
@@ -113,7 +113,12 @@ class BenchmarkScriptsTest(unittest.TestCase):
             self.assertEqual(manifest["git_sha"], expected_sha)
             self.assertEqual(manifest["build_type"], "Release")
             self.assertEqual(manifest["executable_sha256"], hashlib.sha256(executable.read_bytes()).hexdigest())
-            self.assertEqual((ROOT / "outputs" / "benchmarks" / "latest").resolve(), output.resolve())
+            # `latest` must NOT follow a scratch --output-dir: the directory is
+            # about to be deleted, and a dangling symlink there breaks the
+            # documented `summarize outputs/benchmarks/latest/results.jsonl`.
+            latest = ROOT / "outputs" / "benchmarks" / "latest"
+            if latest.exists() or latest.is_symlink():
+                self.assertNotEqual(latest.resolve(), output.resolve())
 
     def test_mismatched_external_executable_stops_after_preflight(self):
         with tempfile.TemporaryDirectory() as temporary:

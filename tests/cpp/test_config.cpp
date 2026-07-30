@@ -95,7 +95,7 @@ std::string valid_config_with_cam3(std::string_view cam3_path) {
       "backend=metal\n"
       "mode=realtime\n"
       "stage=full\n"
-      "asset=assets/test.swasset\n"
+      "asset=build/assets/generated/test.swasset\n"
       "source.cam3="};
   config.append(cam3_path);
   config.append(
@@ -249,7 +249,8 @@ TEST_CASE(loads_exact_camera_order_and_all_config_values) {
   CHECK_EQ(config.backend, "metal");
   CHECK_EQ(config.mode, RunMode::realtime);
   CHECK_EQ(config.stage, BenchmarkStage::full);
-  CHECK_EQ(config.asset_path, std::filesystem::path{"assets/test.swasset"});
+  CHECK_EQ(config.asset_path,
+           std::filesystem::path{"build/assets/generated/test.swasset"});
   constexpr std::array<std::string_view, 6> camera_ids{
       "cam3", "cam2", "cam1", "cam4", "cam5", "cam6"};
   for (std::size_t index = 0; index < camera_ids.size(); ++index) {

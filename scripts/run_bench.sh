@@ -15,6 +15,12 @@
 # soak 按每条 interval 的真实 elapsed_s 累加时间轴，报告 RSS 与 Metal allocation
 # 的每分钟斜率，并拒绝 host copy、容量越界、编码错误，以及 warm-up 后连续五个
 # 区间低于 29 FPS。
+#
+# 产物：matrix -> outputs/benchmarks/runs/<run_id>/（成功后 latest 指向它）
+#       soak   -> outputs/benchmarks/soaks/<run_id>/（latest 不跟随 soak）
+#
+# 逐项选项与默认值见下面 usage() 的 heredoc——它带默认值太多，是本仓库唯一不把
+# 说明放在顶部注释里的脚本。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -305,8 +311,15 @@ PY
   fi
   "$python" -m python.benchmarks.summarize "${summary_args[@]}"
 
-  mkdir -p "$ROOT/outputs/benchmarks"
-  ln -sfn "$OUTPUT_DIR" "$ROOT/outputs/benchmarks/latest"
+  # `latest` only ever points inside outputs/benchmarks. A caller-supplied
+  # --output-dir may be scratch that outlives nothing — repointing at it left a
+  # dangling symlink and broke the documented
+  # `summarize outputs/benchmarks/latest/results.jsonl`.
+  if [[ "$OUTPUT_DIR" == "$ROOT/outputs/benchmarks/"* ]]; then
+    ln -sfn "$OUTPUT_DIR" "$ROOT/outputs/benchmarks/latest"
+  else
+    echo "latest left alone: results are outside outputs/benchmarks"
+  fi
   echo "benchmark matrix complete: $OUTPUT_DIR"
 }
 

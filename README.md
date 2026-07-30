@@ -6,7 +6,9 @@
 
 ## 这个仓库有四条互不交叉的链路
 
-要改哪一条，只需要看它那一行；四条链路除了共用 `python/common/` 与 `.venv`，没有其他耦合。
+要改哪一条，只需要看它那一行。四条链路共用 `python/common/` 与 `.venv`，此外只有一处跨链路依赖：
+水下线的参考贴图取自标注数据集的快照索引，所以 `python/stitch/export_ref_tex.py` import
+`python.labeling.snapshots`（那条线没有按次录制的片段可采首帧）。
 
 | 链路 | 做什么 | 入口 | 代码 |
 | --- | --- | --- | --- |
@@ -15,8 +17,9 @@
 | **数据集标注** | 浏览器标注器、快照合成、关键点复核页 | `scripts/run_label.sh` | `python/labeling/`、`python/keypoints/` |
 | **性能取证** | 48 格性能矩阵、十分钟 soak | `scripts/run_bench.sh` | `python/benchmarks/` |
 
-Windows 双击入口 `scripts\run_win.bat` 走的就是第一条链路。每个脚本不带参数运行会打印
-自己的完整用法，不必先读本文。
+Windows 双击入口 `scripts\run_win.bat` 走的就是第一条链路。三个 `.sh` 入口不带参数或
+`--help` 就打印自己的完整用法，不必先读本文；两个 `.bat` 是双击入口，不带参数即执行，
+用法在文件顶部的说明区里。
 
 本文所有命令都假定当前目录是仓库根目录。
 
@@ -50,11 +53,11 @@ pwsh scripts/run_stitch.ps1 LINE STEPS [选项…]    # Windows
 | 步骤 | 作用 | 产物 |
 | --- | --- | --- |
 | `extract` | 读 FBX，提取三角形 + UV，按线路的顺序排列 | `outputs/<line>/mesh.json` |
-| `tex` | 导出每台相机的参考贴图（首帧，无标定线） | `outputs/<line>/ref_tex/<camera>.png` |
+| `tex` | 导出每台相机的参考贴图（无标定线）：pool/overhead 取片段首帧，underwater 取数据集快照 | `outputs/<line>/ref_tex/<camera>.png` |
 | `still` | 静图 + 网格诊断图 + 融合热图 | `outputs/<line>/stitch{,_grid,_heat}.png` |
 | `video` | 每路片段逐帧拼接 | `outputs/<line>/stitch.mp4` |
 | `asset` | 网格 JSON 编译成 GPU 资产 | `build/assets/generated/<line>.swasset` |
-| `build` | 构建 `swim_realtime` | `build/<backend>-release/` |
+| `build` | 构建 `swim_realtime` | `build/<backend>-release/`（macOS）、`build/win-<backend>/`（Windows） |
 | `live` | 实时拼接（预览窗口 / HEVC / 指标） | `outputs/<line>/realtime.jsonl` |
 
 ```bash
@@ -79,8 +82,9 @@ pwsh scripts/run_stitch.ps1 LINE STEPS [选项…]    # Windows
 `pool` 的片段目录默认取 `SWIMMING_DATASET_DIR`（一个机器级会话目录）；另两条线是
 按次挑选的采样目录，必须显式给 `--video-dir`。
 
-`extract` / `tex` / `asset` 的产物比输入新时跳过（`asset` 另比对一份记录了 ppm /
-blend / crop 的 stamp，因为 mtime 看不见这些口径变化），`--force` 强制重做；
+`extract` 与 `asset` 的产物比输入新时跳过（`asset` 另比对一份记录了 ppm / blend / crop
+的 stamp，因为 mtime 看不见这些口径变化）；`tex` 只看目录非空就跳过——它的输入是一整个
+片段目录或数据集，没有单一 mtime 可比。三者都用 `--force` 强制重做；
 `still` / `video` 每次都渲 —— 它们的口径可从命令行覆盖，按 mtime 跳过会让人看到
 一张过期却像是新的图。
 
@@ -130,9 +134,9 @@ Y 带 `(-11.6, -8.0)` 内 —— 对它开这个开关会滤掉全部两块。
 **静图画布比资产画布各维大 4px**（pool 除外）：`still` 给世界边界加了 2px padding 防
 浮点舍入越界，资产编译不加。pool 的 margin 是 0，因为它的画布尺寸就是发布尺寸。
 
-**`--full-res`（underwater 默认开）**输出高度对齐源图高度、宽度等比缩放；缩放前会自动
-砍掉最下方存在无纹理像素的整行（矮平面的透视地面缺口），再等比缩放。pool 与 overhead
-的 `ppm` 已是原生密度，所以关掉。
+**full_res**（profile 字段，只有 underwater 开）让输出高度对齐源图高度、宽度等比缩放；
+缩放前会自动砍掉最下方存在无纹理像素的整行（矮平面的透视地面缺口），再等比缩放。命令行只
+能关不能开：`--no-full-res`。pool 与 overhead 的 `ppm` 已是原生密度，所以本就关着。
 
 **overhead 的两张贴图** `05-02.jpg` / `C06.jpg` 是设计师在两个机位标定的帧。用 SIFT +
 RANSAC 与实际片段首帧配准，内点 68 / 166、单应近似恒等（四角位移均值 4.2px / 0.6px），
@@ -252,7 +256,8 @@ COCO 的失效模式与我们的训练集无关），逐帧命中七类信号。
 ```
 
 两个标注器都用 ES module，`file://` 下会被浏览器按 CORS 拦截（origin 为 `null`）导致白屏，
-所以必须经这个脚本走 http 打开，不要双击 html。加 `--selftest` 打开该标注器的浏览器自测页。
+所以必须经这个脚本走 http 打开，不要双击 html。加 `--selftest` 打开浏览器自测页（目前只有
+`mask` 有，`dot` 会直接报错而不是起服务让浏览器吃 404）。
 localhost 同时是 File System Access API 认可的安全上下文，Chrome / Edge 因此能把工程 json
 直接写回所选目录。
 
@@ -264,7 +269,8 @@ RGB 欧氏距离超阈判为前景，按时间顺序叠上去（后帧覆盖前�
 精准关键点框，产物 `outputs/keypoints/index.html` 双击即可看（图片懒加载，千级裁剪
 图不会卡死浏览器）。红框之外的留白来自 `--padding-ratio` 与 `--minimum-side` 算出的裁剪范围。
 
-数据集根用 `SWIM_UNDER_GRIDS_ROOT` 覆盖，产物写入 `outputs/labeling/`。
+`mask` / `dot` / `merge` 的数据集根用 `SWIM_UNDER_GRIDS_ROOT` 覆盖，产物写入 `outputs/labeling/`；
+`keypoint` 是另一个数据集，用 `SWIM_KEYPOINT_DATASET_ROOT`，产物写入 `outputs/keypoints/`。
 
 ## 性能取证
 
@@ -287,7 +293,8 @@ RGB 欧氏距离超阈判为前景，按时间顺序叠上去（后帧覆盖前�
 身份的原始格）、`results.jsonl`（48 格全过才生成）、`summary.csv`、`summary.md`、
 `manifest.json`（run/build/hash 身份与 `publishable` 标志；不足 15 秒恒为 `false`）。
 
-soak 按每条 interval 的真实 `elapsed_s` 累加时间轴，报告 RSS 与 Metal allocation 的每分钟
+soak 的结果在 `outputs/benchmarks/soaks/<run_id>/`（`latest` 只跟随矩阵，不跟随 soak）。
+它按每条 interval 的真实 `elapsed_s` 累加时间轴，报告 RSS 与 Metal allocation 的每分钟
 线性斜率，并拒绝 host copy、容量 high-water 越界、编码 callback/drain 错误，以及 warm-up 后
 连续五个区间低于 29 FPS。默认 RSS 上限 64 MiB/min、Metal allocation 32 MiB/min，可用
 `--max-rss-slope` / `--max-gpu-slope` 覆盖。
@@ -324,9 +331,15 @@ swim_fbx_demo/
 │   ├── {underwater,overhead}/models/    # 重资产，本地未入库
 │   └── configs/                 # 运行时 config（<line>_<backend>.conf 由脚本生成）
 ├── tests/{cpp,python,fixtures}/
+├── cmake/                       # 编译告警 / sanitizer 开关，与两个 CLI 契约测试
+├── requirements-win.txt         # Windows 核心 Python 依赖（install.bat 用）
+├── requirements-pose.txt        # 仅入水检测需要的 torch / ultralytics
 ├── build/                       # 构建树与生成的 .swasset（本机产物）
 └── outputs/                     # 全部渲染产物与指标（本机产物）
 ```
+
+`outputs/` 下一个目录对应一个包：`pool/`、`underwater/`、`overhead/`（三条相机线）、
+`water_entry/`、`labeling/`、`keypoints/`、`benchmarks/`，加一个共用的 `videos/`。
 
 `build/` 与 `outputs/` 都被 gitignore，不放手写源码或文档。
 
@@ -406,6 +419,8 @@ cd build/metal-release && ctest                               # CLI 契约与 Me
 - `suspected_false_positive` 这个标记不能用来解释坏结果：15/17 条的选人几何完全正常
   （位移 +322~+470px），说明那些片段里确实有人跳水，上游为何判为误触发在选人层面看不出来。
 - 默认外部数据集路径都是本机绝对路径。换机器后设置对应环境变量：
-  `SWIMMING_DATASET_DIR`（pool）、`SWIM_UNDER_GRIDS_ROOT`（水下快照/网格，也可用
-  `STITCH_GRID_DIR` 直接指到 grid 目录）、`WATER_ENTRY_DATASET_ROOT`（入水检测）。
+  `SWIMMING_DATASET_DIR`（pool 片段）、`SWIM_UNDER_GRIDS_ROOT`（水下快照与标注网格，也可用
+  `STITCH_GRID_DIR` 直接指到 grid 目录）、`WATER_ENTRY_DATASET_ROOT`（入水检测）、
+  `SWIM_KEYPOINT_DATASET_ROOT`（COCO-17 标注数据集）。输出根也可以搬走：
+  `SWIM_LABELING_OUTPUT_ROOT`、`WATER_ENTRY_OUTPUT_ROOT`。
 - `.venv/` 只保证当前 macOS / Python 3.10 组合；其他平台需自备兼容环境。

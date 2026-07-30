@@ -2,7 +2,7 @@
 
 ## 项目结构与模块组织
 
-本仓库把泳池 FBX 的平面网格与 UV 编译成 GPU 运行时资产，再用三个原生后端做实时拼接。实时核心是可移植 C++20，位于 `cpp/core/`（`swim_core`）；后端在 `cpp/backends/` 下按平台隔离：`metal/`（macOS，VideoToolbox + Metal）、`d3d11/`（Windows，Media Foundation + Direct3D 11）、`cudagl/`（Windows，NVDEC + OpenGL）。三者通过 `cpp/core/include/swim/core/backend.hpp` 的 `IBackend`/`ISource`/`IRenderer` 契约接入，并用 `BackendRegistry` 按名字自注册，不允许后端专有类型泄漏进 `cpp/core/`。
+本仓库把泳池 FBX 的平面网格与 UV 编译成 GPU 运行时资产，再用三个原生后端做实时拼接。实时核心是可移植 C++20，位于 `cpp/core/`（`swim_core`）；后端在 `cpp/backends/` 下按平台隔离：`metal/`（macOS，VideoToolbox + Metal）、`d3d11/`（Windows，Media Foundation + Direct3D 11）、`cudagl/`（Windows，NVDEC + OpenGL）。三者通过 `cpp/core/include/swim/core/backend.hpp` 的 `IBackend`/`ISource`/`IRenderer` 契约接入，由 `cpp/app/main.cpp` 显式调 `register_<backend>_backend()`（各自 `std::call_once`）注册进 `BackendRegistry`，运行时按 config 的 `backend=` 名字取。刻意不做静态初始化自注册：链接顺序决定的注册时机是最难查的一类 bug。不允许后端专有类型泄漏进 `cpp/core/`。
 
 仓库有**四条互不交叉的链路**，一个脚本一条，改哪条只看那一条：
 
@@ -13,9 +13,9 @@
 | 数据集标注 | `scripts/run_label.sh` | `python/labeling/`、`python/keypoints/` |
 | 性能取证 | `scripts/run_bench.sh` | `python/benchmarks/` |
 
-`scripts\run_win.bat` 是 Windows 双击入口，走第一条链路。每个脚本不带参数运行会打印自己的完整用法，说明只存在于脚本顶部一处（用法函数把那段注释打出来，不再复制）。新增脚本请延续「一条链路一个入口」的口径，不要再按平台或语言拆。
+`scripts\run_win.bat` 是 Windows 双击入口，走第一条链路——它与 `install.bat` 是两个例外：双击就要干活，所以不带参数即执行，用法写在顶部被 `goto` 跳过的说明区里。三个 `.sh` 入口不带参数或 `--help` 打印自己的用法，且说明只存在脚本顶部一处（用法函数把那段注释打出来，不再复制）；`run_bench.sh` 的选项清单是个例外，它带默认值太多，另用一段 heredoc。新增脚本请延续「一条链路一个入口」的口径，不要再按平台或语言拆。
 
-Python 侧一个包一件事：`common/` 是跨链路共用的路径 / 图像 IO / CSV / HTML 页面骨架，`fbx_tools/` 是**唯一** import `fbx` 的地方，其余四个包对应上表四条链路。`tests/python/test_layout.py` 把这些约束写成了断言——包清单、每个包必须有 docstring、`import fbx` 只允许出现在 `fbx_tools/`、除 `common/paths.py` 外任何模块都不许自己算仓库根。测试在 `tests/`（`cpp/`、`python/`、`fixtures/`），运行时 config 在 `inputs/configs/`，`build/` 与 `outputs/` 是本机产物，不放手写源码或文档。
+Python 侧一个包一件事：`common/` 是跨链路共用的路径 / 图像 IO / CSV / HTML 页面骨架，`fbx_tools/` 是**唯一** import `fbx` 的地方，其余五个包对应上表四条链路——`labeling` 与 `keypoints` 同属标注链路。`tests/python/test_layout.py` 把这些约束写成了断言——包清单、每个包必须有 docstring、`import fbx` 只允许出现在 `fbx_tools/`、除 `common/paths.py` 外任何模块都不许自己算仓库根。测试在 `tests/`（`cpp/`、`python/`、`fixtures/`），运行时 config 在 `inputs/configs/`，`build/` 与 `outputs/` 是本机产物，不放手写源码或文档。
 
 三条相机线共用一套拼接代码，**差异全部是 `python/stitch/profiles.py` 里的数据**（模型、相机 id、网格排序、每米像素、融合方式、时间对齐策略）。加第四条线应当只加一条 profile 记录；如果它需要一个新字段，那个字段本身就是需要先想清楚的东西。不要在 `python/stitch/` 的其他模块里按线路名分支。
 
@@ -37,7 +37,7 @@ scripts\install.bat check      :: 只体检，不改动任何东西
 cmake -S . -B build/win-d3d11 -G "Visual Studio 17 2022" -A x64 -DPython3_EXECUTABLE=.venv\Scripts\python.exe
 cmake --build build/win-d3d11 --config Release --target swim_realtime
 
-pwsh scripts/run_stitch.ps1 pool extract,asset,build,live -Backend cudagl
+pwsh scripts/run_stitch.ps1 pool extract,asset,build,live --backend cudagl
 scripts\run_win.bat under <采样目录>                     # 水下 16 路
 ```
 
@@ -126,6 +126,6 @@ Python 测试用 unittest：`.venv\Scripts\python.exe -m unittest discover -s te
 
 ## 安全与配置提示
 
-不要提交大型视频、`.swasset`、`third_party/` 预编译依赖、`build/` 或 `outputs/` 产物。以下都被 gitignore 但是运行必需，新机器靠 `install.bat` 补齐：`outputs/data/pool_mesh.json`（`CMakeLists.txt` 的硬依赖，缺了任何 target 都编不过）、`inputs/underwater/models/all.fbx` + `all.fbm/`、`third_party/{ffmpeg,glfw}`、`.venv`。
+不要提交大型视频、`.swasset`、`third_party/` 预编译依赖、`build/` 或 `outputs/` 产物。以下都被 gitignore 但是运行必需，新机器靠 `install.bat` 补齐：`outputs/pool/mesh.json`（`CMakeLists.txt` 的硬依赖，缺了任何 target 都编不过；用 `run_stitch.sh pool extract` 生成）、`inputs/underwater/models/all.fbx` + `all.fbm/`、`third_party/{ffmpeg,glfw}`、`.venv`。
 
 `inputs/configs/<line>_<backend>.conf` 是 `python.stitch` 每次按片段目录重新生成的，不要手工维护；手写的参考 config 只有 `macos_*.conf` 与 `windows_*.conf`。

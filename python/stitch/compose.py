@@ -99,7 +99,7 @@ def adaptive_ppm(meshes, source_height, target_width=640):
 def build_remap(mesh, canvas, tex_size, clip=False):
     """Inverse map (canvas pixel -> source pixel) plus a coverage mask.
 
-    `clip` is the whole difference between the two lines' seams. Off, every
+    `clip` is what separates pool's feather from the plane lines' seam. Off, every
     rasterised pixel counts as covered and cv2.remap border-reflects the
     out-of-range UVs, which paints a mirrored strip of the neighbour's edge right
     at each block's border. On, a pixel counts only when its source coordinate
@@ -211,9 +211,8 @@ def seam_weights(masks, blend_px):
 def blend_weights(masks, blend_px):
     """Per-lane weights: seam blend when `blend_px` is a number, else feather.
 
-    One switch instead of two call paths — compile_runtime_asset used to branch
-    on it twice, once for the mask and once for the weights, and they could
-    disagree."""
+    One switch instead of two call paths — the asset compiler used to branch on
+    it twice, once for the mask and once for the weights, and they could disagree."""
     if blend_px is None:
         return feather_weights(masks)
     return seam_weights(masks, blend_px)
