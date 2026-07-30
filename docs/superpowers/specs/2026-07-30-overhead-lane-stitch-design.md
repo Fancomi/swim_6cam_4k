@@ -122,6 +122,8 @@ class Profile:
     ppm: float                     # .swasset 画布口径；静图在 full_res=False 时也用它
     full_res: bool                 # 静图是否缩放回源图高度
     blend_px: float
+    clip_uv: bool                  # 排除 UV 落在源图外的像素
+    crop_bottom: str               # "auto" / "none" / "N"
     planes_only: bool              # all.fbx 需滤杂物；002.fbx 不需要
     sync: str                      # "manifest" / "none"
     source_size: tuple[int, int]   # (1280,720) / (3840,2160)
@@ -142,6 +144,8 @@ class Profile:
 | `ppm` | 240.0 | 170.0 |
 | `full_res` | True | False |
 | `blend_px` | 120.0 | 85.0 |
+| `clip_uv` | True | True |
+| `crop_bottom` | `"auto"` | `"none"` |
 | `planes_only` | True | False |
 | `sync` | `"manifest"` | `"none"` |
 | `source_size` | (1280, 720) | (3840, 2160) |
@@ -151,6 +155,10 @@ class Profile:
 
 `camera_ids` 顺序即 world-X 升序，与 `extract` 的排序、`compile_runtime_asset` 的
 按位置 `zip` 三处口径统一。
+
+`clip_uv` / `crop_bottom` 的两条取值都对齐 `run.py` 现有默认（`--no-clip-uv` 反向开关
+默认 True、`--crop-bottom auto`），overhead 只把 `crop_bottom` 改成 `"none"`（理由见
+「几何参数依据」）。
 
 两个易混点在 profile 里被显式区分，而不是像现在那样散在 shell 变量与 CLI 默认值里：
 
@@ -188,14 +196,22 @@ python/stitch/
 `camera_ids`，`extract` 已按 world-X 排好序，按位置 `zip` 并校验数量即可。少一个正则、
 少一类「贴图改名就崩」的失败模式。
 
-**`run.py` 顶部 6 个模块常量**（`run.py:27-32`）：`MESH_JSON`/`ASSET`/`CAMERA_IDS`/
-`ASSET_PPM`/`ASSET_BLEND_PX`，以及 `write_config` 里的 `*_{camera}.ts` glob
-（`run.py:149`）。全部改为从 profile 取。
+**`run.py` 顶部模块常量**（`run.py:29-38`）：`MESH_JSON`/`ASSET`/`ASSET_STAMP`/
+`CAMERA_IDS`/`ASSET_PPM`/`ASSET_BLEND_PX`/`SOURCE_SIZE`，以及 `write_config` 里的
+`*_{camera}.ts` glob（`run.py:200`）与 `lane_start_offsets` 里的 `CAMERA_IDS` 过滤
+（`run.py:175`）。全部改为从 profile 取。
+
+`ASSET_STAMP` 机制保留 —— 它记录 `.swasset` 是用哪组 shaping 参数烘的，改了参数即便
+mesh JSON 未动也会重编。profile 名一并进 stamp 字符串，避免两条线路的 stamp 互相误判。
 
 **`render_video` 无条件要求 manifest**（`render_video.py:60-69`）：改为按
 `profile.sync` 分支。`sync="manifest"` 保持现有行为，包括缺 manifest 即 fatal —— 那条
 线路的各路偏差达数秒，静默退化是错的。`sync="none"` 各路从第 0 帧读，不读 manifest。
 CLI `--no-align` 保留为显式覆盖开关。
+
+实时侧的 `lane_start_offsets`（`run.py:159-189`）已经是软失败：`load_manifest` 抛
+`SystemExit` 时它打印一行并返回 `{}`。`sync="none"` 时直接跳过调用，连那行提示也不打 ——
+「这条线路本来就没有 manifest」不该每次都报告成异常。
 
 ### 步骤 dispatcher
 
