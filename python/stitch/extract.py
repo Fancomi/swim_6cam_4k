@@ -1,7 +1,7 @@
-"""Extract underwater FBX into pool-compatible mesh JSON, ordered left-to-right.
+"""Extract a stitch FBX into pool-compatible mesh JSON, ordered left-to-right.
 
 Reuses python.assets.extract_fbx for all FBX/UV/geometry logic; this module only
-adds underwater-specific defaults, left-to-right ordering, correct texture
+adds stitch-specific defaults, left-to-right ordering, correct texture
 selection for multi-material meshes, and an isolated CLI.
 """
 import argparse

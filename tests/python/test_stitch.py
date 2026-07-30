@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 
-from python.underwater.extract import sort_meshes_by_world_x, select_pool_planes
+from python.stitch.extract import sort_meshes_by_world_x, select_pool_planes
 
 try:
     import fbx  # noqa: F401
@@ -94,7 +94,7 @@ class VideoAlignmentTest(unittest.TestCase):
     """Time alignment must come from the manifest wall clocks, not file order."""
 
     def test_camera_of_parses_texture_basename(self):
-        from python.underwater.render_video import camera_of
+        from python.stitch.render_video import camera_of
 
         self.assertEqual(camera_of("underA7-grid.png"), "underA7")
         self.assertEqual(camera_of("underA16-grid.png"), "underA16")
@@ -102,7 +102,7 @@ class VideoAlignmentTest(unittest.TestCase):
         self.assertIsNone(camera_of(None))
 
     def test_start_frames_follow_playback_formula(self):
-        from python.underwater.render_video import alignment_plan
+        from python.stitch.render_video import alignment_plan
 
         align_start, align_end, fps = 1_000_000, 1_030_000, 30.0
         cams = {
@@ -121,7 +121,7 @@ class VideoAlignmentTest(unittest.TestCase):
         self.assertFalse(any(r["late_start"] for r in report))
 
     def test_flags_camera_starting_after_align_start(self):
-        from python.underwater.render_video import alignment_plan
+        from python.stitch.render_video import alignment_plan
 
         align_start, align_end, fps = 1_000_000, 1_030_000, 30.0
         cams = {"underA1": {"keyframe_ms": align_start + 500,
@@ -133,7 +133,7 @@ class VideoAlignmentTest(unittest.TestCase):
         self.assertTrue(report[0]["late_start"])
 
     def test_reports_short_tail_against_align_end(self):
-        from python.underwater.render_video import alignment_plan
+        from python.stitch.render_video import alignment_plan
 
         align_start, align_end, fps = 1_000_000, 1_030_000, 30.0
         cams = {"underA1": {"keyframe_ms": align_start,
@@ -146,7 +146,7 @@ class VideoAlignmentTest(unittest.TestCase):
     def test_manifest_without_align_window_is_fatal(self):
         import json
         import tempfile
-        from python.underwater.render_video import load_manifest
+        from python.stitch.render_video import load_manifest
 
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
@@ -156,7 +156,7 @@ class VideoAlignmentTest(unittest.TestCase):
 
     def test_missing_manifest_is_fatal(self):
         import tempfile
-        from python.underwater.render_video import load_manifest
+        from python.stitch.render_video import load_manifest
 
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(SystemExit):
@@ -165,7 +165,7 @@ class VideoAlignmentTest(unittest.TestCase):
     def test_falls_back_to_first_decodable_anchor(self):
         import json
         import tempfile
-        from python.underwater.render_video import load_manifest
+        from python.stitch.render_video import load_manifest
 
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
@@ -186,7 +186,7 @@ class ExtractIntegrationTest(unittest.TestCase):
     @unittest.skipUnless(MODEL_01D.is_file(), "01d.fbx not present")
     def test_extracts_two_ordered_meshes(self):
         import tempfile
-        from python.underwater.extract import extract_to_json
+        from python.stitch.extract import extract_to_json
 
         with tempfile.TemporaryDirectory() as td:
             dst = Path(td) / "01d_mesh.json"
@@ -211,12 +211,12 @@ if __name__ == "__main__":
 
 class RenderStillTest(unittest.TestCase):
     def test_resolve_ppm_targets_width(self):
-        from python.underwater.render import resolve_ppm
+        from python.stitch.render import resolve_ppm
         # world X span 2.0 -> ppm ~ 320 for 640 target
         self.assertAlmostEqual(resolve_ppm(-1.0, 1.0, 640), 320.0, places=3)
 
     def test_resolve_ppm_degenerate_span_falls_back(self):
-        from python.underwater.render import resolve_ppm
+        from python.stitch.render import resolve_ppm
         self.assertEqual(resolve_ppm(0.0, 0.0, 640), 100.0)
 
     def test_render_writes_still_and_grid(self):
@@ -224,7 +224,7 @@ class RenderStillTest(unittest.TestCase):
         import tempfile
         import cv2
         import numpy as np
-        from python.underwater.render import render_stills
+        from python.stitch.render import render_stills
 
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
@@ -267,7 +267,7 @@ class RenderStillTest(unittest.TestCase):
         import tempfile
         import cv2
         import numpy as np
-        from python.underwater.render import render_stills
+        from python.stitch.render import render_stills
 
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
@@ -301,7 +301,7 @@ class RenderStillTest(unittest.TestCase):
 
     def test_crop_bottom_row_rescales_to_source_height(self):
         import numpy as np
-        from python.underwater.render import crop_bottom_and_scale
+        from python.stitch.render import crop_bottom_and_scale
 
         image = np.zeros((100, 200, 3), np.uint8)
         image[:80] = (10, 20, 30)
@@ -314,7 +314,7 @@ class RenderStillTest(unittest.TestCase):
 
     def test_bottom_dirty_rows_counts_ragged_tail(self):
         import numpy as np
-        from python.underwater.render import bottom_dirty_rows
+        from python.stitch.render import bottom_dirty_rows
 
         # 10 rows: rows 0..6 fully covered (width 5), rows 7..9 ragged
         cov = np.zeros((10, 5), np.uint8)
@@ -326,7 +326,7 @@ class RenderStillTest(unittest.TestCase):
 
     def test_bottom_dirty_rows_zero_when_clean(self):
         import numpy as np
-        from python.underwater.render import bottom_dirty_rows
+        from python.stitch.render import bottom_dirty_rows
 
         cov = np.ones((8, 5), np.uint8)
         self.assertEqual(bottom_dirty_rows(cov), 0)
@@ -336,7 +336,7 @@ class RenderStillTest(unittest.TestCase):
         import tempfile
         import cv2
         import numpy as np
-        from python.underwater.render import render_stills
+        from python.stitch.render import render_stills
 
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
@@ -372,7 +372,7 @@ class RenderStillTest(unittest.TestCase):
     def test_render_rejects_json_without_meshes(self):
         import json
         import tempfile
-        from python.underwater.render import render_stills
+        from python.stitch.render import render_stills
 
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
@@ -389,7 +389,7 @@ class OneClickRunnerTest(unittest.TestCase):
     config whose lane order matches the compiled asset."""
 
     def test_platform_selects_backend_build_dir_and_executable(self):
-        import python.underwater.run as runner
+        import python.stitch.run as runner
 
         original = runner.platform.system
         try:
@@ -411,7 +411,7 @@ class OneClickRunnerTest(unittest.TestCase):
 
     def test_generated_config_declares_sixteen_lanes_right_to_left(self):
         import tempfile
-        import python.underwater.run as runner
+        import python.stitch.run as runner
 
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
@@ -429,7 +429,7 @@ class OneClickRunnerTest(unittest.TestCase):
 
     def test_missing_clip_is_reported_not_silently_skipped(self):
         import tempfile
-        import python.underwater.run as runner
+        import python.stitch.run as runner
 
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
@@ -440,7 +440,7 @@ class OneClickRunnerTest(unittest.TestCase):
 
     def test_newer_than_treats_missing_target_as_stale(self):
         import tempfile
-        import python.underwater.run as runner
+        import python.stitch.run as runner
 
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
@@ -545,7 +545,7 @@ class AssetShapingTest(unittest.TestCase):
 
 class LaneAlignmentConfigTest(unittest.TestCase):
     def test_start_offsets_come_from_the_manifest_skew(self):
-        import python.underwater.run as runner
+        import python.stitch.run as runner
 
         # alignment_plan reports skew per lane; run.py turns each into ms and
         # clamps lanes that begin after align_start to zero.
@@ -567,7 +567,7 @@ class LaneAlignmentConfigTest(unittest.TestCase):
 
     def test_config_omits_start_ms_when_alignment_is_disabled(self):
         import tempfile
-        import python.underwater.run as runner
+        import python.stitch.run as runner
 
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)

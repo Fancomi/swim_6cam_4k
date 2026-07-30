@@ -162,13 +162,13 @@ UW_DATASET="${ANNOTATION_PREVIEW_DATASET_ROOT:-/Users/penghaotian/Downloads/DATA
 UW_GRID_DIR="${UW_GRID_DIR:-$UW_DATASET/annotation-grids}"
 
 cmd_uw_extract() {
-  "$PY" -m python.underwater.extract \
+  "$PY" -m python.stitch.extract \
     "$UW_MODELS/all.fbx" "$UW_OUT/all_mesh.json" \
     --tex-dir "$UW_MODELS/all.fbm" --planes-only "$@"
 }
 
 cmd_uw_tex() {
-  "$PY" -m python.underwater.export_real_tex "$@"
+  "$PY" -m python.stitch.export_real_tex "$@"
 }
 
 # Render one full-res stitch + fusion heatmap. $1 = blend-px (default 0).
@@ -179,7 +179,7 @@ cmd_uw_render() {
     echo "(set UW_GRID_DIR or ANNOTATION_PREVIEW_DATASET_ROOT)" >&2
     exit 1
   }
-  "$PY" -m python.underwater.render \
+  "$PY" -m python.stitch.render \
     --data "$UW_OUT/all_mesh.json" \
     --tex-dir "$UW_GRID_DIR" \
     --still "$UW_OUT/all_stitch_bp${bp}.png" \
@@ -191,7 +191,7 @@ cmd_uw_render() {
 cmd_uw_real() {
   local bp="${1:-0}"
   [[ -d "$UW_OUT/real_tex_all" ]] || cmd_uw_tex
-  "$PY" -m python.underwater.render \
+  "$PY" -m python.stitch.render \
     --data "$UW_OUT/all_mesh.json" \
     --tex-dir "$UW_OUT/real_tex_all" \
     --still "$UW_OUT/all_real_stitch_bp${bp}.png" \
@@ -208,7 +208,7 @@ cmd_uw_video() {
   local secs="${3:-}"
   local -a extra=()
   [[ -n "$secs" ]] && extra+=(--seconds "$secs")
-  "$PY" -m python.underwater.render_video "$vdir" \
+  "$PY" -m python.stitch.render_video "$vdir" \
     --data "$UW_OUT/all_mesh.json" \
     --out "$UW_OUT/all_stitch_bp${bp}.mp4" \
     --blend-px "$bp" ${extra[@]+"${extra[@]}"}

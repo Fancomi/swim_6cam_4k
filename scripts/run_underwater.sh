@@ -34,4 +34,4 @@ fi
 # 第一个位置参数是片段目录；其余原样转发。
 VIDEO_DIR="$1"
 shift
-exec "$PY" -m python.underwater.run --video-dir "$VIDEO_DIR" "$@"
+exec "$PY" -m python.stitch.run --video-dir "$VIDEO_DIR" "$@"

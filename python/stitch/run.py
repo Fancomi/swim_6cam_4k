@@ -7,9 +7,9 @@ to use. macOS gets Metal, Windows gets D3D11 (or CUDA/GL with --backend cudagl).
 Each step is skipped when its output is already newer than its inputs, so the
 common case (rerun after changing nothing) goes straight to the run.
 
-    python -m python.underwater.run --video-dir DIR            # full pipeline
-    python -m python.underwater.run --video-dir DIR --seconds 30 --encode
-    python -m python.underwater.run --steps asset,run          # skip extraction
+    python -m python.stitch.run --video-dir DIR            # full pipeline
+    python -m python.stitch.run --video-dir DIR --seconds 30 --encode
+    python -m python.stitch.run --steps asset,run          # skip extraction
 """
 import argparse
 import os
@@ -19,7 +19,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from python.underwater import render_video as RV
+from python.stitch import render_video as RV
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 OUTPUTS = PROJECT_ROOT / "outputs" / "underwater"
@@ -102,7 +102,7 @@ def step_extract(args):
     if newer_than(MESH_JSON, fbx) and not args.force:
         print(f"mesh up to date: {MESH_JSON}")
         return
-    run([python_bin(), "-m", "python.underwater.extract", fbx, MESH_JSON,
+    run([python_bin(), "-m", "python.stitch.extract", fbx, MESH_JSON,
          "--tex-dir", tex_dir, "--planes-only"])
 
 
@@ -296,7 +296,7 @@ def parse_args(argv=None):
     shaping = parser.add_argument_group(
         "composite shaping",
         "These control how the .swasset is baked, so the realtime stitch "
-        "matches what python.underwater.render_video produces offline. "
+        "matches what python.stitch.render_video produces offline. "
         "Changing any of them recompiles the asset.")
     shaping.add_argument("--asset-ppm", type=float, default=ASSET_PPM,
                          help="output pixels per metre (default: %(default)s)")

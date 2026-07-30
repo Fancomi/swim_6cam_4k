@@ -37,7 +37,7 @@ function Resolve-Python {
 }
 
 $python = Resolve-Python
-$forward = @('-m', 'python.underwater.run', '--video-dir', $VideoDir,
+$forward = @('-m', 'python.stitch.run', '--video-dir', $VideoDir,
              '--seconds', $Seconds)
 if ($Fps -gt 0)      { $forward += @('--fps', $Fps) }
 if ($Encode)         { $forward += '--encode' }

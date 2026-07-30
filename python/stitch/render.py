@@ -1,8 +1,8 @@
-"""Render the underwater stitch from a mesh JSON: still + grid diagnostic.
+"""Render a plane stitch from a mesh JSON: still + grid diagnostic.
 
 Reuses python.validation.reference_renderer for all remap/feather/composite/grid
-logic; this module only adds underwater defaults, width-adaptive ppm, and an
-isolated CLI that writes into outputs/underwater/.
+logic; this module only adds the stitch defaults, width-adaptive ppm, and an
+isolated CLI.
 """
 import argparse
 import json

@@ -1,7 +1,7 @@
 """Stitch the 16 underwater planes from live .ts video into one panorama mp4.
 
 Reuses the geometry + seam blending already validated for the still stitch
-(python.underwater.render): same mesh JSON, same build_remap_clipped, same
+(python.stitch.render): same mesh JSON, same build_remap_clipped, same
 seam_weights, same auto bottom-crop. The only difference from render.py is the
 texture source — instead of one static image per plane, each plane is driven by
 its matching camera clip, and composited frame-by-frame into an h264 mp4 via
@@ -35,7 +35,7 @@ import cv2
 import numpy as np
 
 from python.validation import reference_renderer as rr
-from python.underwater import render as R
+from python.stitch import render as R
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"

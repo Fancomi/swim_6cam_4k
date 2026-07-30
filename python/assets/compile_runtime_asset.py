@@ -10,7 +10,7 @@ from typing import Sequence
 import numpy as np
 
 from python.assets.asset_format import CAMERA, HEADER, INDEX, MAGIC, VERSION, VERTEX
-from python.underwater.render import (
+from python.stitch.render import (
     bottom_dirty_rows,
     build_remap_clipped,
     seam_weights,
@@ -269,7 +269,7 @@ def main() -> None:
         type=float,
         default=None,
         help="bake hard vertical seams with this transition width instead of the "
-        "pool's distance feather; matches python.underwater.render --blend-px",
+        "pool's distance feather; matches python.stitch.render --blend-px",
     )
     parser.add_argument(
         "--clip-uv",
