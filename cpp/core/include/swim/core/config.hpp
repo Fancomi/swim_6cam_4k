@@ -65,6 +65,9 @@ struct AppConfig {
   // file's natural end", which only stays in sync for equal-length clips.
   bool loop_sources{false};
   std::chrono::milliseconds loop_period{0};
+  // End the run cleanly when a clip runs out, instead of reporting the lane as
+  // failed. Only meaningful with loop_sources off.
+  bool stop_at_eof{false};
 
   std::string backend{"metal"};
   RunMode mode{RunMode::realtime};

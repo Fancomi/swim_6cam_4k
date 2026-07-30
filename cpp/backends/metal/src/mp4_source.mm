@@ -102,7 +102,7 @@ class Mp4VideoToolboxSource::Impl final {
        std::chrono::milliseconds run_duration,
        std::uint32_t ticket_capacity, std::uint32_t surface_capacity,
        swim::core::RunLifecycle* lifecycle, bool loop_sources,
-       std::chrono::milliseconds loop_period)
+       std::chrono::milliseconds loop_period, bool stop_at_eof)
       : context_(std::move(context)),
         source_(std::move(source)),
         camera_index_(camera_index),
@@ -114,7 +114,8 @@ class Mp4VideoToolboxSource::Impl final {
         surface_capacity_(surface_capacity),
         lifecycle_(lifecycle),
         loop_sources_(loop_sources),
-        loop_period_(loop_period) {
+        loop_period_(loop_period),
+        stop_at_eof_(stop_at_eof) {
     if (context_ == nullptr || context_->device == nil ||
         context_->texture_cache == nullptr) {
       throw std::invalid_argument("MP4 source requires a valid Metal context");
@@ -579,6 +580,14 @@ class Mp4VideoToolboxSource::Impl final {
           // run": restart rather than substituting the black replacement frame.
           return ReaderOutcome::loop_period_reached;
         }
+        if (stop_at_eof_) {
+          // The clips are the whole run: finishing them is success, so end the
+          // run instead of reporting this lane as failed.
+          if (lifecycle_ != nullptr) {
+            lifecycle_->request_stop();
+          }
+          return ReaderOutcome::stopped_or_duration_reached;
+        }
         if (lifecycle_ != nullptr) {
           const auto disposition = lifecycle_->classify_eof(finished_at);
           if (disposition == swim::core::SourceEofDisposition::normal_after_stop ||
@@ -689,6 +698,7 @@ class Mp4VideoToolboxSource::Impl final {
   // Common content period every lane restarts on. Zero falls back to each
   // file's own end, which only stays in sync for equal-length clips.
   const std::chrono::milliseconds loop_period_{0};
+  const bool stop_at_eof_{false};
   // Wall time the current pass began, so pacing stays continuous across a loop
   // instead of restarting the clock and emitting a burst.
   std::chrono::steady_clock::time_point pass_wall_origin_{};
@@ -719,11 +729,11 @@ Mp4VideoToolboxSource::Mp4VideoToolboxSource(
     swim::core::RuntimeCounters& counters, swim::core::RunMode mode,
     std::chrono::milliseconds run_duration, std::uint32_t ticket_capacity,
     std::uint32_t surface_capacity, swim::core::RunLifecycle* lifecycle,
-    bool loop_sources, std::chrono::milliseconds loop_period)
+    bool loop_sources, std::chrono::milliseconds loop_period, bool stop_at_eof)
     : impl_(std::make_unique<Impl>(
           std::move(context), std::move(source), camera_index, mailbox,
           counters, mode, run_duration, ticket_capacity, surface_capacity,
-          lifecycle, loop_sources, loop_period)) {}
+          lifecycle, loop_sources, loop_period, stop_at_eof)) {}
 
 Mp4VideoToolboxSource::~Mp4VideoToolboxSource() = default;
 

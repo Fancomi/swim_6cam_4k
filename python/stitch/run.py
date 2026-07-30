@@ -216,7 +216,7 @@ def loop_period_ms(video_dir, offsets):
 
 
 def write_config(path, video_dir, backend, encode_path, align=True,
-                 loop=False):
+                 loop=True):
     """Emit a runtime config naming the 16 lanes in left-to-right order.
 
     Written fresh each run so the clip directory and backend always match what
@@ -245,6 +245,7 @@ def write_config(path, video_dir, backend, encode_path, align=True,
         if offsets.get(camera):
             lines.append(f"source.{camera}.start_ms={offsets[camera]}")
     lines += [f"loop_sources={'true' if loop else 'false'}",
+              f"stop_at_eof={'false' if loop else 'true'}",
               f"loop_period_ms={period}",
               "fps_num=30000", "fps_den=1001",
               "preview=true", "encode=false", "diagnostic_replacement=false",
@@ -345,11 +346,10 @@ def parse_args(argv=None):
                          metavar="auto|none|N",
                          help="drop bottom rows the shorter planes leave "
                               "uncovered (default: %(default)s)")
-    shaping.add_argument("--loop", action="store_true",
-                         help="restart each clip when it runs out instead of "
-                              "showing the black replacement frame; every lane "
-                              "wraps on the shortest usable span so they stay "
-                              "in sync")
+    shaping.add_argument("--no-loop", dest="loop", action="store_false",
+                         default=True,
+                         help="stop when the clips run out instead of "
+                              "restarting them")
     shaping.add_argument("--no-align", dest="align", action="store_false",
                          default=True,
                          help="ignore the manifest wall clocks and read every "

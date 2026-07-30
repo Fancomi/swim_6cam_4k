@@ -633,3 +633,10 @@ TEST_CASE(applies_loop_cli_overrides) {
   CHECK(config.loop_sources);
   CHECK_EQ(config.loop_period, 5000ms);
 }
+
+TEST_CASE(loads_stop_at_eof) {
+  const auto config = swim::core::load_config(fixture("underwater_loop.conf"));
+  CHECK(!config.stop_at_eof);
+  const std::array arguments{"--stop-at-eof=true"sv};
+  CHECK(swim::core::apply_cli_overrides(AppConfig{}, arguments).stop_at_eof);
+}

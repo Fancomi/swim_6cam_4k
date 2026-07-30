@@ -33,7 +33,9 @@ class Mp4VideoToolboxSource final {
       // is the shared content period every lane wraps on; zero uses this
       // file's own end, which only stays in sync for equal-length clips.
       bool loop_sources = false,
-      std::chrono::milliseconds loop_period = std::chrono::milliseconds{0});
+      std::chrono::milliseconds loop_period = std::chrono::milliseconds{0},
+      // End the run when the clip runs out rather than failing the lane.
+      bool stop_at_eof = false);
   ~Mp4VideoToolboxSource();
 
   Mp4VideoToolboxSource(const Mp4VideoToolboxSource&) = delete;

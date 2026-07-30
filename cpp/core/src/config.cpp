@@ -319,6 +319,8 @@ AppConfig load_config(const std::filesystem::path& path) {
     } else if (key == "loop_sources") {
       config.loop_sources =
           parse_config_boolean(path, line_number, key, value);
+    } else if (key == "stop_at_eof") {
+      config.stop_at_eof = parse_config_boolean(path, line_number, key, value);
     } else if (key == "loop_period_ms") {
       config.loop_period = std::chrono::milliseconds{
           parse_config_unsigned(path, line_number, key, value)};
@@ -402,6 +404,8 @@ AppConfig apply_cli_overrides(
       config.diagnostic_replacement = parse_boolean(value, name);
     } else if (name == "--loop-sources") {
       config.loop_sources = parse_boolean(value, name);
+    } else if (name == "--stop-at-eof") {
+      config.stop_at_eof = parse_boolean(value, name);
     } else if (name == "--loop-period-ms") {
       config.loop_period =
           std::chrono::milliseconds{parse_unsigned(value, name)};
