@@ -3,6 +3,7 @@
 // 一笔 = 按下点到松开点的线段 + 两端半径 r 的圆（胶囊）。合成时只取被 mask 覆盖的像素。
 // 保存为单个工程 json，供 python 端 merge_overhead 读取。
 // 纯几何与命名解析放在 geometry.js，绘制放在 draw.js，两者都能被自测页直接导入。
+// 视图变换、目录选取、保存下载在 ../labeler_core.js，与 dot 标注器共用。
 import {
   capsuleArea,
   groupByCamera,
@@ -10,9 +11,13 @@ import {
   sortCameras,
 } from './geometry.js';
 import { drawCursorGhost, drawPreview, drawStrokes } from './draw.js';
+import {
+  clampView, eventToImage, fileOf, fitCanvas as fitCanvasTo, pickRoot, readJson,
+  resetView as resetViewOf, scaleOf, toImage as toImageOf,
+  toScreen as toScreenOf, writeJson, zoomAt,
+} from '../labeler_core.js';
 
 const $ = (id) => document.getElementById(id);
-const IMG_RE = /\.(jpe?g|png|bmp|webp)$/i;
 const PROJECT_FILE = 'mask_label_project.json';
 const SCHEMA = 'mask-label/project-v1';
 
@@ -35,34 +40,15 @@ const S = {
   zoom: 1, cx: 0, cy: 0,
 };
 
-// ---------- 视图变换 ----------
-function fitScale() { return Math.min(cv.width / S.imgW, cv.height / S.imgH); }
-function scale() { return fitScale() * S.zoom; }
-function toScreen(x, y) {
-  const s = scale();
-  return [cv.width / 2 + (x - S.cx) * s, cv.height / 2 + (y - S.cy) * s];
-}
-function toImage(sx, sy) {
-  const s = scale();
-  return [S.cx + (sx - cv.width / 2) / s, S.cy + (sy - cv.height / 2) / s];
-}
-function resetView() { S.zoom = 1; S.cx = S.imgW / 2; S.cy = S.imgH / 2; }
-function clampView() {
-  const s = scale();
-  const halfW = cv.width / 2 / s, halfH = cv.height / 2 / s;
-  S.cx = Math.max(-halfW + 20, Math.min(S.imgW + halfW - 20, S.cx));
-  S.cy = Math.max(-halfH + 20, Math.min(S.imgH + halfH - 20, S.cy));
-}
-function evToImage(ev) {
-  const r = cv.getBoundingClientRect();
-  return toImage(ev.clientX - r.left, ev.clientY - r.top);
-}
+// ---------- 视图变换（core 的薄包装，省掉每处传 cv/S） ----------
+const scale = () => scaleOf(cv, S);
+const toScreen = (x, y) => toScreenOf(cv, S, x, y);
+const toImage = (sx, sy) => toImageOf(cv, S, sx, sy);
+const resetView = () => resetViewOf(S);
+const evToImage = (ev) => eventToImage(cv, S, ev);
 
 // ---------- 渲染 ----------
-function fitCanvas() {
-  const st = $('stage');
-  cv.width = st.clientWidth; cv.height = st.clientHeight;
-}
+function fitCanvas() { fitCanvasTo(cv, $('stage')); }
 
 function render() {
   ctx.clearRect(0, 0, cv.width, cv.height);
@@ -129,48 +115,13 @@ function setStatus(t) { $('status').textContent = t; }
 function markDirty() { S.dirty = true; }
 
 // ---------- 载入 snapshots 目录 ----------
-const fsSupported = () => 'showDirectoryPicker' in window;
-
-async function pickRoot() {
-  if (fsSupported()) {
-    const handle = await window.showDirectoryPicker();
-    S.rootHandle = handle;
-    const items = [];
-    await walkDir(handle, '', items);
-    return items;
-  }
-  return await pickViaInput();
-}
-
-async function walkDir(dirHandle, prefix, out) {
-  for await (const [name, h] of dirHandle.entries()) {
-    const rel = prefix ? `${prefix}/${name}` : name;
-    if (h.kind === 'directory') await walkDir(h, rel, out);
-    else if (IMG_RE.test(name)) out.push({ name, relPath: rel, fileHandle: h, file: null });
-  }
-}
-
-function pickViaInput() {
-  return new Promise((resolve, reject) => {
-    const inp = document.createElement('input');
-    inp.type = 'file'; inp.webkitdirectory = true; inp.multiple = true;
-    inp.addEventListener('change', () => {
-      resolve([...inp.files].filter((f) => IMG_RE.test(f.name)).map((f) => ({
-        name: f.name,
-        relPath: f.webkitRelativePath || f.name,
-        file: f,
-        fileHandle: null,
-      })));
-    });
-    inp.addEventListener('cancel', () => reject({ name: 'AbortError' }));
-    inp.click();
-  });
-}
-
 async function openRoot() {
   let items;
-  try { items = await pickRoot(); }
-  catch (e) { if (e?.name !== 'AbortError') setStatus(String(e?.message || e)); return; }
+  try {
+    const picked = await pickRoot();
+    items = picked.items;
+    S.rootHandle = picked.rootHandle;
+  } catch (e) { if (e?.name !== 'AbortError') setStatus(String(e?.message || e)); return; }
   const by = groupByCamera(items);
   if (!by.size) { setStatus('目录里没找到 …__<相机>.jpg 形式的图像'); return; }
 
@@ -205,11 +156,6 @@ function stashCurrent() {
   if (S.idx >= 0 && S.frames[S.idx]) {
     S.saved[S.frames[S.idx].relPath] = S.strokes.map((s) => ({ ...s }));
   }
-}
-
-async function fileOf(item) {
-  if (item.file) return item.file;
-  return await item.fileHandle.getFile();
 }
 
 async function loadFrame(i) {
@@ -257,49 +203,30 @@ function projectDoc() {
 
 async function save() {
   const doc = projectDoc();
-  const text = JSON.stringify(doc, null, 2);
   const n = Object.values(doc.cameras).reduce((a, f) => a + f.length, 0);
-  if (S.rootHandle) {
-    try {
-      const fh = await S.rootHandle.getFileHandle(PROJECT_FILE, { create: true });
-      const w = await fh.createWritable();
-      await w.write(text); await w.close();
-      S.dirty = false;
-      $('saveinfo').textContent = `已写回 ${PROJECT_FILE}（${n} 个已标帧）`;
-      setStatus(`已保存 ${PROJECT_FILE}`);
-      syncUI();
-      return;
-    } catch (e) { setStatus(`⚠ 原地保存失败(${e?.name})，改为下载`); }
-  }
-  download(text, PROJECT_FILE);
+  const how = await writeJson(S.rootHandle, PROJECT_FILE,
+                              JSON.stringify(doc, null, 2),
+                              (e) => setStatus(`⚠ 原地保存失败(${e?.name})，改为下载`));
   S.dirty = false;
-  $('saveinfo').textContent = `已下载 ${PROJECT_FILE}（${n} 个已标帧）`;
+  const verb = how === 'wrote' ? '已写回' : '已下载';
+  $('saveinfo').textContent = `${verb} ${PROJECT_FILE}（${n} 个已标帧）`;
+  if (how === 'wrote') setStatus(`已保存 ${PROJECT_FILE}`);
   syncUI();
 }
 
 async function tryLoadProjectFile() {
-  if (!S.rootHandle) return;
-  try {
-    const fh = await S.rootHandle.getFileHandle(PROJECT_FILE);
-    const obj = JSON.parse(await (await fh.getFile()).text());
-    if (obj.schema !== SCHEMA) return;
-    let n = 0;
-    for (const frames of Object.values(obj.cameras || {})) {
-      for (const f of frames) {
-        if (!f.image) continue;
-        S.saved[f.image] = (f.strokes || []).map((s) => ({ ...s }));
-        n++;
-      }
+  const doc = await readJson(S.rootHandle, PROJECT_FILE, SCHEMA);
+  if (!doc) return;
+  let n = 0;
+  for (const frames of Object.values(doc.cameras || {})) {
+    for (const f of frames) {
+      if (!f.image) continue;
+      S.saved[f.image] = (f.strokes || []).map((s) => ({ ...s }));
+      n++;
     }
-    $('saveinfo').textContent = `已载入 ${PROJECT_FILE}（${n} 个已标帧）`;
-    setStatus(`已载入既有工程 ${PROJECT_FILE}，可续标`);
-  } catch { /* 无工程文件 */ }
-}
-
-function download(text, name) {
-  const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
-  const a = document.createElement('a'); a.href = url; a.download = name; a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  $('saveinfo').textContent = `已载入 ${PROJECT_FILE}（${n} 个已标帧）`;
+  setStatus(`已载入既有工程 ${PROJECT_FILE}，可续标`);
 }
 
 // ---------- 鼠标交互 ----------
@@ -333,7 +260,7 @@ cv.addEventListener('pointermove', (ev) => {
     const s = scale();
     S.cx = pan.cx - (ev.clientX - pan.x) / s;
     S.cy = pan.cy - (ev.clientY - pan.y) / s;
-    clampView(); render(); return;
+    clampView(cv, S); render(); return;
   }
   if (drawing) { drawing.x2 = ix; drawing.y2 = iy; render(); return; }
   render();
@@ -354,14 +281,8 @@ cv.addEventListener('contextmenu', (ev) => ev.preventDefault());
 $('stage').addEventListener('wheel', (ev) => {
   if (!S.bitmap) return;
   ev.preventDefault();
-  const r = cv.getBoundingClientRect();
-  const sx = ev.clientX - r.left, sy = ev.clientY - r.top;
-  const [ax, ay] = toImage(sx, sy);
-  S.zoom = Math.max(1, Math.min(20, S.zoom * Math.exp(-ev.deltaY * 0.0015)));
-  const s = scale();
-  S.cx = ax - (sx - cv.width / 2) / s;
-  S.cy = ay - (sy - cv.height / 2) / s;
-  clampView(); refresh();
+  zoomAt(cv, S, ev);
+  refresh();
 }, { passive: false });
 
 // ---------- 键盘 ----------

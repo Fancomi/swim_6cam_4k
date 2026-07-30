@@ -13,6 +13,9 @@ import {
   sortCameras, groupByCamera,
 } from './geometry.js';
 import { capsulePath, drawStrokes, drawPreview, drawCursorGhost } from './draw.js';
+import {
+  clampView, resetView, scaleOf, toImage, toScreen, zoomAt,
+} from '../labeler_core.js';
 
 const out = [];
 const ok = (name, cond, detail) =>
@@ -175,7 +178,53 @@ ok('sortCameras 把水下相机排到后面',
   ok('hitStrokeIndex 空白处返回 -1', hitStrokeIndex(strokes, 50, 40) === -1);
 }
 
-// 10) capsuleArea 的两个端点情形
+// 10) 共用的视图变换：两个标注器都靠它把图像坐标与屏幕坐标对上
+{
+  // 480x320 画布装 960x320 的图 -> fit 缩放 0.5，两侧留黑边
+  const state = { imgW: 960, imgH: 320, zoom: 1, cx: 480, cy: 160 };
+  ok('scaleOf 取宽高比中较小的那个', Math.abs(scaleOf(cv, state) - 0.5) < 1e-9,
+     `got ${scaleOf(cv, state)}`);
+
+  const centre = toScreen(cv, state, 480, 160);
+  ok('toScreen 把视口中心映到画布中心',
+     Math.abs(centre[0] - 240) < 1e-9 && Math.abs(centre[1] - 160) < 1e-9,
+     `got ${centre}`);
+
+  // 往返必须精确，否则点下去的位置与画出来的位置会差几个像素
+  let worst = 0;
+  for (const [x, y] of [[0, 0], [137, 42], [959, 319], [480.5, 160.5]]) {
+    const [sx, sy] = toScreen(cv, state, x, y);
+    const [bx, by] = toImage(cv, state, sx, sy);
+    worst = Math.max(worst, Math.abs(bx - x), Math.abs(by - y));
+  }
+  ok('toScreen/toImage 往返无漂移', worst < 1e-9, `worst ${worst}`);
+
+  resetView(state);
+  ok('resetView 回到 fit 且居中',
+     state.zoom === 1 && state.cx === 480 && state.cy === 160);
+
+  // 缩放要以光标为锚：锚点下的图像坐标缩放后仍在光标下
+  const zoomed = { ...state };
+  const ev = { clientX: 100, clientY: 80, deltaY: -240 };
+  const rect = cv.getBoundingClientRect();
+  const anchor = toImage(cv, zoomed, ev.clientX - rect.left, ev.clientY - rect.top);
+  zoomAt(cv, zoomed, ev);
+  const after = toScreen(cv, zoomed, anchor[0], anchor[1]);
+  ok('zoomAt 保持光标下的锚点不动',
+     zoomed.zoom > 1
+     && Math.abs(after[0] - (ev.clientX - rect.left)) < 1e-6
+     && Math.abs(after[1] - (ev.clientY - rect.top)) < 1e-6,
+     `zoom ${zoomed.zoom.toFixed(3)} anchor -> ${after}`);
+
+  // 平移到离谱的位置后必须被拉回，否则画面会整块移出视口且无从找回
+  const far = { imgW: 960, imgH: 320, zoom: 4, cx: -1e6, cy: 1e6 };
+  clampView(cv, far);
+  ok('clampView 不让图像整块移出视口',
+     far.cx > -1e5 && far.cy < 1e5 && Number.isFinite(far.cx),
+     `cx ${far.cx.toFixed(1)} cy ${far.cy.toFixed(1)}`);
+}
+
+// 11) capsuleArea 的两个端点情形
 ok('capsuleArea 退化为圆',
    Math.abs(capsuleArea({ x1: 0, y1: 0, x2: 0, y2: 0, r: 3 }) - Math.PI * 9) < 1e-9);
 ok('capsuleArea 随长度线性增长',

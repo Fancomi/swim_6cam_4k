@@ -3,6 +3,7 @@ import tempfile
 import threading
 import unittest
 import urllib.request
+from pathlib import Path
 from unittest.mock import patch
 
 from python.labeling import server as L
@@ -11,32 +12,31 @@ from python.labeling import server as L
 class ServeTest(unittest.TestCase):
     """两个标注器都是 ES module，必须走 http 才能被浏览器加载，所以这一层要真起服务。"""
 
-    def _serve(self, directory):
-        httpd, url = L.serve(directory, port=0, open_browser=False)
+    def _serve(self, directory, page="index.html"):
+        httpd, url = L.serve(directory, port=0, page=page, open_browser=False)
         self.addCleanup(httpd.server_close)
-        t = threading.Thread(target=httpd.handle_request, daemon=True)
-        t.start()
-        return httpd, url, t
+        thread = threading.Thread(target=httpd.handle_request, daemon=True)
+        thread.start()
+        return httpd, url, thread
 
     def test_serves_requested_page_over_http(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with open(os.path.join(tmp, "index.html"), "w") as f:
-                f.write("<h1>hi</h1>")
-            _httpd, url, t = self._serve(tmp)
+            Path(tmp, "index.html").write_text("<h1>hi</h1>")
+            _httpd, url, thread = self._serve(tmp)
             body = urllib.request.urlopen(url, timeout=5).read().decode()
-            t.join(timeout=5)
+            thread.join(timeout=5)
             self.assertIn("hi", body)
 
     def test_binds_loopback_only(self):
         with tempfile.TemporaryDirectory() as tmp:
-            httpd, url, _t = self._serve(tmp)
+            httpd, url, _thread = self._serve(tmp)
             self.assertEqual(httpd.server_address[0], "127.0.0.1")
             self.assertTrue(url.startswith("http://127.0.0.1:"), url)
 
     def test_url_names_the_requested_page(self):
         with tempfile.TemporaryDirectory() as tmp:
-            _httpd, url, _t = self._serve(tmp)
-            self.assertTrue(url.endswith("/index.html"), url)
+            _httpd, url, _thread = self._serve(tmp, page="mask_labeler/index.html")
+            self.assertTrue(url.endswith("/mask_labeler/index.html"), url)
 
 
 class MainTest(unittest.TestCase):
@@ -53,17 +53,20 @@ class MainTest(unittest.TestCase):
                 L.main(argv)
         return seen
 
-    def test_each_labeler_serves_its_own_directory(self):
+    def test_serves_the_package_root_so_the_shared_module_resolves(self):
+        # labeler_core.js sits one level above each labeler, and a static server
+        # never hands out anything above its root — so the root must be the
+        # package, with the labeler as a path prefix.
         for name, (dirname, _title, _hint) in L.LABELERS.items():
             with self.subTest(labeler=name):
                 seen = self._capture([name, "--no-browser"])
-                self.assertEqual(os.path.basename(seen["directory"]), dirname)
-                self.assertEqual(seen["page"], "index.html")
+                self.assertEqual(Path(seen["directory"]), L.HERE)
+                self.assertEqual(seen["page"], f"{dirname}/index.html")
                 self.assertFalse(seen["open_browser"])
 
     def test_selftest_flag_opens_the_selftest_page(self):
         seen = self._capture(["mask", "--selftest", "--no-browser"])
-        self.assertEqual(seen["page"], "selftest.html")
+        self.assertEqual(seen["page"], "mask_labeler/selftest.html")
 
     def test_rejects_an_unknown_labeler(self):
         with self.assertRaises(SystemExit):
@@ -71,46 +74,68 @@ class MainTest(unittest.TestCase):
 
     def test_reports_a_missing_page_instead_of_serving_a_404(self):
         # dot_labeler 没有自测页；应当直接报错，而不是起服务再让浏览器吃 404。
-        with self.assertRaises(SystemExit) as ctx:
+        with self.assertRaises(SystemExit) as caught:
             L.main(["dot", "--selftest", "--no-browser"])
-        self.assertIn("selftest.html", str(ctx.exception))
+        self.assertIn("selftest.html", str(caught.exception))
 
     def test_reports_a_busy_port_instead_of_tracebacking(self):
-        def boom(*_a, **_kw):
+        def boom(*_args, **_kwargs):
             raise OSError(48, "Address already in use")
 
         with patch.object(L, "serve", boom):
-            with self.assertRaises(SystemExit) as ctx:
+            with self.assertRaises(SystemExit) as caught:
                 L.main(["mask", "--port", "8765"])
-        self.assertIn("8765", str(ctx.exception))
+        self.assertIn("8765", str(caught.exception))
 
 
 class LabelerAssetsTest(unittest.TestCase):
     """每个标注器至少要有 index.html + app.js，缺一个就白屏。"""
 
     def _dir(self, name):
-        return os.path.join(L.HERE, L.LABELERS[name][0])
+        return L.HERE / L.LABELERS[name][0]
 
     def test_every_labeler_has_its_entry_page_and_script(self):
         for name in L.LABELERS:
             for asset in ("index.html", "app.js"):
                 with self.subTest(labeler=name, asset=asset):
-                    self.assertTrue(os.path.exists(os.path.join(self._dir(name), asset)))
+                    self.assertTrue((self._dir(name) / asset).is_file())
 
     def test_every_index_loads_its_app_as_a_module(self):
         for name in L.LABELERS:
             with self.subTest(labeler=name):
-                html = open(os.path.join(self._dir(name), "index.html")).read()
+                html = (self._dir(name) / "index.html").read_text(encoding="utf-8")
                 self.assertIn('type="module"', html)
                 self.assertIn("./app.js", html)
 
-    def test_mask_labeler_splits_out_geometry_and_draw(self):
-        js = open(os.path.join(self._dir("mask"), "app.js")).read()
-        self.assertIn("./geometry.js", js)
-        self.assertIn("./draw.js", js)
+    def test_both_labelers_share_the_view_and_directory_core(self):
+        # View transform, directory picking and save/download were byte-identical
+        # copies in the two apps; a fix in one silently missed the other.
+        core = (L.HERE / "labeler_core.js").read_text(encoding="utf-8")
+        for symbol in ("toScreen", "toImage", "clampView", "zoomAt", "pickRoot",
+                       "walkDir", "writeJson", "readJson"):
+            self.assertRegex(core, rf"export (?:async )?function {symbol}\(", symbol)
+        for name in L.LABELERS:
+            app = (self._dir(name) / "app.js").read_text(encoding="utf-8")
+            with self.subTest(labeler=name):
+                self.assertIn("../labeler_core.js", app)
 
-    def test_mask_labeler_has_a_selftest_page(self):
-        self.assertTrue(os.path.exists(os.path.join(self._dir("mask"), "selftest.html")))
+    def test_neither_app_redefines_what_the_core_exports(self):
+        for name in L.LABELERS:
+            app = (self._dir(name) / "app.js").read_text(encoding="utf-8")
+            with self.subTest(labeler=name):
+                for symbol in ("function walkDir", "function pickViaInput",
+                               "function download", "function fitScale"):
+                    self.assertNotIn(symbol, app, f"{name} still defines {symbol}")
+
+    def test_mask_labeler_splits_out_geometry_and_draw(self):
+        app = (self._dir("mask") / "app.js").read_text(encoding="utf-8")
+        self.assertIn("./geometry.js", app)
+        self.assertIn("./draw.js", app)
+
+    def test_mask_labeler_selftest_covers_the_shared_core(self):
+        page = (self._dir("mask") / "selftest.html").read_text(encoding="utf-8")
+        self.assertIn("../labeler_core.js", page)
+        self.assertIn("zoomAt", page)
 
 
 if __name__ == "__main__":

@@ -13,8 +13,9 @@
 #                     -> outputs/keypoint_preview/index.html（双击即可看）
 #
 # 两个标注器都用 ES module，`file://` 下会被浏览器按 CORS 拦截（origin 为 null）
-# 导致白屏，所以必须经这里走 http 打开，不要双击 html。加 --selftest 打开该标注器
-# 的浏览器自测页。
+# 导致白屏，所以必须经这里走 http 打开，不要双击 html。加 --selftest 打开自测页
+# （目前只有 mask 有）：它在真实 canvas 上画一笔，再逐像素核对「画出来的形状」是否
+# 等于「判定为保留的形状」，并验证两个标注器共用的视图变换。
 #
 # 数据集根用环境变量指定，不写死：
 #   SWIM_UNDER_GRIDS_ROOT   水下快照 / 标注网格数据集（mask、dot、merge）

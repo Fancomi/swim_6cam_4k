@@ -2,10 +2,18 @@
 // 物体打点标注器：一张图一份标注，只打点（顺序无关、无语义、无文本）。
 // 选根目录 -> 递归载入所有图像 -> 左右切换 -> 内存常驻，无需反复保存。
 // 保存1：逐图写回同名 .json（原地）。保存2：单个工程 json（含全部图，可再载入续标）。
+//
+// 视图变换、目录选取、保存下载都在 ../labeler_core.js，与 mask 标注器共用。
+// 这里只剩「点」这件事本身。
+import {
+  IMG_RE, clampView, eventToImage, fileOf, fitCanvas as fitCanvasTo, pickRoot,
+  readJson, resetView as resetViewOf, scaleOf, toImage as toImageOf,
+  toScreen as toScreenOf, writeJson, zoomAt,
+} from '../labeler_core.js';
 
 const $ = (id) => document.getElementById(id);
-const IMG_RE = /\.(jpe?g|png|bmp|webp|gif)$/i;
 const PROJECT_FILE = 'dot_label_project.json';
+const SCHEMA = 'dot-label/project-v1';
 const HIT_PX = 9;        // 命中/删除的屏幕半径
 const NUDGE = 1;         // Shift+方向 微调步长（图像像素）
 
@@ -26,40 +34,16 @@ const S = {
   cursor: null,          // 最近的图像坐标（用于 Enter 加点）
 };
 
-// ---------- 视图变换：fit + zoom，中心锚定 ----------
-function fitScale() {
-  return Math.min(cv.width / S.imgW, cv.height / S.imgH);
-}
-function scale() { return fitScale() * S.zoom; }
-function toScreen(x, y) {
-  const s = scale();
-  return [cv.width / 2 + (x - S.cx) * s, cv.height / 2 + (y - S.cy) * s];
-}
-function toImage(sx, sy) {
-  const s = scale();
-  return [S.cx + (sx - cv.width / 2) / s, S.cy + (sy - cv.height / 2) / s];
-}
-function resetView() {
-  S.zoom = 1; S.cx = S.imgW / 2; S.cy = S.imgH / 2;
-}
-function clampView() {
-  // 允许适度平移，但避免图像完全移出视口
-  const s = scale();
-  const halfW = cv.width / 2 / s, halfH = cv.height / 2 / s;
-  S.cx = Math.max(-halfW + 20, Math.min(S.imgW + halfW - 20, S.cx));
-  S.cy = Math.max(-halfH + 20, Math.min(S.imgH + halfH - 20, S.cy));
-}
-function evToImage(ev) {
-  const r = cv.getBoundingClientRect();
-  return toImage(ev.clientX - r.left, ev.clientY - r.top);
-}
+// ---------- 视图变换（core 的薄包装，省掉每处传 cv/S） ----------
+const scale = () => scaleOf(cv, S);
+const toScreen = (x, y) => toScreenOf(cv, S, x, y);
+const toImage = (sx, sy) => toImageOf(cv, S, sx, sy);
+const resetView = () => resetViewOf(S);
+const evToImage = (ev) => eventToImage(cv, S, ev);
 function hitRadiusImg() { return HIT_PX / scale(); }
 
 // ---------- 渲染 ----------
-function fitCanvas() {
-  const st = $('stage');
-  cv.width = st.clientWidth; cv.height = st.clientHeight;
-}
+function fitCanvas() { fitCanvasTo(cv, $('stage')); }
 function render() {
   ctx.clearRect(0, 0, cv.width, cv.height);
   if (!S.bitmap) return;
@@ -135,47 +119,13 @@ function hitPoint(ix, iy) {
 }
 
 // ---------- 载入目录（递归） ----------
-const fsSupported = () => 'showDirectoryPicker' in window;
-
-async function pickRoot() {
-  if (fsSupported()) {
-    const handle = await window.showDirectoryPicker();
-    S.rootHandle = handle;
-    const items = [];
-    await walkDir(handle, '', items);
-    return items;
-  }
-  // 回退：<input webkitdirectory>
-  return await pickViaInput();
-}
-
-async function walkDir(dirHandle, prefix, out) {
-  for await (const [name, h] of dirHandle.entries()) {
-    const rel = prefix ? `${prefix}/${name}` : name;
-    if (h.kind === 'directory') await walkDir(h, rel, out);
-    else if (IMG_RE.test(name)) out.push({ name, relPath: rel, fileHandle: h, dirHandle, file: null });
-  }
-}
-
-function pickViaInput() {
-  return new Promise((resolve, reject) => {
-    const inp = document.createElement('input');
-    inp.type = 'file'; inp.webkitdirectory = true; inp.multiple = true;
-    inp.addEventListener('change', () => {
-      const items = [...inp.files]
-        .filter((f) => IMG_RE.test(f.name))
-        .map((f) => ({ name: f.name, relPath: f.webkitRelativePath || f.name, file: f, fileHandle: null, dirHandle: null }));
-      resolve(items);
-    });
-    inp.addEventListener('cancel', () => reject({ name: 'AbortError' }));
-    inp.click();
-  });
-}
-
 async function openRoot() {
   let items;
-  try { items = await pickRoot(); }
-  catch (e) { if (e?.name !== 'AbortError') setStatus(String(e?.message || e)); return; }
+  try {
+    const picked = await pickRoot();
+    items = picked.items;
+    S.rootHandle = picked.rootHandle;
+  } catch (e) { if (e?.name !== 'AbortError') setStatus(String(e?.message || e)); return; }
   if (!items.length) { setStatus('目录内没有图像'); return; }
   items.sort((a, b) => a.relPath.localeCompare(b.relPath, undefined, { numeric: true }));
   S.items = items; S.loadedProject = {};
@@ -183,11 +133,6 @@ async function openRoot() {
   await tryLoadProjectFile();
   setStatus(`已载入 ${items.length} 张图像${S.rootHandle ? '（可原地保存）' : '（仅下载保存）'}`);
   await loadImage(0);
-}
-
-async function fileOf(item) {
-  if (item.file) return item.file;
-  return await item.fileHandle.getFile();
 }
 
 async function loadImage(i) {
@@ -237,64 +182,39 @@ async function save1() {
   if (S.idx < 0) return;
   const item = S.items[S.idx];
   S.loadedProject[item.relPath] = S.points.map((p) => ({ ...p }));
-  const text = JSON.stringify(sidecarPayload(item), null, 2);
-  if (item.dirHandle) {
-    try {
-      const fh = await item.dirHandle.getFileHandle(sidecarName(item), { create: true });
-      const w = await fh.createWritable();
-      await w.write(text); await w.close();
-      S.dirty = false; syncUI();
-      setStatus(`已原地保存 ${sidecarName(item)}`);
-      return;
-    } catch (e) { setStatus(`⚠ 原地保存失败(${e?.name})，改为下载`); }
-  }
-  download(text, sidecarName(item));
+  // sidecar 落在图像所在子目录，所以用它的 dirHandle 而不是根目录 handle。
+  const name = sidecarName(item);
+  const how = await writeJson(item.dirHandle, name,
+                              JSON.stringify(sidecarPayload(item), null, 2),
+                              (e) => setStatus(`⚠ 原地保存失败(${e?.name})，改为下载`));
   S.dirty = false; syncUI();
+  if (how === 'wrote') setStatus(`已原地保存 ${name}`);
 }
 
 // 保存2：单文件工程 json（含所有图像的点），写回根目录；可再次载入续标
 async function save2() {
   if (S.idx >= 0) S.loadedProject[S.items[S.idx].relPath] = S.points.map((p) => ({ ...p }));
   const doc = {
-    schema: 'dot-label/project-v1',
+    schema: SCHEMA,
     created: new Date().toISOString(),
     images: S.items.map((it) => ({
       image: it.relPath,
       points: (S.loadedProject[it.relPath] || []).map((p) => ({ x: +p.x.toFixed(2), y: +p.y.toFixed(2) })),
     })),
   };
-  const text = JSON.stringify(doc, null, 2);
-  if (S.rootHandle) {
-    try {
-      const fh = await S.rootHandle.getFileHandle(PROJECT_FILE, { create: true });
-      const w = await fh.createWritable();
-      await w.write(text); await w.close();
-      S.dirty = false; syncUI();
-      setStatus(`已保存工程 ${PROJECT_FILE}（${doc.images.length} 图）`);
-      return;
-    } catch (e) { setStatus(`⚠ 工程原地保存失败(${e?.name})，改为下载`); }
-  }
-  download(text, PROJECT_FILE);
+  const how = await writeJson(S.rootHandle, PROJECT_FILE,
+                              JSON.stringify(doc, null, 2),
+                              (e) => setStatus(`⚠ 工程原地保存失败(${e?.name})，改为下载`));
   S.dirty = false; syncUI();
+  if (how === 'wrote') setStatus(`已保存工程 ${PROJECT_FILE}（${doc.images.length} 图）`);
 }
 
 // 载入根目录内的工程文件，填充标注缓存（供续标）
 async function tryLoadProjectFile() {
-  if (!S.rootHandle) return;
-  try {
-    const fh = await S.rootHandle.getFileHandle(PROJECT_FILE);
-    const obj = JSON.parse(await (await fh.getFile()).text());
-    if (obj.schema === 'dot-label/project-v1') {
-      for (const im of obj.images) S.loadedProject[im.image] = im.points || [];
-      setStatus(`已载入工程 ${PROJECT_FILE}，可续标`);
-    }
-  } catch { /* 无工程文件 */ }
-}
-
-function download(text, name) {
-  const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
-  const a = document.createElement('a'); a.href = url; a.download = name; a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  const doc = await readJson(S.rootHandle, PROJECT_FILE, SCHEMA);
+  if (!doc) return;
+  for (const im of doc.images || []) S.loadedProject[im.image] = im.points || [];
+  setStatus(`已载入工程 ${PROJECT_FILE}，可续标`);
 }
 
 // ---------- 鼠标交互 ----------
@@ -329,7 +249,7 @@ cv.addEventListener('pointermove', (ev) => {
     const s = scale();
     S.cx = drag.cx - (ev.clientX - drag.x) / s;
     S.cy = drag.cy - (ev.clientY - drag.y) / s;
-    clampView(); render(); return;
+    clampView(cv, S); render(); return;
   }
   if (drag.kind === 'point') {
     const p = S.points[drag.i];
@@ -348,16 +268,8 @@ cv.addEventListener('contextmenu', (ev) => ev.preventDefault());
 $('stage').addEventListener('wheel', (ev) => {
   if (!S.bitmap) return;
   ev.preventDefault();
-  const r = cv.getBoundingClientRect();
-  const sx = ev.clientX - r.left, sy = ev.clientY - r.top;
-  const [ax, ay] = toImage(sx, sy);            // 光标锚点
-  const factor = Math.exp(-ev.deltaY * 0.0015);
-  S.zoom = Math.max(1, Math.min(20, S.zoom * factor));
-  // 使锚点保持在光标下
-  const s = scale();
-  S.cx = ax - (sx - cv.width / 2) / s;
-  S.cy = ay - (sy - cv.height / 2) / s;
-  clampView(); render();
+  zoomAt(cv, S, ev);                           // 以光标为锚点缩放
+  render();
 }, { passive: false });
 
 // ---------- 键盘交互 ----------
