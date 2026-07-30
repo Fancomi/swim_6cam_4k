@@ -24,7 +24,10 @@ class MfSource final {
            swim::core::RuntimeCounters& counters,
            swim::core::RunMode mode, std::uint32_t ticket_capacity,
            std::uint32_t surface_capacity,
-           swim::core::RunLifecycle* lifecycle);
+           swim::core::RunLifecycle* lifecycle,
+           // Rewind to the clip start on EOF instead of failing the lane, so a
+           // run can outlast the recording. Ignored by live sources.
+           bool loop_sources = false);
   ~MfSource();
 
   MfSource(const MfSource&) = delete;

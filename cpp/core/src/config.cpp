@@ -308,6 +308,8 @@ AppConfig load_config(const std::filesystem::path& path) {
     } else if (key == "diagnostic_replacement") {
       config.diagnostic_replacement =
           parse_config_boolean(path, line_number, key, value);
+    } else if (key == "loop_sources") {
+      config.loop_sources = parse_config_boolean(path, line_number, key, value);
     } else if (key == "encode_path") {
       config.encode_path = parse_config_path(path, line_number, value);
     } else if (key == "stale_ms") {
@@ -394,6 +396,8 @@ AppConfig apply_cli_overrides(
       config.encode = parse_boolean(value, name);
     } else if (name == "--diagnostic-replacement") {
       config.diagnostic_replacement = parse_boolean(value, name);
+    } else if (name == "--loop") {
+      config.loop_sources = parse_boolean(value, name);
     } else if (name == "--encode-path") {
       config.encode_path = parse_cli_path(value, name);
     } else if (name == "--encode-sink") {

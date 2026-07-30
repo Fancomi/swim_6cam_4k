@@ -77,6 +77,12 @@ struct AppConfig {
   bool preview_visible{true};
   bool encode{false};
   bool diagnostic_replacement{false};
+  // Rewind each source to its start on EOF instead of failing the lane. A
+  // recorded clip is shorter than most runs one wants to watch, so without this
+  // any --duration-seconds past the shortest clip ends in "MP4 reached EOF
+  // before global render deadline". Live sources never hit EOF, so this only
+  // affects file playback.
+  bool loop_sources{false};
   std::filesystem::path encode_path;
   std::chrono::milliseconds stale_after{100};
   std::chrono::milliseconds replace_after{1000};

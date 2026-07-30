@@ -110,6 +110,7 @@ std::string valid_config_with_cam3(std::string_view cam3_path) {
       "preview=true\n"
       "encode=false\n"
       "diagnostic_replacement=false\n"
+      "loop_sources=true\n"
       "encode_path=outputs/test-output.h265\n"
       "stale_ms=100\n"
       "replace_ms=1000\n"
@@ -262,6 +263,7 @@ TEST_CASE(loads_exact_camera_order_and_all_config_values) {
   CHECK(config.preview);
   CHECK(!config.encode);
   CHECK(!config.diagnostic_replacement);
+  CHECK(config.loop_sources);
   CHECK_EQ(config.encode_path,
            std::filesystem::path{"outputs/test-output.h265"});
   CHECK_EQ(config.stale_after, 100ms);
@@ -369,12 +371,13 @@ TEST_CASE(loads_sixteen_underwater_sources_in_declared_order) {
 
 TEST_CASE(applies_every_supported_cli_override) {
   AppConfig config;
-  const std::array<std::string_view, 11> arguments{
+  const std::array<std::string_view, 12> arguments{
       "--validate-only",
       "--preview=false",
       "--preview-visible=false",
       "--encode=true",
       "--diagnostic-replacement=true",
+      "--loop=true",
       "--encode-path=outputs/override.h265",
       "--encode-sink=null",
       "--duration-seconds=27",
@@ -391,6 +394,7 @@ TEST_CASE(applies_every_supported_cli_override) {
   CHECK(!config.preview_visible);
   CHECK(config.encode);
   CHECK(config.diagnostic_replacement);
+  CHECK(config.loop_sources);
   CHECK_EQ(config.encode_path,
            std::filesystem::path{"outputs/override.h265"});
   CHECK_EQ(config.encode_sink, EncodeSink::null_sink);
