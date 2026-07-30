@@ -249,6 +249,7 @@ def step_run(args):
                f"--duration-seconds={args.seconds}",
                f"--preview={'true' if args.preview else 'false'}",
                f"--preview-visible={'true' if args.window else 'false'}",
+               f"--loop={'true' if args.loop else 'false'}",
                f"--metrics={args.metrics}"]
     if args.encode:
         encode_path.parent.mkdir(parents=True, exist_ok=True)
@@ -281,6 +282,11 @@ def parse_args(argv=None):
                         default=True)
     parser.add_argument("--no-window", dest="window", action="store_false",
                         default=True, help="render offscreen (no preview window)")
+    parser.add_argument("--no-loop", dest="loop", action="store_false",
+                        default=True,
+                        help="stop when the shortest clip ends instead of "
+                             "rewinding; the run then fails if --seconds "
+                             "outlasts the recording")
     parser.add_argument("--encode", action="store_true",
                         help="also write HEVC to --encode-path")
     parser.add_argument("--encode-path", type=Path,

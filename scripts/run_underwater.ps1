@@ -6,6 +6,9 @@
 #
 # 所有实际逻辑都在 python/underwater/run.py 里（与 macOS 共用同一份），这个脚本
 # 只负责挑选解释器并转发参数。run.py 自己会选 Visual Studio 生成器和 d3d11 后端。
+#
+# 片段放完默认回到开头继续播，所以 -Seconds 可以远超录制长度；想让它在最短的那
+# 路片段结束时停下就加 -NoLoop。
 [CmdletBinding()]
 param(
   [Parameter(Position = 0, Mandatory = $true)]
@@ -15,6 +18,7 @@ param(
   [switch]$Encode,
   [switch]$NoWindow,
   [switch]$NoPreview,
+  [switch]$NoLoop,
   [switch]$Force,
   [string]$Backend,
   [string]$Steps,
@@ -43,6 +47,7 @@ if ($Fps -gt 0)      { $forward += @('--fps', $Fps) }
 if ($Encode)         { $forward += '--encode' }
 if ($NoWindow)       { $forward += '--no-window' }
 if ($NoPreview)      { $forward += '--no-preview' }
+if ($NoLoop)         { $forward += '--no-loop' }
 if ($Force)          { $forward += '--force' }
 if ($Backend)        { $forward += @('--backend', $Backend) }
 if ($Steps)          { $forward += @('--steps', $Steps) }

@@ -23,6 +23,7 @@ Common options (full list: --help):
   --seconds N        运行秒数（默认 30）
   --encode           同时写出 HEVC 文件
   --no-window        离屏渲染，不开预览窗口
+  --no-loop          片段放完就停（默认回到开头继续播，可跑任意长时间）
   --fps N            覆盖渲染帧率（默认跟随片段）
   --steps LIST       只跑部分步骤，如 asset,run
   --force            即使产物是新的也重做
