@@ -14,6 +14,7 @@ __pycache__/
 # Controlled inputs that are local-only (heavy FBX assets, not the committed
 # pool fixture already tracked at inputs/pool/models/pool.fbx).
 inputs/underwater/models/
+inputs/overhead/models/
 inputs/pool/models/*.fbx
 
 # Prebuilt CUDA/GL backend deps (FFmpeg+cuvid, GLFW) — large binaries, fetched locally
@@ -22,7 +23,9 @@ inputs/pool/models/*.fbx
 # Agent worktrees and downloaded model weights are local scratch
 .claude/worktrees/
 *.pt
-# Runtime configs generated per machine by python.underwater.run
-inputs/configs/underwater_16_*.conf
+# Runtime configs generated per machine by python.stitch
+inputs/configs/underwater_*.conf
+inputs/configs/overhead_*.conf
+# Loose model drops straight into inputs/ (before they are filed under a line)
 inputs/*.fbx
 inputs/*.fbm/

@@ -1176,5 +1176,61 @@ class DispatcherTest(unittest.TestCase):
         self.assertIn("--video-dir", str(caught.exception))
 
 
+MODEL_002 = PROJECT_ROOT / "inputs" / "overhead" / "models" / "002.fbx"
+TEXDIR_002 = PROJECT_ROOT / "inputs" / "overhead" / "models" / "002.fbm"
+
+
+class OverheadExtractTest(unittest.TestCase):
+    @unittest.skipUnless(HAS_FBX, "FBX SDK not available")
+    @unittest.skipUnless(MODEL_002.is_file(), "002.fbx not present")
+    def test_extracts_two_planes_left_to_right(self):
+        import tempfile
+        from python.stitch.extract import extract_to_json
+
+        with tempfile.TemporaryDirectory() as td:
+            dst = Path(td) / "mesh.json"
+            meshes = extract_to_json(MODEL_002, dst, TEXDIR_002)
+
+            self.assertEqual(len(meshes), 2)
+            # world X ascending: Plane002 starts at -35.22, Plane001 at -27.72
+            self.assertEqual([m["node"] for m in meshes],
+                             ["Plane002", "Plane001"])
+            # which pins overhead5 -> 05-02.jpg and overhead6 -> C06.jpg positionally
+            self.assertEqual([m["texture_basename"] for m in meshes],
+                             ["05-02.jpg", "C06.jpg"])
+
+    @unittest.skipUnless(HAS_FBX, "FBX SDK not available")
+    @unittest.skipUnless(MODEL_002.is_file(), "002.fbx not present")
+    def test_spans_one_lane_the_same_size_as_the_underwater_panorama(self):
+        # Both models cover the same 25.000m x 3.000m lane; that is why one set
+        # of geometry code serves both.
+        import tempfile
+        from python.stitch.extract import extract_to_json
+
+        with tempfile.TemporaryDirectory() as td:
+            meshes = extract_to_json(MODEL_002, Path(td) / "m.json", TEXDIR_002)
+
+        xs = [v["pos"][0] for m in meshes for t in m["triangles"] for v in t]
+        ys = [v["pos"][1] for m in meshes for t in m["triangles"] for v in t]
+        self.assertAlmostEqual(max(xs) - min(xs), 25.0, places=3)
+        self.assertAlmostEqual(max(ys) - min(ys), 3.0, places=3)
+
+    @unittest.skipUnless(HAS_FBX, "FBX SDK not available")
+    @unittest.skipUnless(MODEL_002.is_file(), "002.fbx not present")
+    def test_planes_only_would_reject_this_model(self):
+        # The profile sets planes_only=False, and that is not merely tidiness:
+        # select_pool_planes keeps meshes whose world-Y falls inside the pool
+        # band (-11.6, -8.0), which is where the underwater planes sit. 002.fbx
+        # is an overhead model spanning Y [20.47, 23.47], so the filter would
+        # drop both planes and extraction would exit with "no pool plane found".
+        import tempfile
+        from python.stitch.extract import extract_to_json, select_pool_planes
+
+        with tempfile.TemporaryDirectory() as td:
+            meshes = extract_to_json(MODEL_002, Path(td) / "m.json", TEXDIR_002)
+        self.assertEqual(len(meshes), 2)
+        self.assertEqual(select_pool_planes(meshes), [])
+
+
 if __name__ == "__main__":
     unittest.main()
