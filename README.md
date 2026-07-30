@@ -10,17 +10,17 @@
 
 仓库也包含与 Metal 平级的 Windows 原生后端 `cpp/backends/d3d11/`：六路 H.264 由 Media Foundation（`IMFSourceReader` + `IMFDXGIDeviceManager`）做 D3D11 硬件解码为 GPU 常驻 NV12 纹理，Direct3D 11 以同一套固定六网格 + FP16 加性累加 shader（`cpp/backends/d3d11/shaders/stitch.hlsl`，从 `stitch.metal` 逐字段移植）合成 `5002x2102`，再经 DXGI 交换链窗口实时预览。与 Metal 路径一致：不依赖 OpenCV/FFmpeg，不把解码像素读回 CPU，各路输入走容量有界的 latest-frame 交换。第一阶段覆盖 `解码 → GPU 拼接 → 预览` 端到端实时；硬件 HEVC 编码与 benchmark 矩阵为后续阶段。
 
-构建前置：需要一个装有 `numpy` 与 `opencv-python` 的 Python 3.10+（用于把 `outputs/data/pool_mesh.json` 编译成 `assets/generated/pool_4k.swasset`），以及 Visual Studio 2022（MSVC，C++20）和 Windows 10 SDK。统一入口是 `scripts/run_win.ps1`：
+构建前置：Visual Studio 2022（MSVC，C++20）、Windows 10/11 SDK，以及一个装有 `numpy`、`opencv-python` 与 `fbx` 的 Python 3.10（用于把 FBX 网格编译成 `.swasset`）。这些都由 `scripts/install.bat` 一键装好，详见「环境依赖」一节。统一入口是 `scripts/run_win.ps1`（cmd 包装见下一节的 `scripts\run_win.bat`）：
 
 ```powershell
-# 可视化 demo：DXGI 预览窗口 + 六路实时拼接（默认 30 秒）
-pwsh scripts/run_win.ps1 demo
+# 可视化：DXGI 预览窗口 + 六路实时拼接（默认 30 秒）
+pwsh scripts/run_win.ps1
 
 # 无窗口（仍执行真实 GPU 拼接与 present 计量）
-pwsh scripts/run_win.ps1 demo -NoWindow
+pwsh scripts/run_win.ps1 -NoWindow
 ```
 
-该脚本在缺少 `.swasset` 时自动编译，随后用 `-G "Visual Studio 17 2022"` 配置并构建 Release，再运行 `swim_realtime --backend d3d11`。六路真实输入路径写在 `configs/windows_20260629.conf`。
+exe 不存在时该脚本会用 `-G "Visual Studio 17 2022"` 配置并构建 Release（`.swasset` 由 CMake 的 `runtime_asset` target 顺带编出），再运行 `swim_realtime`。六路真实输入路径写在 `inputs/configs/windows_20260629.conf`。
 
 ## Windows 实时路径（CUDA/GL：NVDEC + OpenGL）
 
@@ -28,19 +28,31 @@ pwsh scripts/run_win.ps1 demo -NoWindow
 
 依赖（预编译，放在 `third_party/`，已 gitignore）：BtbN 的 FFmpeg shared 构建（含 cuvid/nvenc）、GLFW 3.4 win64，以及本机 CUDA Toolkit（头文件与 `cuda.lib`/`cudart.lib`）。CMake 通过 `SWIM_FFMPEG_DIR` / `SWIM_GLFW_DIR` / `SWIM_CUDA_DIR` 定位；三者齐备时自动启用 `swim_cudagl_backend`（配置日志打印 `CUDA/GL backend: enabled`）。
 
-两个后端共用同一个入口脚本 `scripts\run_win.bat`，第一个参数选后端；运行时 stderr 每秒刷新一行 render / decode / preview 实时 FPS：
+两个后端共用同一条入口：逻辑在 `scripts/run_win.ps1`，`scripts\run_win.bat` 只是它的 cmd 包装（双击友好，顶部有个 EDITABLE 区可以直接改默认值），不重复实现任何东西。运行时 stderr 每秒刷新一行 render / decode / preview 实时 FPS：
 
 ```bat
-scripts\run_win.bat                     :: d3d11 后端（默认），预览窗口，30 秒
-scripts\run_win.bat cudagl              :: CUDA/GL（NVDEC+OpenGL）后端
-scripts\run_win.bat cudagl 60           :: 跑 60 秒
-scripts\run_win.bat cudagl 30 nowindow  :: 无窗口（仍执行真实 GPU 拼接）
-scripts\run_win.bat cudagl fps:60       :: 指定渲染帧率 60fps（与输入帧率无关）
+scripts\run_win.bat                      :: d3d11 后端（默认），预览窗口，30 秒
+scripts\run_win.bat cudagl               :: CUDA/GL（NVDEC+OpenGL）后端
+scripts\run_win.bat cudagl 60            :: 跑 60 秒
+scripts\run_win.bat cudagl 30 nowindow   :: 无窗口（仍执行真实 GPU 拼接）
+scripts\run_win.bat cudagl fps:60        :: 指定渲染帧率 60fps（与输入帧率无关）
+scripts\run_win.bat d3d11 600 noloop     :: 片段放完就停，不回到开头
 ```
+
+bat 的参数位置无关，认这几个词：`d3d11` / `cudagl` / `nowindow` / `noloop` / `fps:N` / 纯数字（秒数）。更多开关（`-Rebuild`、`-Config`、`-BuildDir`、`-Metrics`、`-StreamCount` 等）直接调 ps1：
+
+```powershell
+pwsh scripts/run_win.ps1 -Backend cudagl -Duration 600
+pwsh scripts/run_win.ps1 -Rebuild            # 强制重新配置并构建
+```
+
+exe 不存在时 ps1 会自动配置并构建对应后端的 `build/win-<backend>` 树，并把运行期 DLL（FFmpeg / GLFW / cudart）拷到 exe 旁——CMake 不做这件事，缺了会以 `0xC0000135` 启动失败。
+
+片段放完默认回到开头继续播（底层 `--loop=true`），所以时长可以远超录制长度；加 `noloop` 关掉它，此时时长超过最短那路片段会以 `MP4 reached EOF before global render deadline` 失败。
 
 渲染帧率可用 `fps:N` 指定（底层 `--fps=N`，等价 `fps_num=N fps_den=1`），与输入视频帧率无关：latest-frame 邮箱按该节奏重复或丢弃源帧来满足目标 cadence。也可在 config 用 `fps_num`/`fps_den` 或 CLI `--fps-num`/`--fps-den` 设非整数帧率（如 30000/1001）。
 
-CUDA/GL 的六路真实输入路径写在 `configs/windows_cudagl.conf`（`backend=cudagl`）。运行时需要 FFmpeg（`avcodec/avformat/avutil/swresample/swscale`）、`glfw3.dll`、`cudart64_12.dll` 与 exe 同目录。
+CUDA/GL 的六路真实输入路径写在 `inputs/configs/windows_cudagl.conf`（`backend=cudagl`）。运行时需要 FFmpeg（`avcodec/avformat/avutil/swresample/swscale`）、`glfw3.dll`、`cudart64_12.dll` 与 exe 同目录。
 
 ## 实时 Metal 路径
 
@@ -124,7 +136,9 @@ soak 按每条 interval 的真实 `elapsed_s` 累加时间轴，报告 RSS 与 M
 ```text
 swim_fbx_demo/
 ├── README.md
-├── .venv/                         # 现有 macOS / Python 3.10 虚拟环境
+├── requirements-win.txt           # Windows 核心 Python 依赖
+├── requirements-pose.txt          # 入水检测才需要的 torch/ultralytics
+├── .venv/                         # 项目虚拟环境（Python 3.10，已 gitignore）
 ├── inputs/
 │   ├── models/
 │   │   └── pool.fbx
@@ -174,12 +188,13 @@ swim_fbx_demo/
 │       ├── test_keypoint_preview.py
 │       └── test_layout.py
 ├── scripts/
+│   ├── install.bat               # Windows 一键环境安装（C++ 与 Python 两侧）
 │   ├── run_metal.sh              # demo / benchmarks / soak
 │   ├── run_python.sh             # still / 4k / keypoint / extract / bake / asset / uw-* / we-*
 │   ├── run_underwater.sh         # 水下 16 路实时拼接一键（macOS / Linux）
 │   ├── run_underwater.ps1        # 同上（Windows）
-│   ├── run_win.ps1               # Windows 六路实时启动器
-│   ├── run_win.bat               # 同上（cmd 包装）
+│   ├── run_win.ps1               # Windows 六路实时启动器（逻辑在这）
+│   ├── run_win.bat               # 同上的 cmd 包装（双击 + EDITABLE 默认值）
 │   └── run_water_entry.sh        # 入水检测机位难例筛选全流程
 └── docs/
     └── superpowers/
@@ -193,14 +208,30 @@ swim_fbx_demo/
 
 ## 环境依赖
 
-- Python 3.10
+- Python 3.10 —— 硬要求，不是偏好：Autodesk 只为 cp310 发布 FBX Python SDK 轮子
 - Autodesk FBX Python SDK，Python 中需能 `import fbx`
 - NumPy
 - OpenCV，Python 包导入名为 `cv2`
 - FFmpeg，`ffmpeg` 可执行文件需位于 `PATH`
 - 仅入水检测机位（`python/water_entry/`）需要：PyTorch `2.5.1`、TorchVision `0.20.1`、Ultralytics（`8.4.x`，MPS 后端在 Apple Silicon 上可用）
 
-项目现有 `.venv/` 是面向 macOS 和 Python 3.10 的环境，不应直接复制到其他操作系统或其他 Python 版本使用。可先检查当前环境：
+### Windows：一键安装
+
+```bat
+scripts\install.bat            :: 核心环境
+scripts\install.bat pose       :: 追加 torch/torchvision/ultralytics（约 2.5GB，仅入水检测需要）
+scripts\install.bat check      :: 只体检，不改动任何东西
+```
+
+七步全部幂等，已就绪的会打印 `[SKIP]`，可以反复跑：C++ 工具链体检 → 用 winget 装 Python 3.10 → 把 `.venv` 建/重建到 3.10 → 装 `requirements-win.txt` → 下载并安装 FBX Python SDK（弹官方安装界面，一路默认即可，装完自动 pip 装轮子）→ 拉取 `third_party/` 的 FFmpeg+GLFW 并体检 CUDA → 生成网格与 `.swasset`、构建 `swim_realtime.exe`、把运行期 DLL 拷到 exe 旁。
+
+装完 `scripts\run_underwater.ps1`、`scripts\run_win.bat` 与 `python -m python.underwater.run` 直接可用，无需手工激活虚拟环境（启动脚本会优先用 `.venv\Scripts\python.exe`）。
+
+脚本刻意不自动安装 Visual Studio 2022 与 CUDA Toolkit：体积大、需要重启、要选组件，只做体检并给出 winget 命令。缺 CUDA 只是警告，此时 `cudagl` 后端会被跳过，`d3d11` 后端不受影响。
+
+### macOS / Linux：手工准备
+
+FBX Python SDK 的可用发行包与安装方式取决于操作系统、CPU 架构及 Python ABI，非 Windows 平台请自行在目标 Python 3.10 环境里确认下面这些导入通过，再运行 FBX 相关脚本：
 
 ```bash
 .venv/bin/python --version
@@ -208,8 +239,6 @@ swim_fbx_demo/
 .venv/bin/python -c "import torch, ultralytics; print('pose deps OK', torch.backends.mps.is_available())"
 ffmpeg -version
 ```
-
-Autodesk FBX Python SDK 的可用发行包和安装方式取决于操作系统、CPU 架构及 Python ABI；本项目不提供未经验证的通用安装命令。若不使用现有 `.venv/`，请先在目标 Python 3.10 环境中确认上述导入，再运行 FBX 相关脚本。
 
 三个 Python 入口的实际参数可用以下命令查看：
 
@@ -397,7 +426,9 @@ pwsh scripts/run_underwater.ps1 D:\SWIM\swb_20260727-174520_10 -Seconds 30 -Enco
 
 平台差异全部由 `run.py` 处理：macOS 用 Ninja + `metal` 后端 + `build/metal-release/swim_realtime`；Windows 用 Visual Studio 17 2022 (x64) + `d3d11` 后端 + `build/win-d3d11/Release/swim_realtime.exe`（有 CUDA/FFmpeg/GLFW 时可 `--backend cudagl`）。运行时 config 每次按片段目录重新生成到 `inputs/configs/underwater_16_<backend>.conf`，`source.underAi=` 的声明顺序即通道顺序。
 
-常用参数：`--seconds N`、`--encode`、`--no-window`（离屏）、`--fps N`（覆盖渲染帧率）、`--steps asset,run`（只跑部分步骤）、`--config PATH`（用现成 config，不再生成）。
+常用参数：`--seconds N`、`--encode`、`--no-window`（离屏）、`--no-loop`（片段放完就停）、`--fps N`（覆盖渲染帧率）、`--steps asset,run`（只跑部分步骤）、`--config PATH`（用现成 config，不再生成）。
+
+片段默认循环重播，所以 `--seconds` 可以远超录制长度——那份 12 秒的样本也能连续跑几分钟。加 `--no-loop` 则在最短那路片段结束时停下，此时 `--seconds` 超过录制长度会让运行失败。
 
 macOS/Metal 实测：16 路 1280×720 MPEG-TS → 6002×722，渲染 30.1fps、解码 4848 帧零 malformed、HEVC 硬件编码 30.1fps、预览零丢帧。相机数量、相机 ID、输出尺寸、解码分辨率全部来自 config 与 `.swasset`，三个后端（Metal / D3D11 / CUDA-GL）共用同一套 `swim_core` 逻辑。
 
