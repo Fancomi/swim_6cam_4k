@@ -6,7 +6,7 @@
 #   ./scripts/run_underwater.sh VIDEO_DIR --seconds 30 --encode
 #
 # 所有实际逻辑都在 python/underwater/run.py 里（mac 与 Windows 共用同一份），
-# 这个脚本只负责挑选解释器并把参数原样转发。Windows 用 scripts/run_underwater.ps1。
+# 这个脚本只负责挑选解释器并把参数原样转发。Windows 用 scripts/run_win.bat under。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

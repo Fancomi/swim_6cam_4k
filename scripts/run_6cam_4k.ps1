@@ -4,17 +4,18 @@
 # scripts\run_win.bat 只是它的 cmd 包装（双击友好），不复制任何逻辑。
 #
 # 用法:
-#   pwsh scripts/run_win.ps1                      # d3d11，预览窗口，30 秒
-#   pwsh scripts/run_win.ps1 -Backend cudagl
-#   pwsh scripts/run_win.ps1 -Duration 600        # 片段会自动循环重播
-#   pwsh scripts/run_win.ps1 -NoWindow            # 离屏（仍执行真实 GPU 拼接）
-#   pwsh scripts/run_win.ps1 -Fps 60              # 渲染帧率，与输入帧率无关
-#   pwsh scripts/run_win.ps1 -NoLoop              # 片段放完就停
+#   pwsh scripts/run_6cam_4k.ps1                      # d3d11，预览窗口，30 秒
+#   pwsh scripts/run_6cam_4k.ps1 -Backend cudagl
+#   pwsh scripts/run_6cam_4k.ps1 -Duration 600        # 片段会自动循环重播
+#   pwsh scripts/run_6cam_4k.ps1 -NoWindow            # 离屏（仍执行真实 GPU 拼接）
+#   pwsh scripts/run_6cam_4k.ps1 -Fps 60              # 渲染帧率，与输入帧率无关
+#   pwsh scripts/run_6cam_4k.ps1 -NoLoop              # 片段放完就停
 #
 # 片段放完默认回到开头继续播，所以 -Duration 可以远超录制长度；加 -NoLoop 时
 # 时长超过最短那路片段会以 "MP4 reached EOF before global render deadline" 失败。
 #
-# 水下 16 路是另一条链路，入口是 scripts/run_underwater.ps1。
+# 水下 16 路是另一条链路：scripts\run_win.bat under <采样目录>，或直接
+# python -m python.underwater.run --video-dir <采样目录>。
 # 环境安装见 scripts/install.bat。
 [CmdletBinding()]
 param(

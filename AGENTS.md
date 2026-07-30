@@ -4,6 +4,8 @@
 
 本仓库把泳池 FBX 的平面网格与 UV 编译成 GPU 运行时资产，再用三个原生后端做实时拼接。实时核心是可移植 C++20，位于 `cpp/core/`（`swim_core`）；后端在 `cpp/backends/` 下按平台隔离：`metal/`（macOS，VideoToolbox + Metal）、`d3d11/`（Windows，Media Foundation + Direct3D 11）、`cudagl/`（Windows，NVDEC + OpenGL）。三者通过 `cpp/core/include/swim/core/backend.hpp` 的 `IBackend`/`ISource`/`IRenderer` 契约接入，并用 `BackendRegistry` 按名字自注册，不允许后端专有类型泄漏进 `cpp/core/`。
 
+启动脚本按**任务**命名，不按技术栈：`run_6cam_4k.{ps1,sh}` 是六路 4K 实时拼接的 Windows / macOS 两端，`run_underwater.sh` 与 `scripts\run_win.bat under` 是水下 16 路，`run_offline.sh` 是所有非实时工具（静图/4K 渲染、FBX 提取、资产编译、标注预览），`run_water_entry.sh` 是入水检测机位的筛例流程。`run_win.bat` 是 Windows 上的双击入口，两条实时链路都从它进。新增脚本请延续这个口径——旧名 `run_metal.sh`/`run_python.sh` 用后端和语言命名，看不出各自负责什么。
+
 离线资产与验证工具在 `python/`：`assets/` 提取 FBX 并编译 `.swasset`，`underwater/` 是与六路 pool 任务隔离的 16 路水下链路，`water_entry/` 是入水检测机位，`validation/` 是参考渲染器。启动脚本在 `scripts/`，运行时 config 在 `inputs/configs/`，测试在 `tests/`（`cpp/`、`python/`、`fixtures/`）。`build/` 与 `outputs/` 是本机产物，不放手写源码或文档。
 
 相机数量、相机 ID、输出尺寸都是**数据而非代码**：`kMaxCameras = 16`（`cpp/core/include/swim/core/camera_capacity.hpp`），config 里 `source.<id>=<path>` 的声明顺序即通道顺序。新增机位布局应通过 config + `.swasset` 表达，不要在 C++ 里加分支。
@@ -24,11 +26,11 @@ scripts\install.bat check      :: 只体检，不改动任何东西
 cmake -S . -B build/win-d3d11 -G "Visual Studio 17 2022" -A x64 -DPython3_EXECUTABLE=.venv\Scripts\python.exe
 cmake --build build/win-d3d11 --config Release --target swim_realtime
 
-pwsh scripts/run_win.ps1 -Backend cudagl -Duration 600   # 六路 4K
-pwsh scripts/run_underwater.ps1 <采样目录> -Seconds 30    # 水下 16 路
+pwsh scripts/run_6cam_4k.ps1 -Backend cudagl -Duration 600   # 六路 4K
+scripts\run_win.bat under <采样目录>                     # 水下 16 路
 ```
 
-每个后端一棵独立构建树 `build/win-<backend>`（`python/underwater/run.py` 的 `build_dir_for` 就是这么找 exe 的）。CMake **不会**把 FFmpeg/GLFW/cudart 的 DLL 拷到 exe 旁，缺了会以 `0xC0000135` 启动失败；`install.bat` 和 `run_win.ps1` 都会补这一步，新增构建路径时别忘了。
+每个后端一棵独立构建树 `build/win-<backend>`（`python/underwater/run.py` 的 `build_dir_for` 就是这么找 exe 的）。CMake **不会**把 FFmpeg/GLFW/cudart 的 DLL 拷到 exe 旁，缺了会以 `0xC0000135` 启动失败；`install.bat` 和 `run_6cam_4k.ps1` 都会补这一步，新增构建路径时别忘了。
 
 Python 3.10 是硬要求，不是偏好：Autodesk 只为 cp310 发布 FBX Python SDK 轮子，而 `python/underwater/extract.py` 是模块级 `import fbx`。
 

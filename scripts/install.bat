@@ -7,8 +7,8 @@ REM ==========================================================================
 REM  swim_6cam_4k -- Windows 一键环境安装
 REM
 REM  把 C++ 与 Python 两侧全部拉通，装完这些命令直接可用：
-REM      pwsh scripts\run_underwater.ps1 <采样目录>    水下 16 路实时拼接
-REM      scripts\run_win.bat                           六路 4K 实时拼接
+REM      scripts\run_win.bat under <采样目录>       水下 16 路实时拼接
+REM      scripts\run_win.bat                        六路 4K 实时拼接
 REM
 REM  用法：
 REM      scripts\install.bat            核心环境
@@ -518,7 +518,7 @@ if exist "%ROOT%\build\assets\generated\underwater_16.swasset" (
 rem 7.3 build swim_realtime
 rem     One build tree per backend: python.underwater.run looks under
 rem     build\win-<backend> (run.py: build_dir_for), so configure both or
-rem     run_underwater.ps1 -Backend cudagl reconfigures and lacks its DLLs.
+rem     run_win.bat under ... cudagl reconfigures and lacks its DLLs.
 rem     Skip the cudagl tree when CUDA or third_party is missing.
 set "BACKENDS=d3d11"
 if exist "%CUDA_DIR%\include\cuda.h" (
@@ -627,7 +627,7 @@ if "%MODE%"=="check" (
 )
 if defined WARNED echo   [注意] 有 WARN 项, cudagl 后端可能不可用
 echo.
-echo   水下 16 路:  pwsh scripts\run_underwater.ps1 ^<采样目录^> -Seconds 30
+echo   水下 16 路:  scripts\run_win.bat under ^<采样目录^>
 echo   六路 4K:     scripts\run_win.bat
 echo   自检:        scripts\install.bat check
 echo ==========================================================
