@@ -47,6 +47,10 @@ struct BenchmarkManifest final {
   std::string run_id;
   std::string asset_sha256;
   std::array<std::string, kMaxCameras> source_sha256;
+  // How many of the array's slots the manifest actually filled. The array is
+  // sized for the largest layout, so without this a reader cannot tell an empty
+  // trailing slot from a lane that was declared and hashed.
+  std::uint32_t source_count{};
 };
 
 // Camera identity is data, not code: `source.<id>=<path>` lines define both the

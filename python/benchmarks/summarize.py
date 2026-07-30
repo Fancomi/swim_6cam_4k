@@ -44,6 +44,7 @@ REQUIRED_FIELDS = {
     "compiler",
     "git_sha",
     "stream_count",
+    "source_count",
     "elapsed_s",
     "render_fps",
     "preview_fps",
@@ -158,12 +159,13 @@ NONNEGATIVE_INTEGER_FIELDS = {
     "decoded_pixel_host_copies", "native_texture_wrappers",
     "native_command_buffers", "native_decode_tickets",
     "native_callback_wrappers", "application_owned_frame_allocations",
-    "sources_healthy", "output_width", "output_height",
+    "sources_healthy", "output_width", "output_height", "source_count",
     "requested_stream_count", "resolved_active_sources", "rss_bytes",
     "gpu_allocated_bytes",
 }
 
-SIX_INTEGER_ARRAY_FIELDS = {
+# One entry per lane the run actually drives, not per array slot.
+PER_LANE_INTEGER_ARRAY_FIELDS = {
     "camera_received", "camera_decoded", "camera_published",
     "mailbox_overwrites", "frame_reuses", "decode_surface_pool_capacity",
     "decode_surface_pool_in_use", "decode_surface_pool_high_water",
@@ -261,21 +263,42 @@ def _require_nonnegative_integer(record: dict, field: str, context: str) -> int:
     return value
 
 
-def _require_six_integer_array(record: dict, field: str, context: str) -> list[int]:
+def _lane_count(record: dict, context: str) -> int:
+    """How many entries a per-lane array must carry in this record.
+
+    The runtime emits one entry per lane it actually drives (`resolved_active_sources`),
+    not one per slot of the fixed-capacity array — a render-only cell drives none
+    and reports empty arrays. Hard-coding six here silently passed only while the
+    pool was the one layout; the 16-plane line then failed validation on arrays
+    that were correct."""
+    value = record["resolved_active_sources"]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise MatrixValidationError(
+            f"{context}: resolved_active_sources must be a nonnegative integer")
+    return value
+
+
+def _require_lane_integer_array(record: dict, field: str, context: str,
+                                lanes: int) -> list[int]:
     values = record[field]
-    if not isinstance(values, list) or len(values) != 6:
-        raise MatrixValidationError(f"{context}: {field} must be a six-element integer array")
+    if not isinstance(values, list) or len(values) != lanes:
+        raise MatrixValidationError(
+            f"{context}: {field} must have one entry per active lane ({lanes})")
     if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in values):
         raise MatrixValidationError(f"{context}: {field} must contain nonnegative integers")
     return values
 
 
-def _validate_capacity(record: dict, capacity: str, high_water: str, context: str) -> None:
+def _validate_capacity(record: dict, capacity: str, high_water: str, context: str,
+                       lanes: int) -> None:
     capacities = record[capacity]
     high_waters = record[high_water]
     if isinstance(capacities, list) or isinstance(high_waters, list):
-        if not isinstance(capacities, list) or not isinstance(high_waters, list) or len(capacities) != 6 or len(high_waters) != 6:
-            raise MatrixValidationError(f"{context}: {capacity}/{high_water} must be six-element arrays")
+        if (not isinstance(capacities, list) or not isinstance(high_waters, list)
+                or len(capacities) != lanes or len(high_waters) != lanes):
+            raise MatrixValidationError(
+                f"{context}: {capacity}/{high_water} must have one entry per "
+                f"active lane ({lanes})")
         pairs = zip(capacities, high_waters)
     else:
         pairs = ((capacities, high_waters),)
@@ -326,15 +349,17 @@ def _validate_record(record: dict, index: int) -> None:
         "snapshot_age_spread_ms_p99",
     ):
         _require_nonnegative_number(record, field, context)
+    lanes = _lane_count(record, context)
     for field in ("frame_age_ms_p50", "frame_age_ms_p95", "frame_age_ms_p99"):
         values = record[field]
-        if not isinstance(values, list) or len(values) != 6:
-            raise MatrixValidationError(f"{context}: {field} must be a six-element array")
+        if not isinstance(values, list) or len(values) != lanes:
+            raise MatrixValidationError(
+                f"{context}: {field} must have one entry per active lane ({lanes})")
         for value in values:
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
                 raise MatrixValidationError(f"{context}: {field} contains an invalid value")
-    for field in SIX_INTEGER_ARRAY_FIELDS:
-        _require_six_integer_array(record, field, context)
+    for field in PER_LANE_INTEGER_ARRAY_FIELDS:
+        _require_lane_integer_array(record, field, context, lanes)
     if record["decoded_pixel_host_copies"] != 0:
         raise MatrixValidationError(f"{context}: decoded_pixel_host_copies must be zero")
     if record["application_owned_frame_allocations"] != 0:
@@ -355,7 +380,7 @@ def _validate_record(record: dict, index: int) -> None:
         ("encode_input_capacity", "encode_input_high_water"),
         ("encode_input_capacity", "encode_input_in_use"),
     ):
-        _validate_capacity(record, capacity, high_water, context)
+        _validate_capacity(record, capacity, high_water, context, lanes)
     expected_graph = _expected_graph(record["stage"], record["stream_count"])
     graph = record["resolved_graph"]
     if not isinstance(graph, dict) or set(graph) != set(expected_graph):
@@ -411,11 +436,16 @@ def _validate_record(record: dict, index: int) -> None:
         raise MatrixValidationError(f"{context}: fingerprints_verified must be boolean")
     if not isinstance(record["asset_sha256"], str) or HEX_64.fullmatch(record["asset_sha256"]) is None:
         raise MatrixValidationError(f"{context}: asset_sha256 must be 64 hexadecimal digits")
+    # One hash per declared lane, which for a partial-stream cell is more than
+    # the lanes it drives: the fingerprint identifies the inputs, not the run.
+    declared = _require_nonnegative_integer(record, "source_count", context)
     source_hashes = record["source_sha256"]
-    if not isinstance(source_hashes, list) or len(source_hashes) != 6 or any(
+    if not isinstance(source_hashes, list) or len(source_hashes) != declared or any(
         not isinstance(value, str) or HEX_64.fullmatch(value) is None for value in source_hashes
     ):
-        raise MatrixValidationError(f"{context}: source_sha256 must contain six SHA-256 values")
+        raise MatrixValidationError(
+            f"{context}: source_sha256 must carry one SHA-256 per declared "
+            f"source ({declared})")
     machine = record["machine"]
     if not isinstance(machine, dict) or set(machine) != {"hostname", "os", "arch"} or any(
         not isinstance(machine[key], str) or not machine[key] for key in machine
@@ -663,7 +693,10 @@ def summarize_records(records: list[dict]) -> list[SummaryRow]:
         final = finals[0]
         intervals = [record for record in cell_records if not record["final"]]
         interval_fps = [_throughput(record) for record in intervals]
-        age_values = [float(value) for value in final["frame_age_ms_p95"][:stream_count]]
+        # The array already holds exactly the driven lanes, so no slice: slicing
+        # by stream_count silently dropped nothing for the pool and would drop
+        # real lanes for a wider layout.
+        age_values = [float(value) for value in final["frame_age_ms_p95"]]
         rows.append(
             SummaryRow(
                 stage=stage,

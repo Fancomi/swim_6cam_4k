@@ -57,8 +57,10 @@ swim::core::BenchmarkReporterMetadata reporter_metadata() {
   swim::core::BenchmarkManifest manifest;
   manifest.run_id = "run\\id\nline";
   manifest.asset_sha256 = std::string(64, 'a');
-  for (std::size_t camera = 0; camera < manifest.source_sha256.size();
-       ++camera) {
+  // Six declared lanes: the array is sized for the widest layout, and
+  // source_count is what says how much of it is real.
+  manifest.source_count = 6;
+  for (std::uint32_t camera = 0; camera < manifest.source_count; ++camera) {
     manifest.source_sha256[camera] =
         std::string(64, static_cast<char>('0' + camera));
   }
@@ -112,7 +114,11 @@ TEST_CASE(benchmark_json_escapes_strings_and_contains_exact_schema_groups) {
   CHECK(line.find("\"resolved_graph\":{") != std::string::npos);
   CHECK(line.find("\"build_type\":") != std::string::npos);
   CHECK(line.find("\"git_sha\":") != std::string::npos);
-  CHECK(line.find("\"source_sha256\":[") != std::string::npos);
+  // Exactly the declared lanes, in declaration order.
+  CHECK(line.find("\"source_count\":6") != std::string::npos);
+  CHECK(line.find(std::string("\"source_sha256\":[\"") + std::string(64, '0')
+                  + "\",\"" + std::string(64, '1') + "\",") !=
+        std::string::npos);
   CHECK(line.find("\"frame_age_ms_p50\":[30,31,32,33,34,35]") !=
         std::string::npos);
   CHECK(line.find("\"mailbox_overwrites\":[10,11,12,13,14,15]") !=
@@ -182,9 +188,9 @@ TEST_CASE(schema_keeps_unverified_hash_keys_and_final_rates_use_completion_span)
   CHECK(line.find("\"fingerprints_verified\":false") !=
         std::string::npos);
   CHECK(line.find("\"asset_sha256\":null") != std::string::npos);
-  CHECK(line.find(
-            "\"source_sha256\":[null,null,null,null,null,null]") !=
-        std::string::npos);
+  // Empty, not a fixed run of nulls: an unverified run hashed nothing, and
+  // padding to the array's capacity claimed six inputs that were never read.
+  CHECK(line.find("\"source_sha256\":[]") != std::string::npos);
 }
 
 TEST_CASE(schema_reports_unavailable_process_and_gpu_resources_as_null) {

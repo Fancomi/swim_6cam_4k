@@ -94,8 +94,20 @@ config_cameras() {
   awk -F= '/^source\.[^.]+=/ {sub(/^source\./, "", $1); print $1}' "$CONFIG"
 }
 
+# Config paths may carry ${NAME} tokens; the C++ loader expands them from the
+# environment (config.cpp: expand_environment_variables), so the fingerprinting
+# here has to expand the same way or it hashes a path that does not exist.
+# envsubst is not installed everywhere, so expand only the ${NAME} form by hand.
 resolve_path() {
   local value="$1"
+  while [[ "$value" =~ \$\{([A-Za-z_][A-Za-z_0-9]*)\} ]]; do
+    local name="${BASH_REMATCH[1]}"
+    if [[ -z "${!name+set}" ]]; then
+      echo "config references \${$name} but it is not set" >&2
+      exit 2
+    fi
+    value="${value//\$\{$name\}/${!name}}"
+  done
   if [[ "$value" = /* ]]; then
     printf '%s\n' "$value"
   else

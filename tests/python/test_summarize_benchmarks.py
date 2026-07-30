@@ -49,7 +49,10 @@ def record_for(
     rendered = 0 if stage == "decode-only" else 450
     previewed = rendered if graph["preview"] else 0
     encoded = rendered if graph["encode"] else 0
-    camera_received = [450 if i < graph["active_sources"] else 0 for i in range(6)]
+    # Per-lane arrays carry one entry per lane the run drives, not per array
+    # slot: render-only drives none and reports empty arrays.
+    lanes = graph["active_sources"]
+    camera_received = [450] * lanes
     return {
         "schema": 1,
         "run_id": "run-fixed",
@@ -62,21 +65,22 @@ def record_for(
         "compiler": "AppleClang 18.0.0",
         "git_sha": "a" * 40,
         "stream_count": stream_count,
+        "source_count": 6,
         "elapsed_s": elapsed_s,
         "render_fps": throughput if rendered else 0.0,
         "preview_fps": throughput if previewed else 0.0,
         "encode_fps": throughput if encoded else 0.0,
         "gpu_render_ms_p50": 2,
         "gpu_render_ms_p95": 3,
-        "frame_age_ms_p50": [1] * 6,
-        "frame_age_ms_p95": [2] * 6,
-        "frame_age_ms_p99": [3] * 6,
+        "frame_age_ms_p50": [1] * lanes,
+        "frame_age_ms_p95": [2] * lanes,
+        "frame_age_ms_p99": [3] * lanes,
         "snapshot_age_spread_ms_p99": 1,
         "camera_received": camera_received,
         "camera_decoded": camera_received,
         "camera_published": camera_received,
-        "mailbox_overwrites": [0] * 6,
-        "frame_reuses": [0] * 6,
+        "mailbox_overwrites": [0] * lanes,
+        "frame_reuses": [0] * lanes,
         "received": received,
         "decoded": received,
         "published": received,
@@ -117,14 +121,14 @@ def record_for(
         "render_output_in_use": 0,
         "render_output_high_water": 2 if rendered else 0,
         "render_output_pool_misses": 0,
-        "decode_surface_pool_capacity": [8] * 6,
-        "decode_surface_pool_in_use": [0] * 6,
-        "decode_surface_pool_high_water": [4 if i < graph["active_sources"] else 0 for i in range(6)],
-        "decode_surface_pool_misses": [0] * 6,
-        "decode_ticket_pool_capacity": [16] * 6,
-        "decode_ticket_pool_in_use": [0] * 6,
-        "decode_ticket_pool_high_water": [4 if i < graph["active_sources"] else 0 for i in range(6)],
-        "decode_ticket_pool_misses": [0] * 6,
+        "decode_surface_pool_capacity": [8] * lanes,
+        "decode_surface_pool_in_use": [0] * lanes,
+        "decode_surface_pool_high_water": [4] * lanes,
+        "decode_surface_pool_misses": [0] * lanes,
+        "decode_ticket_pool_capacity": [16] * lanes,
+        "decode_ticket_pool_in_use": [0] * lanes,
+        "decode_ticket_pool_high_water": [4] * lanes,
+        "decode_ticket_pool_misses": [0] * lanes,
         "encode_input_capacity": 2,
         "encode_input_in_use": 0,
         "encode_input_high_water": 2 if graph["encode"] else 0,
@@ -304,6 +308,42 @@ class ValidateMatrixTest(unittest.TestCase):
         ):
             record[field] = 0
         validate_cell_records([record])
+
+    def test_per_lane_arrays_size_to_the_driven_lanes(self):
+        # The runtime emits one entry per lane it drives, so a fixed six here
+        # rejected the 16-plane line's correct records and accepted a six-camera
+        # record that had lost lanes.
+        for stream_count in (1, 2, 4, 6):
+            record = record_for("full", stream_count, "paced", final=True)
+            with self.subTest(stream_count=stream_count):
+                self.assertEqual(len(record["camera_decoded"]), stream_count)
+                validate_cell_records([record])
+
+    def test_render_only_reports_empty_per_lane_arrays(self):
+        # render-only drives no source at all; empty is the correct answer, and
+        # padding to six would claim lanes that never existed.
+        record = record_for("render-only", 1, "paced", final=True)
+        self.assertEqual(record["resolved_active_sources"], 0)
+        self.assertEqual(record["camera_decoded"], [])
+        validate_cell_records([record])
+
+    def test_rejects_a_per_lane_array_that_lost_a_lane(self):
+        record = record_for("full", 6, "paced", final=True)
+        record["camera_decoded"] = record["camera_decoded"][:-1]
+        with self.assertRaisesRegex(MatrixValidationError, "one entry per active lane"):
+            validate_cell_records([record])
+
+    def test_source_hashes_count_declared_lanes_not_driven_ones(self):
+        # A one-stream cell still fingerprints all six declared inputs: the hash
+        # identifies what was on disk, not what the run touched.
+        record = record_for("full", 1, "paced", final=True)
+        self.assertEqual(record["source_count"], 6)
+        self.assertEqual(len(record["source_sha256"]), 6)
+        validate_cell_records([record])
+
+        record["source_sha256"] = record["source_sha256"][:1]
+        with self.assertRaisesRegex(MatrixValidationError, "per declared source"):
+            validate_cell_records([record])
 
     def test_publishable_rejects_any_malformed_input(self):
         records = complete_matrix()

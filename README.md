@@ -276,7 +276,13 @@ RGB 欧氏距离超阈判为前景，按时间顺序叠上去（后帧覆盖前�
 
 矩阵覆盖六个真实 stage × `1/2/4/6` 路 × paced/unpaced 共 48 格。脚本只构建一次 Release、
 只算一次 asset 与各源的 SHA-256，每格写独立 JSONL 并立即校验；任一进程或校验失败即停，
-不会静默重试或拼进最终结果。结果在 `outputs/benchmarks/runs/<run_id>/`，成功后
+不会静默重试或拼进最终结果。相机清单从 config 的 `source.*` 声明顺序读（与 C++ 加载器
+同一口径），路径里的 `${VAR}` 与运行时一样从环境变量展开。
+
+逐路数组（`camera_decoded`、`frame_age_ms_*`、各池的 high-water）每条记录只带**该次运行
+实际驱动的路数**，不是数组容量：`render-only` 一路都不驱动，数组就是空的。`source_sha256`
+则按**声明的**路数给（部分路数的格子仍指纹全部输入，因为哈希标识的是磁盘上的东西，不是这
+一格碰过什么）。结果在 `outputs/benchmarks/runs/<run_id>/`，成功后
 `outputs/benchmarks/latest` 指向它：`cells/*.jsonl`（带唯一 `(stage, stream_count, pacing)`
 身份的原始格）、`results.jsonl`（48 格全过才生成）、`summary.csv`、`summary.md`、
 `manifest.json`（run/build/hash 身份与 `publishable` 标志；不足 15 秒恒为 `false`）。

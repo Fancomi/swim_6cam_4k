@@ -337,6 +337,7 @@ std::string serialize_benchmark_record(
   append_string(line, "compiler", build_info::compiler);
   append_string(line, "git_sha", build_info::git_sha);
   line << ",\"stream_count\":" << metadata.config.stream_count
+       << ",\"source_count\":" << metadata.config.source_count
        << ",\"elapsed_s\":" << elapsed_seconds
        << ",\"render_fps\":" << render_fps
        << ",\"preview_fps\":" << rate(preview_completions, elapsed_seconds)
@@ -551,9 +552,12 @@ std::string serialize_benchmark_record(
   if (metadata.manifest.has_value()) {
     line << ",\"fingerprints_verified\":true";
     append_string(line, "asset_sha256", metadata.manifest->asset_sha256);
+    // Only the lanes the manifest actually hashed. The array is sized for the
+    // largest layout, so emitting all of it appended empty strings that read as
+    // real-but-blank hashes.
     line << ",\"source_sha256\":[";
-    for (std::size_t index = 0;
-         index < metadata.manifest->source_sha256.size(); ++index) {
+    for (std::uint32_t index = 0; index < metadata.manifest->source_count;
+         ++index) {
       if (index != 0) {
         line << ',';
       }
@@ -564,7 +568,7 @@ std::string serialize_benchmark_record(
   } else {
     line << ",\"fingerprints_verified\":false"
          << ",\"asset_sha256\":null"
-         << ",\"source_sha256\":[null,null,null,null,null,null]";
+         << ",\"source_sha256\":[]";
   }
   line << ",\"machine\":{";
   line << "\"hostname\":\"" << json_escape(machine[0]) << '"'

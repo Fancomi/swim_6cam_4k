@@ -539,6 +539,7 @@ BenchmarkManifest load_benchmark_manifest(const std::filesystem::path& path) {
                  "manifest must declare at least one "
                  "'source.<camera-id>_sha256' key");
   }
+  manifest.source_count = static_cast<std::uint32_t>(source_count);
   return manifest;
 }
 

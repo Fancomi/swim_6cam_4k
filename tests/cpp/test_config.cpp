@@ -426,6 +426,10 @@ TEST_CASE(loads_strict_benchmark_fingerprint_manifest) {
            "0000000000000000000000000000000000000000000000000000000000000000");
   CHECK_EQ(manifest.source_sha256[5],
            "5555555555555555555555555555555555555555555555555555555555555555");
+  // The array is sized for the widest layout; source_count is what tells a
+  // reader how much of it the manifest actually filled.
+  CHECK_EQ(manifest.source_count, 6u);
+  CHECK(manifest.source_sha256[6].empty());
 }
 
 TEST_CASE(strict_benchmark_manifest_rejects_missing_duplicate_and_bad_hashes) {
