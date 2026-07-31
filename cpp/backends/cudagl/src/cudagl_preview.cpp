@@ -1,5 +1,7 @@
 #include <swim/cudagl/cudagl_preview.hpp>
 
+#include <swim/core/preview_layout.hpp>
+
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
@@ -13,15 +15,19 @@
 namespace swim::cudagl {
 namespace {
 
-constexpr int kWindowWidth = 1251;
-constexpr int kWindowHeight = 526;
-
 // Blit the composite RGBA texture to the window with a fullscreen triangle.
+//
+// No v flip here. The renderer maps canvas row 0 to NDC y=+1, and for a render
+// target NDC y=+1 is texture v=1 — so canvas row 0 lives at v=1, and the window
+// top (p.y=1) must sample v=1. Flipping v instead put the canvas's last row at
+// the top of the window, which is what rendered the pool upside down.
+// (cudagl_renderer.cpp's SWIM_DUMP_RAW path flips rows for the opposite reason:
+// glReadPixels starts at v=0, the canvas's last row.)
 const char* kBlitVertex = R"GLSL(#version 330 core
 out vec2 v_uv;
 void main(){
   vec2 p = vec2((gl_VertexID<<1)&2, gl_VertexID&2);
-  v_uv = vec2(p.x, 1.0 - p.y);
+  v_uv = p;
   gl_Position = vec4(p*2.0-1.0, 0.0, 1.0);
 }
 )GLSL";
@@ -57,7 +63,12 @@ class CudaGlPreview::Impl {
         height_(height),
         metrics_(metrics),
         close_callback_(std::move(close_callback)),
-        visible_(visible) {}
+        visible_(visible) {
+    if (width_ == 0 || height_ == 0) {
+      throw std::invalid_argument(
+          "CUDA/GL preview requires nonzero dimensions");
+    }
+  }
 
   ~Impl() { destroy_window(); }
 
@@ -100,12 +111,22 @@ class CudaGlPreview::Impl {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_VISIBLE, GLFW_TRUE);
-    window_ = glfwCreateWindow(kWindowWidth, kWindowHeight,
+    // Open at the composite's own aspect ratio; the three lines range from
+    // 2.4:1 to 9.1:1, so one baked-in size fits at most one of them.
+    const auto [window_width, window_height] =
+        swim::core::preview_target_size(width_, height_);
+    window_ = glfwCreateWindow(static_cast<int>(window_width),
+                               static_cast<int>(window_height),
                                "swim realtime preview (CUDA/GL)", nullptr,
                                context_->gl_context);
     if (window_ == nullptr) {
       throw std::runtime_error("cannot create CUDA/GL preview window");
     }
+    // Pin the ratio through resizes, so what the user drags stays a scaled view
+    // of the whole stitch. present_latest() letterboxes whatever the pin cannot
+    // enforce (maximise, tiling, whole-pixel rounding).
+    glfwSetWindowAspectRatio(window_, static_cast<int>(width_),
+                             static_cast<int>(height_));
     glfwMakeContextCurrent(window_);
     glfwSwapInterval(1);
     // The GL entry-point table may not have been populated yet (the renderer
@@ -133,9 +154,19 @@ class CudaGlPreview::Impl {
     }
     int fbw = 0, fbh = 0;
     glfwGetFramebufferSize(window_, &fbw, &fbh);
+    // Clear the whole framebuffer, then draw into the largest centred rectangle
+    // of the composite's shape: off-ratio windows letterbox instead of stretch.
     glViewport(0, 0, fbw, fbh);
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
+    const auto box = swim::core::preview_viewport(
+        static_cast<std::uint32_t>(fbw < 0 ? 0 : fbw),
+        static_cast<std::uint32_t>(fbh < 0 ? 0 : fbh), width_, height_);
+    if (box.width == 0 || box.height == 0) {
+      return;
+    }
+    glViewport(box.x, box.y, static_cast<GLsizei>(box.width),
+               static_cast<GLsizei>(box.height));
     glDisable(GL_BLEND);
     glUseProgram(blit_program_);
     glActiveTexture(GL_TEXTURE0);

@@ -1,5 +1,7 @@
 #include <swim/d3d11/d3d11_preview.hpp>
 
+#include <swim/core/preview_layout.hpp>
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -10,23 +12,23 @@
 
 #include <d3dcompiler.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <utility>
 
 namespace swim::d3d11 {
 namespace {
 
 constexpr wchar_t kWindowClass[] = L"SwimD3D11PreviewWindow";
-// Present the 5002x2102 composite scaled into a modest window.
-constexpr UINT kWindowWidth = 1251;
-constexpr UINT kWindowHeight = 526;
 
 // Minimal blit: fullscreen triangle from SV_VertexID sampling the composite
 // SRV. No vertex buffer needed.
@@ -74,6 +76,13 @@ class D3D11Preview::Impl {
     if (context_ == nullptr || context_->device == nullptr) {
       throw std::invalid_argument("D3D11 preview requires a valid context");
     }
+    if (width_ == 0 || height_ == 0) {
+      throw std::invalid_argument("D3D11 preview requires nonzero dimensions");
+    }
+    // Open at the composite's own aspect ratio. The three lines range from
+    // 2.4:1 to 9.1:1, so one baked-in window size fits at most one of them.
+    std::tie(window_width_, window_height_) =
+        swim::core::preview_target_size(width_, height_);
     build_blit_pipeline();
   }
 
@@ -151,9 +160,9 @@ class D3D11Preview::Impl {
 
   static LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam,
                                       LPARAM lparam) {
+    auto* self =
+        reinterpret_cast<Impl*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (message == WM_CLOSE || message == WM_DESTROY) {
-      auto* self = reinterpret_cast<Impl*>(
-          GetWindowLongPtrW(hwnd, GWLP_USERDATA));
       if (self != nullptr && self->close_callback_) {
         self->close_callback_();
       }
@@ -162,7 +171,85 @@ class D3D11Preview::Impl {
       }
       return 0;
     }
+    if (message == WM_SIZING && self != nullptr) {
+      // Constrain the live drag to the composite's ratio, so the window the
+      // user lets go of is already a scaled view of the whole stitch.
+      self->constrain_drag(static_cast<UINT>(wparam),
+                           reinterpret_cast<RECT*>(lparam));
+      return TRUE;
+    }
+    if (message == WM_SIZE && self != nullptr) {
+      // Deferred: the swap chain has to be resized with the device context
+      // mutex held, and present_latest() is where that lock is taken.
+      self->resize_pending_.store(true, std::memory_order_release);
+      return 0;
+    }
     return DefWindowProcW(hwnd, message, wparam, lparam);
+  }
+
+  // Snap a WM_SIZING drag rectangle to the composite's aspect ratio. The ratio
+  // applies to the client area, so the frame is subtracted first and added back
+  // afterwards; which edge the user grabbed decides whether width follows
+  // height or the other way round.
+  void constrain_drag(UINT edge, RECT* rect) const noexcept {
+    if (rect == nullptr) {
+      return;
+    }
+    RECT frame{0, 0, 0, 0};
+    AdjustWindowRect(&frame, WS_OVERLAPPEDWINDOW, FALSE);
+    const LONG frame_width = (frame.right - frame.left);
+    const LONG frame_height = (frame.bottom - frame.top);
+    const LONG client_width = (rect->right - rect->left) - frame_width;
+    const LONG client_height = (rect->bottom - rect->top) - frame_height;
+    if (client_width <= 0 || client_height <= 0) {
+      return;
+    }
+    const double aspect =
+        static_cast<double>(width_) / static_cast<double>(height_);
+
+    // Dragging a vertical edge fixes the width and derives the height; a
+    // horizontal edge does the reverse. Corners follow the width, which is the
+    // dominant axis for these panoramas.
+    LONG target_width = client_width;
+    LONG target_height = client_height;
+    switch (edge) {
+      case WMSZ_TOP:
+      case WMSZ_BOTTOM:
+        target_width = std::max<LONG>(
+            1, static_cast<LONG>(std::lround(client_height * aspect)));
+        break;
+      default:
+        target_height = std::max<LONG>(
+            1, static_cast<LONG>(std::lround(client_width / aspect)));
+        break;
+    }
+
+    // Grow away from the edge being held so the grabbed side stays under the
+    // cursor instead of sliding out from under it.
+    const LONG width_delta = (target_width + frame_width) -
+                             (rect->right - rect->left);
+    const LONG height_delta = (target_height + frame_height) -
+                              (rect->bottom - rect->top);
+    switch (edge) {
+      case WMSZ_LEFT:
+      case WMSZ_TOPLEFT:
+      case WMSZ_BOTTOMLEFT:
+        rect->left -= width_delta;
+        break;
+      default:
+        rect->right += width_delta;
+        break;
+    }
+    switch (edge) {
+      case WMSZ_TOP:
+      case WMSZ_TOPLEFT:
+      case WMSZ_TOPRIGHT:
+        rect->top -= height_delta;
+        break;
+      default:
+        rect->bottom += height_delta;
+        break;
+    }
   }
 
   void create_window() {
@@ -174,8 +261,8 @@ class D3D11Preview::Impl {
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     RegisterClassExW(&wc);
 
-    RECT rect{0, 0, static_cast<LONG>(kWindowWidth),
-              static_cast<LONG>(kWindowHeight)};
+    RECT rect{0, 0, static_cast<LONG>(window_width_),
+              static_cast<LONG>(window_height_)};
     AdjustWindowRect(&rect, WS_OVERLAPPEDWINDOW, FALSE);
     hwnd_ = CreateWindowExW(0, kWindowClass, L"swim realtime preview",
                             WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
@@ -187,8 +274,8 @@ class D3D11Preview::Impl {
     SetWindowLongPtrW(hwnd_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
 
     DXGI_SWAP_CHAIN_DESC1 desc{};
-    desc.Width = kWindowWidth;
-    desc.Height = kWindowHeight;
+    desc.Width = window_width_;
+    desc.Height = window_height_;
     desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     desc.SampleDesc.Count = 1;
     desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
@@ -217,6 +304,42 @@ class D3D11Preview::Impl {
     }
   }
 
+  // Match the swap chain to the client area. Called with the device context
+  // mutex held; the RTV must be released before ResizeBuffers or DXGI refuses
+  // with DXGI_ERROR_INVALID_CALL.
+  void resize_swap_chain() noexcept {
+    RECT client{};
+    if (GetClientRect(hwnd_, &client) == 0) {
+      return;
+    }
+    const auto width = static_cast<UINT>(std::max<LONG>(1, client.right));
+    const auto height = static_cast<UINT>(std::max<LONG>(1, client.bottom));
+    if (width == window_width_ && height == window_height_) {
+      return;
+    }
+    ID3D11RenderTargetView* none = nullptr;
+    context_->immediate_context->OMSetRenderTargets(1, &none, nullptr);
+    backbuffer_rtv_.Reset();
+    if (FAILED(swap_chain_->ResizeBuffers(0, width, height,
+                                         DXGI_FORMAT_UNKNOWN, 0))) {
+      // Keep presenting at the old size rather than tearing down the run; the
+      // next resize gets another chance.
+      create_backbuffer_rtv_noexcept();
+      return;
+    }
+    window_width_ = width;
+    window_height_ = height;
+    create_backbuffer_rtv_noexcept();
+  }
+
+  void create_backbuffer_rtv_noexcept() noexcept {
+    try {
+      create_backbuffer_rtv();
+    } catch (...) {
+      backbuffer_rtv_.Reset();
+    }
+  }
+
   void present_latest() {
     D3D11OutputLease latest;
     {
@@ -237,12 +360,26 @@ class D3D11Preview::Impl {
     }
 
     std::lock_guard lock(context_->context_mutex);
+    if (resize_pending_.exchange(false, std::memory_order_acq_rel)) {
+      resize_swap_chain();
+    }
+    if (backbuffer_rtv_ == nullptr) {
+      return;
+    }
     auto* ctx = context_->immediate_context.Get();
     ID3D11RenderTargetView* rtv = backbuffer_rtv_.Get();
     ctx->OMSetRenderTargets(1, &rtv, nullptr);
+    // Clear first: a window dragged off-ratio, maximised, or snapped shows the
+    // content letterboxed inside these bars instead of stretched to fit.
+    constexpr std::array<float, 4> black{0.0F, 0.0F, 0.0F, 1.0F};
+    ctx->ClearRenderTargetView(rtv, black.data());
+    const auto box = swim::core::preview_viewport(window_width_, window_height_,
+                                                 width_, height_);
     D3D11_VIEWPORT viewport{};
-    viewport.Width = static_cast<float>(kWindowWidth);
-    viewport.Height = static_cast<float>(kWindowHeight);
+    viewport.TopLeftX = static_cast<float>(box.x);
+    viewport.TopLeftY = static_cast<float>(box.y);
+    viewport.Width = static_cast<float>(box.width);
+    viewport.Height = static_cast<float>(box.height);
     viewport.MaxDepth = 1.0F;
     ctx->RSSetViewports(1, &viewport);
     ctx->IASetInputLayout(nullptr);
@@ -272,6 +409,10 @@ class D3D11Preview::Impl {
   std::shared_ptr<D3D11Context> context_;
   std::uint32_t width_;
   std::uint32_t height_;
+  // Client-area size of the preview window, tracking the composite's aspect at
+  // creation and the user's drags afterwards.
+  UINT window_width_{};
+  UINT window_height_{};
   swim::core::RuntimeCounters& metrics_;
   CloseCallback close_callback_;
   bool visible_;
@@ -284,6 +425,7 @@ class D3D11Preview::Impl {
   std::mutex mutex_;
   D3D11OutputLease pending_;
   bool has_pending_ = false;
+  std::atomic_bool resize_pending_{false};
   std::atomic_bool stop_requested_{false};
 };
 

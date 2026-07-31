@@ -1,5 +1,6 @@
 #include <swim/metal/metal_preview.hpp>
 
+#include <swim/core/preview_layout.hpp>
 #include <swim/core/render_completion_gate.hpp>
 
 #import <Cocoa/Cocoa.h>
@@ -47,11 +48,6 @@
 
 namespace swim::metal {
 namespace {
-
-// Preview target geometry. The width is the nominal size; very wide composites
-// trade width for the minimum legible height instead of being stretched.
-constexpr std::uint32_t kPreviewTargetWidth = 1280;
-constexpr std::uint32_t kPreviewMinimumHeight = 180;
 
 struct PreviewScale final {
   float x;
@@ -140,18 +136,7 @@ fragment float4 preview_fragment(PreviewVertexOut in [[stage_in]],
 
 std::pair<std::uint32_t, std::uint32_t> preview_target_size(
     std::uint32_t width, std::uint32_t height) {
-  if (width == 0 || height == 0) {
-    throw std::invalid_argument("preview target needs nonzero dimensions");
-  }
-  auto target_width = kPreviewTargetWidth;
-  auto target_height = static_cast<std::uint32_t>(std::lround(
-      static_cast<double>(kPreviewTargetWidth) * height / width));
-  if (target_height < kPreviewMinimumHeight) {
-    target_height = kPreviewMinimumHeight;
-    target_width = static_cast<std::uint32_t>(std::lround(
-        static_cast<double>(kPreviewMinimumHeight) * width / height));
-  }
-  return {target_width, target_height};
+  return swim::core::preview_target_size(width, height);
 }
 
 class MetalPreview::Impl final

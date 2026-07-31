@@ -166,11 +166,10 @@ class PreviewPresentationAccounting final {
   std::atomic_uint64_t value_{0};
 };
 
-// Preview target size for a composite of `width` x `height`: the nominal
-// 1280-wide target scaled to the composite's own aspect ratio, so the presenter
-// never letterboxes an untouched window. Very wide panoramas would derive an
-// illegibly short height, so those trade width for the minimum height instead.
-// Exposed for tests; the presenter applies exactly this rule.
+// Preview target size for a composite of `width` x `height`. Thin forwarder to
+// `swim::core::preview_target_size` (cpp/core/include/swim/core/preview_layout.hpp),
+// which every backend's presenter shares; kept here so the Metal preview tests
+// exercise it through the same header they exercise the presenter through.
 std::pair<std::uint32_t, std::uint32_t> preview_target_size(
     std::uint32_t width, std::uint32_t height);
 

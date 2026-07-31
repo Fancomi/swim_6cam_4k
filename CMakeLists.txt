@@ -84,6 +84,7 @@ add_executable(swim_core_tests
   tests/cpp/test_config.cpp
   tests/cpp/test_frame_mailbox.cpp
   tests/cpp/test_lane_pacing.cpp
+  tests/cpp/test_preview_layout.cpp
   tests/cpp/test_render_coordinator.cpp
   tests/cpp/test_run_lifecycle.cpp
   tests/cpp/test_metrics.cpp)
