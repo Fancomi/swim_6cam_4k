@@ -4,6 +4,7 @@ The three lines share one code path, so most tests here assert that a per-line
 difference really is a profile field and not a branch.
 """
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -708,6 +709,54 @@ class RuntimeConfigTest(unittest.TestCase):
             target = td / "target"
             target.write_text("y")
             self.assertTrue(R.newer_than(target, source))
+
+    def test_build_inputs_cover_the_config_loader_and_cmake(self):
+        # The stale-exe symptom this guards against is remote from its cause: an
+        # exe older than config.cpp rejects a freshly written config's newest key
+        # as `unknown key`, blaming the config file.
+        from python.stitch import run as R
+        inputs = set(R.build_inputs())
+        for required in (ROOT / "CMakeLists.txt",
+                         ROOT / "cpp" / "core" / "src" / "config.cpp",
+                         ROOT / "cpp" / "core" / "include" / "swim" / "core"
+                         / "config.hpp"):
+            self.assertIn(required, inputs)
+        # Every backend's sources count, whichever one this run selects: the exe
+        # links all of them that were available at configure time.
+        for backend in ("metal", "d3d11", "cudagl"):
+            self.assertTrue(
+                any(f"backends{os.sep}{backend}{os.sep}" in str(path)
+                    for path in inputs), backend)
+
+    def test_build_step_rebuilds_when_a_source_is_newer_than_the_exe(self):
+        import argparse
+        from python.stitch import run as R
+        line = P.get("pool")
+        with tempfile.TemporaryDirectory() as td:
+            exe = Path(td) / "swim_realtime"
+            exe.write_text("stale")
+            source = Path(td) / "config.cpp"
+            source.write_text("newer")
+            os.utime(source, (exe.stat().st_mtime + 10,) * 2)
+            built = []
+            originals = (R.executable_for, R.build_inputs, R.run,
+                         R.copy_runtime_dlls)
+            try:
+                R.executable_for = lambda _build_dir: exe
+                R.build_inputs = lambda: [source]
+                R.run = lambda command, **_kwargs: built.append(command)
+                R.copy_runtime_dlls = lambda _destination: None
+                args = argparse.Namespace(backend="metal", force=False)
+                R.step_build(line, args)
+                self.assertTrue(built, "a newer source must trigger a build")
+                # And the same tree is skipped once the exe is the newer file.
+                built.clear()
+                os.utime(exe, (source.stat().st_mtime + 10,) * 2)
+                R.step_build(line, args)
+                self.assertEqual(built, [])
+            finally:
+                (R.executable_for, R.build_inputs, R.run,
+                 R.copy_runtime_dlls) = originals
 
     def test_shaping_stamp_is_per_line_and_covers_every_bake_option(self):
         # mtime cannot see a changed --ppm, so the stamp is what makes the asset

@@ -107,11 +107,26 @@ def step_asset(profile, args):
     stamp_file.write_text(stamp)
 
 
+def build_inputs():
+    """Every file a relink should follow: the C++ tree and the CMake scripts.
+
+    "The executable exists" is not enough to call a build current, and the way it
+    fails is silent. `write_config` emits whatever keys this Python knows, while
+    the loader rejects any key its C++ does not — so a binary older than
+    config.cpp fails at `unknown key '<newest key>'`, naming the config rather
+    than the stale exe that cannot read it."""
+    sources = [PROJECT_ROOT / "CMakeLists.txt"]
+    sources += sorted((PROJECT_ROOT / "cmake").glob("*.cmake"))
+    for suffix in ("cpp", "hpp", "h", "in", "mm", "metal", "hlsl"):
+        sources += sorted((PROJECT_ROOT / "cpp").rglob(f"*.{suffix}"))
+    return sources
+
+
 def step_build(profile, args):        # noqa: ARG001 - signature parity
     build_dir = build_dir_for(args.backend)
     executable = executable_for(build_dir)
-    if executable.is_file() and not args.force:
-        print(f"executable present: {executable}")
+    if newer_than(executable, *build_inputs()) and not args.force:
+        print(f"executable up to date: {executable}")
         copy_runtime_dlls(executable.parent)
         return
     if shutil.which("cmake") is None:

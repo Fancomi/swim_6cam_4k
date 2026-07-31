@@ -84,7 +84,10 @@ pwsh scripts/run_stitch.ps1 LINE STEPS [选项…]    # Windows
 
 `extract` 与 `asset` 的产物比输入新时跳过（`asset` 另比对一份记录了 ppm / blend / crop
 的 stamp，因为 mtime 看不见这些口径变化）；`tex` 只看目录非空就跳过——它的输入是一整个
-片段目录或数据集，没有单一 mtime 可比。三者都用 `--force` 强制重做；
+片段目录或数据集，没有单一 mtime 可比。`build` 比对 exe 与 `cpp/`、`CMakeLists.txt`、
+`cmake/` 下每个文件的 mtime：只看「exe 存在」会让改过 C++ 却没重新构建的树静默跑旧
+二进制，而失败点离病因很远 —— config 由这份 Python 现写、旧 exe 认不出新键，报的是
+`unknown key`、指的是 config 文件。三者都用 `--force` 强制重做；
 `still` / `video` 每次都渲 —— 它们的口径可从命令行覆盖，按 mtime 跳过会让人看到
 一张过期却像是新的图。
 

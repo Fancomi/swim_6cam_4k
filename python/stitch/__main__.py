@@ -15,7 +15,7 @@ skip when their output is newer than their inputs (asset also compares a stamp o
 its shaping options, which mtime cannot see); --force redoes them. still/video
 always render: their shaping is overridable from the command line, so a stale
 image that looks fresh would be a trap. build keeps its own check — the
-executable exists.
+executable is newer than every C++ and CMake file it is built from.
 """
 import argparse
 from pathlib import Path
