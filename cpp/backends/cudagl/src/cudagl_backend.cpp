@@ -129,18 +129,21 @@ class CudaGlSourceAdapter final : public swim::core::ISource {
                       std::uint32_t camera_index,
                       const swim::core::AppConfig& config,
                       swim::core::RuntimeCounters& metrics,
-                      swim::core::RunLifecycle& lifecycle)
+                      swim::core::RunLifecycle& lifecycle,
+                      swim::core::SharedLaneOrigin& shared_origin)
       : context_(std::move(context)),
         source_(std::move(source)),
         camera_index_(camera_index),
         config_(config),
         metrics_(metrics),
-        lifecycle_(lifecycle) {}
+        lifecycle_(lifecycle),
+        shared_origin_(shared_origin) {}
 
   void start(swim::core::LatestFrameMailbox& output) override {
     source_impl_ = std::make_unique<NvdecSource>(
         context_, source_, camera_index_, output, metrics_, config_.mode,
-        config_.decode_surface_pool, &lifecycle_, config_.loop_sources);
+        config_.decode_surface_pool, &lifecycle_, config_.loop_sources,
+        config_.stop_at_eof, config_.loop_period, &shared_origin_);
     source_impl_->start();
   }
 
@@ -169,6 +172,7 @@ class CudaGlSourceAdapter final : public swim::core::ISource {
   swim::core::AppConfig config_;
   swim::core::RuntimeCounters& metrics_;
   swim::core::RunLifecycle& lifecycle_;
+  swim::core::SharedLaneOrigin& shared_origin_;
   std::unique_ptr<NvdecSource> source_impl_;
 };
 
@@ -193,7 +197,8 @@ class CudaGlBackend final : public swim::core::IBackend {
       throw std::logic_error("CUDA/GL lifecycle must be bound before sources");
     }
     return std::make_unique<CudaGlSourceAdapter>(
-        context_, source, camera_index, config_, *metrics_, *lifecycle_);
+        context_, source, camera_index, config_, *metrics_, *lifecycle_,
+        shared_origin_);
   }
 
   std::unique_ptr<swim::core::IRenderer> make_renderer(
@@ -248,6 +253,9 @@ class CudaGlBackend final : public swim::core::IBackend {
   swim::core::RuntimeCounters fallback_metrics_;
   swim::core::RuntimeCounters* metrics_{&fallback_metrics_};
   swim::core::RunLifecycle* lifecycle_{};
+  // One wall anchor for media t=0 across every lane, so lanes that open their
+  // readers at different speeds do not each freeze in their own stagger.
+  swim::core::SharedLaneOrigin shared_origin_;
   bool config_ready_{};
   std::mutex loop_mutex_;
   std::condition_variable_any loop_condition_;

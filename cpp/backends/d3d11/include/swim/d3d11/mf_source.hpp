@@ -1,11 +1,13 @@
 #pragma once
 
 #include <swim/core/config.hpp>
+#include <swim/core/lane_pacing.hpp>
 #include <swim/core/latest_frame_mailbox.hpp>
 #include <swim/core/metrics.hpp>
 #include <swim/core/run_lifecycle.hpp>
 #include <swim/d3d11/d3d11_frame.hpp>
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -27,7 +29,21 @@ class MfSource final {
            swim::core::RunLifecycle* lifecycle,
            // Rewind to the clip start on EOF instead of failing the lane, so a
            // run can outlast the recording. Ignored by live sources.
-           bool loop_sources = false);
+           bool loop_sources = false,
+           // End the run cleanly at EOF instead of failing the lane. Only
+           // meaningful with `loop_sources` off — the clips are then the whole
+           // run, so finishing them is success, not a dead lane.
+           bool stop_at_eof = false,
+           // The content period every lane wraps on. Recorded clips differ in
+           // usable length by tens of milliseconds, so wrapping at each file's
+           // own end would let the lanes drift apart by that much per pass.
+           // Zero means "use each file's natural end".
+           std::chrono::milliseconds loop_period = std::chrono::milliseconds{0},
+           // Run-wide anchor for media t=0. Lanes start sequentially and open
+           // their readers at different speeds; without a shared anchor each lane
+           // freezes its own startup lag in as a permanent content offset.
+           // nullptr gives this lane its own anchor.
+           swim::core::SharedLaneOrigin* shared_origin = nullptr);
   ~MfSource();
 
   MfSource(const MfSource&) = delete;

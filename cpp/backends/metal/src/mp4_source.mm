@@ -2,6 +2,7 @@
 
 #include <swim/core/camera_capacity.hpp>
 #include <swim/core/camera_health.hpp>
+#include <swim/core/lane_pacing.hpp>
 #include <swim/metal/videotoolbox_decoder.hpp>
 
 #import <AVFoundation/AVFoundation.h>
@@ -114,8 +115,8 @@ class Mp4VideoToolboxSource::Impl final {
         surface_capacity_(surface_capacity),
         lifecycle_(lifecycle),
         loop_sources_(loop_sources),
-        loop_period_(loop_period),
-        stop_at_eof_(stop_at_eof) {
+        stop_at_eof_(stop_at_eof),
+        pacer_(mode, source_.start_offset, loop_sources, loop_period) {
     if (context_ == nullptr || context_->device == nil ||
         context_->texture_cache == nullptr) {
       throw std::invalid_argument("MP4 source requires a valid Metal context");
@@ -274,95 +275,16 @@ class Mp4VideoToolboxSource::Impl final {
     return false;
   }
 
-  void pace(CMTime pts, CMTime& first_pts,
-            std::chrono::steady_clock::time_point& first_wall) {
-    if (mode_ != swim::core::RunMode::realtime || !valid_pts(pts)) {
-      return;
-    }
-    if (!valid_pts(first_pts)) {
-      first_pts = pts;
-      // Looping passes inherit the wall origin recorded when the pass began, so
-      // the cadence continues instead of restarting and emitting a burst.
-      const auto now = std::chrono::steady_clock::now();
-      if (pass_wall_origin_ == std::chrono::steady_clock::time_point{}) {
-        first_wall = now;
-      } else {
-        // Re-opening the reader and re-decoding up to the aligned start costs
-        // real time (hundreds of ms on lanes with a large offset). Charging the
-        // new pass from the nominal boundary would make its first frames late
-        // and provoke a catch-up burst, so the origin absorbs the overrun.
-        first_wall = std::max(pass_wall_origin_, now);
-        pass_wall_origin_ = first_wall;
-      }
-      return;
-    }
-    const auto seconds = CMTimeGetSeconds(CMTimeSubtract(pts, first_pts));
-    if (!std::isfinite(seconds) || seconds <= 0.0) {
-      return;
-    }
-    const auto target = first_wall + std::chrono::duration_cast<
-        std::chrono::steady_clock::duration>(
-        std::chrono::duration<double>{seconds});
-    while (!termination_requested(std::chrono::steady_clock::now()) &&
-           std::chrono::steady_clock::now() < target) {
-      std::this_thread::sleep_until(
-          std::min(target, std::chrono::steady_clock::now() +
-                               std::chrono::milliseconds{10}));
-    }
-  }
-
-  // How far the wall clock advances per pass. With a shared loop period every
-  // lane advances by exactly that; without one each lane advances by whatever
-  // its own file spanned, which is why unequal clips drift.
-  std::chrono::steady_clock::duration pass_wall_advance() const noexcept {
-    return std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-        loop_period_.count() > 0 ? loop_period_ : last_pass_span_);
-  }
-
-  // True once this pass has covered the common loop period, measured from the
-  // lane's aligned start. Every lane shares the period, so they wrap on the same
-  // content boundary even though their files differ in usable length by tens of
-  // milliseconds. Zero period means "play to the file's own end".
-  bool pass_period_elapsed(CMTime pts, CMTime first_emitted_pts) const noexcept {
-    if (!loop_sources_ || loop_period_.count() <= 0 ||
-        !valid_pts(pts) || !valid_pts(first_emitted_pts)) {
-      return false;
-    }
-    const auto seconds =
-        CMTimeGetSeconds(CMTimeSubtract(pts, first_emitted_pts));
-    if (!std::isfinite(seconds)) {
-      return false;
-    }
-    return seconds >= std::chrono::duration<double>(loop_period_).count();
-  }
-
-  // True once `pts` reaches the lane's aligned start. `first_sample_pts` is
-  // latched on the first call so the offset is relative to the file, matching
-  // how the manifest's keyframe timestamp anchors frame 0.
-  //
-  // Every pass skips, including loops. The offset is what puts this lane's
-  // frame 0 of a pass on the common time axis; replaying from the file's own
-  // frame 0 instead would restart each lane at its own keyframe, which are up
-  // to ~3s apart. Re-decoding the skipped span costs real time, and that is
-  // absorbed as a brief late start rather than as content misalignment.
-  bool past_start_offset(CMTime pts, CMTime& first_sample_pts) const noexcept {
-    if (source_.start_offset.count() <= 0) {
-      return true;
-    }
+  // CMTime -> nanoseconds on the media timeline, the pacer's currency.
+  static std::int64_t to_pacer_ns(CMTime pts) noexcept {
     if (!valid_pts(pts)) {
-      return true;
+      return swim::core::LanePacer::kInvalidPts;
     }
-    if (!valid_pts(first_sample_pts)) {
-      first_sample_pts = pts;
-    }
-    const auto seconds =
-        CMTimeGetSeconds(CMTimeSubtract(pts, first_sample_pts));
+    const auto seconds = CMTimeGetSeconds(pts);
     if (!std::isfinite(seconds)) {
-      return true;
+      return swim::core::LanePacer::kInvalidPts;
     }
-    const auto offset_seconds =
-        std::chrono::duration<double>(source_.start_offset).count();
-    return seconds >= offset_seconds;
+    return static_cast<std::int64_t>(seconds * 1e9);
   }
 
   ReaderOutcome run_reader_once(VideoToolboxDecoder& decoder,
@@ -458,14 +380,13 @@ class Mp4VideoToolboxSource::Impl final {
       }
 
       RetainedVideoFormat submitted_format{initial_format};
-      CMTime first_pts = kCMTimeInvalid;
-      // The clip's own first PTS; the aligned start is measured from it.
-      CMTime first_sample_pts = kCMTimeInvalid;
-      // Last PTS this pass published, used to measure the pass span when no
-      // shared loop period was configured.
-      CMTime last_emitted_pts = kCMTimeInvalid;
-      std::chrono::steady_clock::time_point first_wall{};
-      while (!termination_requested(std::chrono::steady_clock::now())) {
+      // Each pass re-derives its timestamp latches; the wall origin advanced by
+      // advance_pass() survives so a looping pass continues the cadence.
+      pacer_.begin_pass();
+      const auto running = [this] {
+        return !termination_requested(std::chrono::steady_clock::now());
+      };
+      while (running()) {
         CMSampleBufferRef sample = [output copyNextSampleBuffer];
         if (sample == nullptr) {
           break;
@@ -509,12 +430,13 @@ class Mp4VideoToolboxSource::Impl final {
             1, std::memory_order_relaxed);
         health.on_frame(std::chrono::steady_clock::now());
         const auto pts = CMSampleBufferGetPresentationTimeStamp(sample);
+        const auto pts_ns = to_pacer_ns(pts);
         // Skip forward to this lane's aligned start before publishing. The
         // samples before it still decode (suppressed output) so the reference
         // chain stays intact, and pacing starts at the aligned frame so the
         // realtime cadence is not charged for the skipped span.
-        const bool emit = past_start_offset(pts, first_sample_pts);
-        if (emit && pass_period_elapsed(pts, first_pts)) {
+        const bool emit = pacer_.past_start_offset(pts_ns);
+        if (emit && pacer_.pass_period_elapsed(pts_ns)) {
           // Every lane has covered the shared period; end the pass here so the
           // restart happens on the same content boundary for all of them.
           CFRelease(sample);
@@ -522,8 +444,7 @@ class Mp4VideoToolboxSource::Impl final {
           return ReaderOutcome::loop_period_reached;
         }
         if (emit) {
-          pace(pts, first_pts, first_wall);
-          last_emitted_pts = pts;
+          pacer_.pace(pts_ns, running);
         }
         auto format = static_cast<CMVideoFormatDescriptionRef>(
             CMSampleBufferGetFormatDescription(sample));
@@ -567,17 +488,10 @@ class Mp4VideoToolboxSource::Impl final {
       }
       if (reader.status == AVAssetReaderStatusCompleted) {
         if (loop_sources_) {
-          if (valid_pts(first_pts) && valid_pts(last_emitted_pts)) {
-            const auto seconds =
-                CMTimeGetSeconds(CMTimeSubtract(last_emitted_pts, first_pts));
-            if (std::isfinite(seconds) && seconds > 0.0) {
-              last_pass_span_ =
-                  std::chrono::duration_cast<std::chrono::milliseconds>(
-                      std::chrono::duration<double>{seconds});
-            }
-          }
           // Looping is the caller's answer to "the clip is shorter than the
           // run": restart rather than substituting the black replacement frame.
+          // The pacer tracked this pass's span, which is what advances the wall
+          // origin when no shared period was configured.
           return ReaderOutcome::loop_period_reached;
         }
         if (stop_at_eof_) {
@@ -623,9 +537,9 @@ class Mp4VideoToolboxSource::Impl final {
                                   surface_capacity_, mailbox_, counters_);
       try {
         swim::core::CameraHealthTracker health;
-        // The pass wall origin anchors pacing across loops so a restart does not
-        // reset the cadence clock; it is set once, before the first pass.
-        pass_wall_origin_ = std::chrono::steady_clock::now();
+        // The pacer's wall origin anchors pacing across loops so a restart does
+        // not reset the cadence clock; it is set once, before the first pass.
+        pacer_.begin_run(std::chrono::steady_clock::now());
         while (!termination_requested(std::chrono::steady_clock::now())) {
           try {
             const auto outcome = run_reader_once(decoder, health);
@@ -639,7 +553,7 @@ class Mp4VideoToolboxSource::Impl final {
               // Advance the wall origin by one period so the next pass paces
               // against its own start. Leaving it at the run's start would put
               // every target in the past, and the lane would decode flat out.
-              pass_wall_origin_ += pass_wall_advance();
+              pacer_.advance_pass();
               continue;
             }
             if (outcome == ReaderOutcome::normal_eof) {
@@ -694,16 +608,10 @@ class Mp4VideoToolboxSource::Impl final {
   std::uint32_t surface_capacity_{};
   swim::core::RunLifecycle* lifecycle_{};
   const bool loop_sources_{false};
-  // Common content period every lane restarts on. Zero falls back to each
-  // file's own end, which only stays in sync for equal-length clips.
-  const std::chrono::milliseconds loop_period_{0};
   const bool stop_at_eof_{false};
-  // Wall time the current pass began, so pacing stays continuous across a loop
-  // instead of restarting the clock and emitting a burst.
-  std::chrono::steady_clock::time_point pass_wall_origin_{};
-  // Content span the finished pass actually emitted; only consulted when no
-  // shared loop period was configured.
-  std::chrono::milliseconds last_pass_span_{0};
+  // Aligned start, wall-clock cadence and the shared loop period, all in the
+  // one place every backend reads them from.
+  swim::core::LanePacer pacer_;
   std::chrono::steady_clock::time_point deadline_{};
   mutable std::mutex thread_mutex_;
   std::thread worker_;

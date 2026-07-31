@@ -101,7 +101,9 @@ class NvdecSource::Impl final {
        std::uint32_t camera_index, swim::core::LatestFrameMailbox& mailbox,
        swim::core::RuntimeCounters& counters, swim::core::RunMode mode,
        std::uint32_t surface_capacity, swim::core::RunLifecycle* lifecycle,
-       bool loop_sources)
+       bool loop_sources, bool stop_at_eof,
+       std::chrono::milliseconds loop_period,
+       swim::core::SharedLaneOrigin* shared_origin)
       : context_(std::move(context)),
         source_(std::move(source)),
         camera_index_(camera_index),
@@ -110,7 +112,10 @@ class NvdecSource::Impl final {
         mode_(mode),
         surface_capacity_(surface_capacity),
         lifecycle_(lifecycle),
-        loop_sources_(loop_sources) {
+        loop_sources_(loop_sources),
+        stop_at_eof_(stop_at_eof),
+        pacer_(mode, source_.start_offset, loop_sources, loop_period,
+               shared_origin) {
     if (source_.path.empty()) {
       throw std::invalid_argument("NVDEC source path must not be empty");
     }
@@ -186,8 +191,13 @@ class NvdecSource::Impl final {
   }
 
   // Rewind the container to the start and flush the decoder for looping
-  // playback. Returns false when the seek fails, letting the caller fall
-  // through to normal EOF handling instead of spinning.
+  // playback. Seeking to frame 0 and re-decoding up to the aligned start is
+  // deliberate: a seek to the aligned start lands on the nearest earlier
+  // keyframe, and those sit at GOP granularity, so lanes would resume at
+  // different content points. Measured 2026-07-31: seeking to the aligned start
+  // instead raised snapshot_age_spread p99 from 311ms to 970ms on cudagl and
+  // 88ms to 961ms on d3d11. The re-decode is paid as a brief late start, which
+  // is the cheaper error.
   bool rewind_stream(AVFormatContext* fmt, AVCodecContext* dec,
                      int video_stream) const noexcept {
     if (av_seek_frame(fmt, video_stream, 0, AVSEEK_FLAG_BACKWARD) < 0) {
@@ -197,47 +207,6 @@ class NvdecSource::Impl final {
     // state and lets it accept packets from the rewound position.
     avcodec_flush_buffers(dec);
     return true;
-  }
-
-  // True once `pts` reaches the lane's aligned start, measured from the clip's
-  // own first frame in the stream's time base.
-  bool past_start_offset(std::int64_t pts, AVRational tb,
-                         std::int64_t& first_sample_pts) const noexcept {
-    if (source_.start_offset.count() <= 0 || pts == AV_NOPTS_VALUE) {
-      return true;
-    }
-    if (first_sample_pts == AV_NOPTS_VALUE) {
-      first_sample_pts = pts;
-    }
-    const double seconds =
-        static_cast<double>(pts - first_sample_pts) * av_q2d(tb);
-    return seconds >=
-           std::chrono::duration<double>(source_.start_offset).count();
-  }
-
-  void pace(std::int64_t pts, AVRational tb, std::int64_t& first_pts,
-            std::chrono::steady_clock::time_point& first_wall) const {
-    if (mode_ != swim::core::RunMode::realtime || pts == AV_NOPTS_VALUE) {
-      return;
-    }
-    if (first_pts == AV_NOPTS_VALUE) {
-      first_pts = pts;
-      first_wall = std::chrono::steady_clock::now();
-      return;
-    }
-    const double seconds = static_cast<double>(pts - first_pts) * av_q2d(tb);
-    if (seconds <= 0.0) {
-      return;
-    }
-    const auto target = first_wall + std::chrono::duration_cast<
-        std::chrono::steady_clock::duration>(
-        std::chrono::duration<double>{seconds});
-    while (!termination_requested(std::chrono::steady_clock::now()) &&
-           std::chrono::steady_clock::now() < target) {
-      std::this_thread::sleep_until(
-          std::min(target, std::chrono::steady_clock::now() +
-                               std::chrono::milliseconds{5}));
-    }
   }
 
   void publish_frame(AVFrame* hw_frame, std::uint64_t sequence) {
@@ -369,13 +338,22 @@ class NvdecSource::Impl final {
       }
     } pf_guard{packet, frame};
 
-    std::int64_t first_pts = AV_NOPTS_VALUE;
-    std::int64_t first_sample_pts = AV_NOPTS_VALUE;
-    std::chrono::steady_clock::time_point first_wall{};
-    std::uint64_t sequence = 0;
+    // FFmpeg timestamps are in the stream's time base; the pacer works in
+    // nanoseconds on the media timeline.
     const AVRational tb = stream->time_base;
+    const auto to_ns = [tb](std::int64_t pts) {
+      return pts == AV_NOPTS_VALUE
+                 ? swim::core::LanePacer::kInvalidPts
+                 : static_cast<std::int64_t>(static_cast<double>(pts) *
+                                             av_q2d(tb) * 1e9);
+    };
+    const auto running = [this] {
+      return !termination_requested(std::chrono::steady_clock::now());
+    };
+    pacer_.begin_run(std::chrono::steady_clock::now());
+    std::uint64_t sequence = 0;
 
-    while (!termination_requested(std::chrono::steady_clock::now())) {
+    while (running()) {
       // Set when this iteration hit EOF and rewound instead of finishing, so
       // the end-of-iteration EOF check below does not end the lane.
       bool looped = false;
@@ -406,17 +384,25 @@ class NvdecSource::Impl final {
         }
         if (recv == AVERROR_EOF) {
           // Looping playback: rewind and keep going. Mirrors mf_source.cpp —
-          // everything derived from sample timestamps is reset so the lane
+          // advance_pass() clears everything derived from timestamps so the lane
           // replays its manifest start offset and re-anchors pacing.
-          if (loop_sources_ && rewind_stream(fmt, dec, video_stream)) {
-            first_pts = AV_NOPTS_VALUE;
-            first_sample_pts = AV_NOPTS_VALUE;
-            first_wall = {};
+          if (loop_sources_ &&
+              rewind_stream(fmt, dec, video_stream)) {
+            pacer_.advance_pass();
             counters_.reconnects.fetch_add(1, std::memory_order_relaxed);
             looped = true;
             break;
           }
           const auto now = std::chrono::steady_clock::now();
+          if (stop_at_eof_) {
+            // The clips are the whole run: finishing them is success. Mirrors
+            // mp4_source.mm and mf_source.cpp — one config key, one meaning on
+            // every backend.
+            if (lifecycle_ != nullptr) {
+              lifecycle_->request_stop();
+            }
+            return;
+          }
           if (lifecycle_ != nullptr) {
             const auto disposition = lifecycle_->classify_eof(now);
             if (disposition ==
@@ -442,12 +428,23 @@ class NvdecSource::Impl final {
           throw LaneFailure{LaneFailureKind::fatal,
                             "decoder did not produce CUDA frames"};
         }
+        const auto pts_ns = to_ns(frame->pts);
         // Skip forward to this lane's aligned start; see mf_source.cpp.
-        if (!past_start_offset(frame->pts, tb, first_sample_pts)) {
+        if (!pacer_.past_start_offset(pts_ns)) {
           av_frame_unref(frame);
           continue;
         }
-        pace(frame->pts, tb, first_pts, first_wall);
+        // Wrap on the period every lane shares rather than at this file's own
+        // end; see mf_source.cpp.
+        if (loop_sources_ && pacer_.pass_period_elapsed(pts_ns) &&
+            rewind_stream(fmt, dec, video_stream)) {
+          av_frame_unref(frame);
+          pacer_.advance_pass();
+          counters_.reconnects.fetch_add(1, std::memory_order_relaxed);
+          looped = true;
+          break;
+        }
+        pacer_.pace(pts_ns, running);
         publish_frame(frame, sequence++);
         av_frame_unref(frame);
       }
@@ -499,6 +496,8 @@ class NvdecSource::Impl final {
   std::uint32_t surface_capacity_{};
   swim::core::RunLifecycle* lifecycle_{};
   bool loop_sources_{false};
+  bool stop_at_eof_{false};
+  swim::core::LanePacer pacer_;
   mutable std::mutex thread_mutex_;
   std::thread worker_;
   std::atomic_bool stop_requested_{false};
@@ -516,11 +515,14 @@ NvdecSource::NvdecSource(std::shared_ptr<CudaGlContext> context,
                          swim::core::RunMode mode,
                          std::uint32_t surface_capacity,
                          swim::core::RunLifecycle* lifecycle,
-                         bool loop_sources)
+                         bool loop_sources, bool stop_at_eof,
+                         std::chrono::milliseconds loop_period,
+                         swim::core::SharedLaneOrigin* shared_origin)
     : impl_(std::make_unique<Impl>(std::move(context), std::move(source),
                                    camera_index, mailbox, counters, mode,
                                    surface_capacity, lifecycle,
-                                   loop_sources)) {}
+                                   loop_sources, stop_at_eof, loop_period,
+                                   shared_origin)) {}
 
 NvdecSource::~NvdecSource() = default;
 
