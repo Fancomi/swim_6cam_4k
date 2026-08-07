@@ -36,3 +36,8 @@ inputs/configs/overhead_*.conf
 # Loose model drops straight into inputs/ (before they are filed under a line)
 inputs/*.fbx
 inputs/*.fbm/
+
+# FBX 配套纹理目录（任意深度）是本地大资产，不提交；FBX SDK 还会在
+# 旁边生成 .mayaSwatches/ 缓存，一并忽略。
+**/*.fbm/
+**/.mayaSwatches/
