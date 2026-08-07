@@ -26,16 +26,18 @@ MANIFEST = os.path.join(DATASET, "bk_export_manifest.csv")
 OUTPUT_ROOT = str(dataset_root("WATER_ENTRY_OUTPUT_ROOT",
                                OUTPUTS / "water_entry"))
 
-# 模型注册：现网特化版、随包微调版、通用 COCO 版。
+# 模型注册：现网特化版、随包微调版、通用 COCO 版、基于难例数据再训练的 yolo26m 版。
 # 通用版不随数据集提供，首次使用时由 ultralytics 下载到 outputs/water_entry/weights/，
 # 不落在仓库根目录（ultralytics 默认写 cwd）。
 WEIGHTS_DIR = os.path.join(OUTPUT_ROOT, "weights")
 MODELS = {
     "swimup": os.path.join(DATASET, "yolo11n-pose-swimup_20250919.pt"),
     "swimup_bk": os.path.join(DATASET, "yolo11n-pose-swimup-bk.pt"),
+    # yolo26m 训练产物在数据集根目录的兄弟目录 yolo26m-pose/ 下，不在包内。
+    "yolo26": os.path.join(os.path.dirname(DATASET), "yolo26m-pose", "weights", "best.pt"),
     "coco": os.path.join(WEIGHTS_DIR, "yolo11n-pose.pt"),
 }
-DEFAULT_MODELS = ["swimup", "swimup_bk", "coco"]
+DEFAULT_MODELS = ["swimup", "swimup_bk", "yolo26", "coco"]
 
 # 标注要点：必须覆盖 jump_frame-5 ~ entry_frame+20；触水前后各 3 帧最关键。
 DEFAULT_PRE = 5

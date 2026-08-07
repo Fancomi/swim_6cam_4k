@@ -44,8 +44,10 @@ class MainTest(unittest.TestCase):
         """拦在 serve 之前，取出 main 解析出的目录与页面。"""
         seen = {}
 
-        def fake(directory, port=0, page="index.html", open_browser=True):
-            seen.update(directory=directory, page=page, open_browser=open_browser)
+        def fake(directory, port=0, page="index.html", open_browser=True,
+                 handler_cls=None):
+            seen.update(directory=directory, page=page, open_browser=open_browser,
+                        handler_cls=handler_cls)
             raise SystemExit("stop before serve_forever")
 
         with patch.object(L, "serve", fake):
@@ -67,6 +69,16 @@ class MainTest(unittest.TestCase):
     def test_selftest_flag_opens_the_selftest_page(self):
         seen = self._capture(["mask", "--selftest", "--no-browser"])
         self.assertEqual(seen["page"], "mask_labeler/selftest.html")
+
+    def test_mask_labeler_serves_with_merge_handler(self):
+        # mask 标注器要一键合成，服务必须带 POST /mask-merge 的 handler。
+        seen = self._capture(["mask", "--no-browser"])
+        self.assertIs(seen["handler_cls"], L.MaskMergeHandler)
+
+    def test_dot_labeler_serves_with_plain_handler(self):
+        # dot 标注器没有合成端点，保持原静态 handler。
+        seen = self._capture(["dot", "--no-browser"])
+        self.assertIs(seen["handler_cls"], L.QuietHandler)
 
     def test_rejects_an_unknown_labeler(self):
         with self.assertRaises(SystemExit):

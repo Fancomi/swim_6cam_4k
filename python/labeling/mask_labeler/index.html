@@ -61,6 +61,15 @@
     <button id="clear">清空本帧</button>
   </div>
   <div class="card">
+    <h3>合成结果</h3>
+    <label class="row"><span>快照目录绝对路径（可选）</span></label>
+    <input id="snapdir" placeholder="留空用默认数据根，如 /Users/…/20260807/snapshots">
+    <button id="merge" class="primary">🎨 合成当前相机 <kbd>Ctrl+M</kbd></button>
+    <div class="hint">mask 覆盖处取原帧、其余取中值背景。<br>留空时后端用默认数据根；结果在数据集 <code>object-frames/</code>。<br>画完自动保存 + 自动合成，点击下图查看。</div>
+    <div class="hint" id="mergeinfo">未合成</div>
+    <div id="resultthumb"></div>
+  </div>
+  <div class="card">
     <h3>保存</h3>
     <button id="save" class="primary">🗂 写回工程 json <kbd>S</kbd></button>
     <div class="hint" id="saveinfo">未保存</div>

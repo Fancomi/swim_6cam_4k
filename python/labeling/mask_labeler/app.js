@@ -112,7 +112,23 @@ function syncUI() {
 }
 function refresh() { render(); syncUI(); }
 function setStatus(t) { $('status').textContent = t; }
-function markDirty() { S.dirty = true; }
+
+// 自动保存 + 自动合成的防抖。任何笔画改动（落笔/擦除/撤销/清空）都会触发：
+// 停笔 600ms 后自动写回工程文件，再自动合成当前相机。这样画完不用点任何按钮。
+let autoTimer = null;
+function scheduleAuto() {
+  S.dirty = true;
+  if (autoTimer) clearTimeout(autoTimer);
+  autoTimer = setTimeout(() => { autoSave(); autoMerge(); }, 600);
+}
+
+async function autoSave() {
+  if (!S.rootHandle) return;                 // 没选过目录就没有可写回的位置
+  if (!S.dirty) return;
+  await save();
+}
+
+function markDirty() { scheduleAuto(); }
 
 // ---------- 载入 snapshots 目录 ----------
 async function openRoot() {
@@ -229,6 +245,88 @@ async function tryLoadProjectFile() {
   setStatus(`已载入既有工程 ${PROJECT_FILE}，可续标`);
 }
 
+// ---------- 一键合成 ----------
+async function autoMerge() {
+  // 自动合成的防抖入口：scheduleAuto 在每次笔画改动后调用。
+  // 只在选过目录（rootHandle）且当前有相机时合成，避免频繁空跑。
+  if (!S.rootHandle || !S.cam) return;
+  await mergeCurrent();
+}
+
+async function mergeCurrent() {
+  if (!S.cam) { setStatus('尚未选相机'); return; }
+  // 快照目录绝对路径可留空：浏览器拿不到本地绝对路径（File System Access 只给
+  // 句柄），留空时后端回退到默认数据根 <数据集根>/<日期>/snapshots。
+  const snapDir = $('snapdir').value.trim();
+  // 合成用「已保存的工程 + 当前内存里未保存的笔画」：把内存态并进 doc，
+  // 这样画完不点保存也能直接看合成效果。
+  const doc = projectDoc();
+  const cams = doc.cameras;
+  const list = S.byCam.get(S.cam) || [];
+  const cur = {};
+  for (const it of list) {
+    const strokes = (S.saved[it.relPath] || []).map((s) => ({ ...s }));
+    if (strokes.length) cur[it.relPath] = strokes;
+  }
+  cams[S.cam] = list
+    .map((it, i) => ({
+      frame_index: i + 1,
+      snapshot_id: it.snapshotId,
+      image: it.relPath,
+      strokes: (cur[it.relPath] || []).map((s) => ({
+        x1: +s.x1.toFixed(1), y1: +s.y1.toFixed(1),
+        x2: +s.x2.toFixed(1), y2: +s.y2.toFixed(1), r: +(+s.r).toFixed(1),
+      })),
+    }))
+    .filter((f) => f.strokes.length);
+
+  const mi = $('mergeinfo');
+  mi.textContent = '合成中…';
+  try {
+    const resp = await fetch('/mask-merge', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project: doc, snapshots_dir: snapDir, camera: S.cam }),
+    });
+    if (!resp.ok) {
+      const err = await resp.text().catch(() => '');
+      mi.textContent = `合成失败：${resp.status} ${err}`;
+      setStatus(`合成失败：${resp.status} ${err}`);
+      return;
+    }
+    const { files } = await resp.json();
+    mi.textContent = `已合成：${files.join('  ')}`;
+    setStatus(`已合成 ${files.length} 张，见数据集 object-frames/`);
+    // 展示合并图缩略图，点击才打开新标签（不自动弹窗）。
+    const merged = files.find((f) => f.endsWith('_mask_merged.png'));
+    if (merged) {
+      showResultThumb('/mask-merge-result?f=' + encodeURIComponent(merged));
+    }
+  } catch (e) {
+    mi.textContent = `请求失败：${e?.message || e}`;
+    setStatus(`请求失败：${e?.message || e}`);
+  }
+}
+
+// 在侧栏「合成结果」卡片里显示合并图缩略图；点击缩略图新标签打开原图。
+function showResultThumb(url) {
+  const box = $('resultthumb');
+  box.innerHTML = '';
+  const a = document.createElement('a');
+  a.href = url;
+  a.target = '_blank';
+  a.title = '点击查看大图';
+  const img = document.createElement('img');
+  img.src = url;
+  img.alt = '合成结果';
+  img.style.maxWidth = '100%';
+  img.style.maxHeight = '180px';
+  img.style.border = '1px solid #39424f';
+  img.style.borderRadius = '4px';
+  a.appendChild(img);
+  box.appendChild(a);
+}
+
 // ---------- 鼠标交互 ----------
 let drawing = null;   // { x1,y1,x2,y2,r } 未松手的那一笔
 let pan = null;
@@ -292,6 +390,7 @@ window.addEventListener('keydown', (ev) => {
   const k = ev.key;
   if (k === ' ') { spaceDown = true; cv.style.cursor = 'grab'; ev.preventDefault(); return; }
   if ((ev.ctrlKey || ev.metaKey) && (k === 'z' || k === 'Z')) { ev.preventDefault(); undo(); return; }
+  if ((ev.ctrlKey || ev.metaKey) && (k === 'm' || k === 'M')) { ev.preventDefault(); mergeCurrent(); return; }
   if (!S.bitmap) return;
   if (k === 'ArrowLeft') { ev.preventDefault(); prev(); }
   else if (k === 'ArrowRight') { ev.preventDefault(); next(); }
@@ -330,6 +429,7 @@ $('next').addEventListener('click', next);
 $('undo').addEventListener('click', undo);
 $('clear').addEventListener('click', () => { S.strokes = []; markDirty(); refresh(); });
 $('save').addEventListener('click', () => save());
+$('merge').addEventListener('click', () => mergeCurrent());
 $('viewmask').addEventListener('click', toggleMaskOnly);
 $('radius').addEventListener('input', (ev) => setRadius(+ev.target.value));
 $('alpha').addEventListener('input', (ev) => { S.alpha = +ev.target.value / 100; refresh(); });

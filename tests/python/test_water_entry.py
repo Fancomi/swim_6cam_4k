@@ -167,20 +167,34 @@ def _null(n_det=0):
             "kps_xy": None, "kps_conf": None}
 
 
-def _reasons(rec_a, rec_b):
-    return S.analyze_frame(rec_a, rec_b, 100, 90, 100, THRESH)[0]
+def _reasons(*recs):
+    """三模型口径：recs 依次为 swimup / swimup_bk / yolo26（缺省用干净帧）。"""
+    recs = list(recs)
+    if len(recs) == 2:                       # 兼容旧的两模型调用
+        recs.append(_pose(100, 200))
+    elif len(recs) == 1:
+        recs = [recs[0], _pose(100, 200), _pose(100, 200)]
+    return S.analyze_frame(recs, THRESH)[0]
 
 
 class AnalyzeFrameTest(unittest.TestCase):
     def test_both_blind_when_neither_model_detected_anything(self):
-        self.assertEqual(_reasons(_null(0), _null(0)), ["both_blind"])
+        # 三模型全 0 检出 => both_blind；第二对（a,c）也会命中
+        reasons = _reasons(_null(0), _null(0), _null(0))
+        self.assertIn("both_blind", reasons)
+        self.assertEqual([r for r in reasons if r == "both_blind"].count("both_blind"), 3)
 
     def test_both_reject_when_detections_existed_but_none_selected(self):
-        self.assertEqual(_reasons(_null(2), _null(1)), ["both_reject"])
+        reasons = _reasons(_null(2), _null(1), _null(1))
+        self.assertIn("both_reject", reasons)
 
     def test_one_miss_when_only_one_model_has_a_box(self):
-        self.assertEqual(_reasons(_pose(100, 200), _null(1)), ["one_miss"])
-        self.assertEqual(_reasons(_null(0), _pose(100, 200)), ["one_miss"])
+        # 只有 swimup 检出：a,b 与 a,c 两对命中 one_miss；b,c 两缺检命中 both_reject
+        reasons = set(_reasons(_pose(100, 200), _null(1), _null(0)))
+        self.assertIn("one_miss", reasons)
+        self.assertIn("both_reject", reasons)
+        reasons = set(_reasons(_null(0), _pose(100, 200), _null(1)))
+        self.assertIn("one_miss", reasons)
 
     def test_diff_person_when_boxes_barely_overlap(self):
         far = _pose(100, 200, box=(600, 100, 700, 300))
@@ -273,7 +287,7 @@ class CollectFilterTest(unittest.TestCase):
     """collect() 的片段级过滤：入水帧不可信的片段必须被排除。"""
 
     def _write_pair(self, root, clip, entry_source, frames=(100,)):
-        for model in (S.MODEL_A, S.MODEL_B):
+        for model in (S.MODEL_A, S.MODEL_B, S.MODEL_C):
             d = os.path.join(root, model, "per_frame")
             os.makedirs(d, exist_ok=True)
             payload = {"clip": clip, "jump_frame": 90, "entry_frame": 100,

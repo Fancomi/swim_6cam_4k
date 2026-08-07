@@ -11,6 +11,8 @@
 # 本脚本不复制它们——要改口径就改那里，两个入口同时生效。
 #
 # 数据集根用 WATER_ENTRY_DATASET_ROOT 覆盖，产物写入 outputs/water_entry/。
+# 预测默认对比四个模型：swimup（现网）、swimup_bk（随包微调版）、
+# yolo26（基于难例数据再训练的 yolo26m-pose，位于数据集根兄弟目录）、coco（通用）。
 #
 # 用法:
 #   ./scripts/run_water_entry.sh                    # 全流程，默认参数
@@ -55,7 +57,7 @@ done
 
 step() { printf '\n\033[1m=== %s ===\033[0m\n' "$1"; }
 
-step "1/4 预测（swimup / swimup_bk / coco 三模型 × 全部片段）"
+step "1/4 预测（swimup / swimup_bk / yolo26 / coco 四模型 × 全部片段）"
 if ((SKIP_PREDICT)); then
   echo "跳过（--skip-predict），复用 outputs/water_entry/predict/"
 else

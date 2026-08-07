@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """把 select_frames 挑出的候选帧渲染成标注前的质检页。
 
-每个候选帧一行：左格 swimup 叠加、中格 swimup_bk 叠加、右格无叠加原图（标注员实际
-要看的画面）。行首列出命中的信号与分数，便于判断「这一帧到底值不值得花标注预算」。
+每个候选帧一行：各模型叠加 + 无叠加原图（标注员实际要看的画面）。行首列出命中
+的信号与分数，便于判断「这一帧到底值不值得花标注预算」。
 
 复用 review.py 的绘制与裁剪函数，不重新推理。
 产物：outputs/water_entry/annotate_preview/{crops/,index.html}
@@ -20,6 +20,10 @@ from python.water_entry import common as C
 from python.water_entry.review import (crop_around, draw_caption, draw_overlay,
                                        shared_centre)
 from python.water_entry.select_frames import MODEL_A, MODEL_B
+
+# 质检页展示的模型叠加：选帧只用 swimup vs swimup_bk（MODEL_A/B），
+# 但质检页把再训练的 yolo26 也画出来，便于核对它在候选帧上的表现。
+PREVIEW_MODELS = (MODEL_A, MODEL_B, "yolo26")
 
 REASON_LABEL = {
     "both_blind": "两模型都 0 检出",
@@ -39,15 +43,17 @@ def load_candidates(path, limit):
 
 
 def load_frame_records(predict_dir, clip):
-    """读取两个模型该片段的逐帧记录，返回 (payload_a, by_frame_a, by_frame_b)。"""
+    """读取各模型该片段的逐帧记录，返回各模型 payload 与其按帧号索引。
+
+    返回的 dict 以 PREVIEW_MODELS 的键为键：{MODEL_A: payload_a, MODEL_B: ...,
+    "yolo26": ...}，调用方自行取帧；不要从任一 payload 的 frames 里代取别的模型。
+    """
     payloads = {}
-    for model in (MODEL_A, MODEL_B):
+    for model in PREVIEW_MODELS:
         with open(os.path.join(predict_dir, model, "per_frame",
                               clip + ".json")) as f:
             payloads[model] = json.load(f)
-    return (payloads[MODEL_A],
-            {r["frame"]: r for r in payloads[MODEL_A]["frames"]},
-            {r["frame"]: r for r in payloads[MODEL_B]["frames"]})
+    return payloads
 
 
 def empty_record(frame):
@@ -56,11 +62,13 @@ def empty_record(frame):
 
 
 def render_row(row, predict_dir, crops_dir, side, full):
-    """渲染一个候选帧的三格图，返回 (cells, 元信息字典)。"""
+    """渲染一个候选帧的各格图，返回 (cells, 元信息字典)。"""
     clip, frame = row["clip"], int(row["frame"])
-    payload, by_a, by_b = load_frame_records(predict_dir, clip)
-    rec_a = by_a.get(frame, empty_record(frame))
-    rec_b = by_b.get(frame, empty_record(frame))
+    payloads = load_frame_records(predict_dir, clip)
+    by = {m: {r["frame"]: r for r in payloads[m]["frames"]} for m in payloads}
+    rec_a = by[MODEL_A].get(frame, empty_record(frame))
+    rec_b = by[MODEL_B].get(frame, empty_record(frame))
+    rec_c = by["yolo26"].get(frame, empty_record(frame))
 
     images = read_frames(os.path.join(C.CLIP_DIR, clip + ".mp4"), [frame])
     if frame not in images:
@@ -70,7 +78,7 @@ def render_row(row, predict_dir, crops_dir, side, full):
     centre = shared_centre((rec_a, rec_b), width, height)
 
     cells = []
-    for label, rec in ((MODEL_A, rec_a), (MODEL_B, rec_b), ("raw", None)):
+    for label, rec in ((MODEL_A, rec_a), (MODEL_B, rec_b), ("yolo26", rec_c), ("raw", None)):
         canvas = image if rec is None else draw_overlay(image, rec)
         canvas = (canvas.copy() if full else crop_around(canvas, centre, side).copy())
         if rec is None:
@@ -82,9 +90,10 @@ def render_row(row, predict_dir, crops_dir, side, full):
         rel = os.path.join(clip, "f%03d_%s.jpg" % (frame, label))
         write_image(os.path.join(crops_dir, rel), canvas, "candidate crop")
         cells.append((label, rel))
-    return cells, {"entry_frame": payload["entry_frame"],
-                   "jump_frame": payload["jump_frame"],
-                   "entry_source": payload["entry_source"]}
+    info = {"entry_frame": payloads[MODEL_A]["entry_frame"],
+            "jump_frame": payloads[MODEL_A]["jump_frame"],
+            "entry_source": payloads[MODEL_A]["entry_source"]}
+    return cells, info
 
 
 PAGE_CSS = """
@@ -101,11 +110,12 @@ figure.raw img{border-color:#4a5361}
 """
 
 
-def write_page(path, items, cell_width, source_csv, total):
+def write_page(path, items, cell_width, source_csv, total, order="score"):
     body = ["<h1>增量标注候选帧质检</h1>",
-            "<p class=\"meta\">来源 %s ｜ 本页 %d / 候选 %d 帧 ｜ "
-            "三格依次为 swimup 叠加、swimup_bk 叠加、无叠加原图</p>"
-            % (escape(os.path.basename(source_csv)), len(items), total),
+            "<p class=\"meta\">来源 %s ｜ 本页 %d / 候选 %d 帧 ｜ 排序 %s ｜ "
+            "四格依次为 swimup 叠加、swimup_bk 叠加、yolo26 叠加、无叠加原图</p>"
+            % (escape(os.path.basename(source_csv)), len(items), total,
+               "分数降序" if order == "score" else "分数升序"),
             "<div class=\"legend\">信号含义："
             + " ｜ ".join("<code>%s</code> %s" % (k, v)
                          for k, v in REASON_LABEL.items())
@@ -144,7 +154,10 @@ def main():
                     help="select_frames 输出的 CSV（默认 %(default)s）")
     ap.add_argument("--predict-dir", default=os.path.join(C.OUTPUT_ROOT, "predict"))
     ap.add_argument("--limit", type=int, default=100,
-                    help="只渲染前 N 帧（CSV 已按分数降序，默认 %(default)s；0 = 全部）")
+                    help="只渲染前 N 帧（默认 %(default)s；0 = 全部）")
+    ap.add_argument("--order", choices=("score", "asc"), default="score",
+                    help="渲染顺序：score = 分数降序（默认，优先看高分）；"
+                         "asc = 分数升序（看低分难例）")
     ap.add_argument("--side", type=int, default=420, help="正方形裁剪边长")
     ap.add_argument("--full-frame", action="store_true", help="不裁剪，输出整帧")
     ap.add_argument("--cell-width", type=int, default=300, help="单元显示宽度 px")
@@ -157,6 +170,8 @@ def main():
                          "python.water_entry.select_frames）" % args.candidates)
     total = len(read_rows(args.candidates))
     rows = load_candidates(args.candidates, args.limit)
+    if args.order == "asc":
+        rows = sorted(rows, key=lambda r: (float(r["score"]), r["clip"], int(r["frame"])))
     crops_dir = os.path.join(args.output_dir, "crops")
     os.makedirs(crops_dir, exist_ok=True)
 
@@ -172,7 +187,7 @@ def main():
             print("  渲染 %d/%d" % (i, len(rows)))
 
     page = os.path.join(args.output_dir, "index.html")
-    write_page(page, items, args.cell_width, args.candidates, total)
+    write_page(page, items, args.cell_width, args.candidates, total, args.order)
     print("done -> %s（%d 帧）" % (page, len(items)))
 
 

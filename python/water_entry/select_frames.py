@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""从两个 swimup 模型的预测结果里挑出「模型做得差」的帧，作为增量标注候选。
+"""从三个 swimup 系模型的预测结果里挑出「模型做得差」的帧，作为增量标注候选。
 
-只看 swimup 与 swimup_bk：待标注数据是给这两个模型做增量训练的，通用 COCO 模型的
-结果不参与判断（它的失效模式与我们的训练集无关）。
+参与判断的三个模型：现网 swimup（MODEL_A）、随包微调版 swimup_bk（MODEL_B）、
+基于难例数据再训练的 yolo26（MODEL_C）。通用 COCO 模型不参与——它的失效模式
+与我们训练集无关。信号与分数按三模型逐对汇总：同一帧在任一模型对上命中信号
+即记一次（一个模型对上的强信号不会被另外两对的低分稀释）。
 
 七类信号（每帧可命中多个，`reasons` 列记录全部命中项）：
 
 | 信号 | 含义 | 为什么值得标 |
 | --- | --- | --- |
-| `both_blind`   | 两个模型都 0 检出 | 训练集完全没覆盖的姿态，价值最高 |
+| `both_blind`   | 参与对的两个模型都 0 检出 | 训练集完全没覆盖的姿态，价值最高 |
 | `both_reject`  | 有检出但选人都没接上 | 目标存在却跟丢，标了能同时修检测与跟踪 |
 | `one_miss`     | 一个模型检出、另一个没有 | 一个模型已能检出 => 不是不可见，是另一个模型的缺口 |
 | `diff_person`  | 两框 IoU 低 | 两模型指向不同的人，标注可消除歧义 |
@@ -17,7 +19,8 @@
 | `sign_flip`    | 两模型对 sho-hip 符号判断相反 | 直接影响入水帧判定的那一帧 |
 
 选出的帧按 `score` 排序，并做时序去重（同片段内相邻帧只留代表帧），避免把
-连续 5 帧几乎相同的画面都送去标注。
+连续 5 帧几乎相同的画面都送去标注。CSV 额外给出三模型各自该帧的框置信度
+（a/b/c_conf）与躯干点数（a/b/c_torso），便于核对。
 """
 import argparse
 import json
@@ -31,10 +34,12 @@ from python.water_entry import common as C
 
 MODEL_A = "swimup"
 MODEL_B = "swimup_bk"
+MODEL_C = "yolo26"
+MODEL_PAIRS = ((MODEL_A, MODEL_B), (MODEL_A, MODEL_C), (MODEL_B, MODEL_C))
 
 CANDIDATE_COLS = ["clip", "frame", "offset_to_entry", "phase", "note",
                   "entry_source", "reasons", "score",
-                  "a_conf", "b_conf", "a_torso", "b_torso",
+                  "a_conf", "b_conf", "c_conf", "a_torso", "b_torso", "c_torso",
                   "iou", "kp_mean_norm", "kp_max_norm",
                   "a_sign", "b_sign", "n_det_a", "n_det_b"]
 
@@ -92,6 +97,43 @@ def _kp_disagreement(rec_a, rec_b):
     return mean_px, max_px, mean_px / scale, max_px / scale, len(dists)
 
 
+def analyze_pair(rec_a, rec_b, thresholds):
+    """比较同一帧的一对模型记录，返回 (reasons, 度量字典)。
+
+    度量键以这对模型的后缀（'a'/'b'/'c'）命名，如 kp_* 分歧值与本对无关、
+    仍写 kp_mean_norm 等通用键（CSV 只有一列，取本帧命中信号最强的模型对的值）。
+    """
+    box_a, box_b = rec_a.get("box"), rec_b.get("box")
+    iou = _iou(box_a, box_b)
+    reasons, metrics = [], {}
+    if box_a is None and box_b is None:
+        if rec_a.get("n_det", 0) == 0 and rec_b.get("n_det", 0) == 0:
+            reasons.append("both_blind")
+        else:
+            reasons.append("both_reject")
+    elif box_a is None or box_b is None:
+        reasons.append("one_miss")
+    else:
+        if iou < thresholds["iou"]:
+            reasons.append("diff_person")
+        else:
+            kp_mean_px, kp_max_px, kp_mean_norm, kp_max_norm, shared = \
+                _kp_disagreement(rec_a, rec_b)
+            if shared and kp_mean_norm >= thresholds["kp_mean_norm"]:
+                reasons.append("kp_disagree")
+            metrics.update({"kp_mean_px": kp_mean_px, "kp_max_px": kp_max_px,
+                            "kp_mean_norm": kp_mean_norm, "kp_max_norm": kp_max_norm})
+            if (_sho_hip_sign(rec_a) is not None
+                    and _sho_hip_sign(rec_b) is not None
+                    and _sho_hip_sign(rec_a) != _sho_hip_sign(rec_b)):
+                reasons.append("sign_flip")
+        metrics["iou"] = None if iou is None else round(iou, 4)
+        if min(_torso_count(rec_a.get("kps_conf")),
+               _torso_count(rec_b.get("kps_conf"))) < 4:
+            reasons.append("torso_broken")
+    return reasons, metrics
+
+
 def phase_of(frame, jump_frame, entry_frame, radius=C.ENTRY_RADIUS):
     """帧所处阶段：entry（入水前后 radius 帧）> flight（起跳到入水）> pre / post。"""
     if abs(frame - entry_frame) <= radius:
@@ -122,47 +164,35 @@ DEFAULT_MIN_GAP = 1             # 相邻候选帧最小间隔；1 = 不去重（
 DEFAULT_MAX_OFFSET = 6          # 只取入水后 6 帧内；再往后运动员没入水面，人工也标不出
 
 
-def analyze_frame(rec_a, rec_b, frame, jump_frame, entry_frame, thresholds):
-    """比较同一帧的两模型记录，返回 (reasons, 度量字典)。"""
-    box_a, box_b = rec_a.get("box"), rec_b.get("box")
-    iou = _iou(box_a, box_b)
-    torso_a, torso_b = _torso_count(rec_a.get("kps_conf")), _torso_count(rec_b.get("kps_conf"))
-    sign_a, sign_b = _sho_hip_sign(rec_a), _sho_hip_sign(rec_b)
-    kp_mean_px = kp_max_px = kp_mean_norm = kp_max_norm = None
+def analyze_frame(recs, thresholds):
+    """对三个模型的记录逐对分析并汇总，返回 (reasons, 度量字典)。
 
-    reasons = []
-    if box_a is None and box_b is None:
-        if rec_a.get("n_det", 0) == 0 and rec_b.get("n_det", 0) == 0:
-            reasons.append("both_blind")
-        else:
-            reasons.append("both_reject")
-    elif box_a is None or box_b is None:
-        reasons.append("one_miss")
-    else:
-        if iou < thresholds["iou"]:
-            reasons.append("diff_person")
-        else:
-            kp_mean_px, kp_max_px, kp_mean_norm, kp_max_norm, shared = \
-                _kp_disagreement(rec_a, rec_b)
-            if shared and kp_mean_norm >= thresholds["kp_mean_norm"]:
-                reasons.append("kp_disagree")
-            if sign_a is not None and sign_b is not None and sign_a != sign_b:
-                reasons.append("sign_flip")
-        if min(torso_a, torso_b) < 4:
-            reasons.append("torso_broken")
+    reasons：三对信号的并集（去重），任一模型对命中即保留；
+    度量：a/b/c_conf 取各模型自己的框置信度，a/b/c_torso 取各模型自己的躯干点数，
+    a_sign/b_sign 记 swimup / swimup_bk 的肩胯符号（沿袭两模型时期的口径），
+    iou / kp_* 取本帧命中信号的模型对里分值最高的那对的值。
+    """
+    rec_a, rec_b, rec_c = recs
+    reasons, best_metrics, best_score = [], {}, -1.0
+    by_model = {MODEL_A: rec_a, MODEL_B: rec_b, MODEL_C: rec_c}
+    for s1, s2 in MODEL_PAIRS:
+        pair_reasons, metrics = analyze_pair(by_model[s1], by_model[s2], thresholds)
+        reasons.extend(pair_reasons)
+        score = sum(REASON_SCORE.get(r, 0) for r in pair_reasons)
+        if score > best_score:
+            best_score, best_metrics = score, metrics
 
-    metrics = {
-        "iou": None if iou is None else round(iou, 4),
-        "kp_mean_norm": None if kp_mean_norm is None else round(kp_mean_norm, 4),
-        "kp_max_norm": None if kp_max_norm is None else round(kp_max_norm, 4),
-        "kp_mean_px": None if kp_mean_px is None else round(kp_mean_px, 2),
-        "kp_max_px": None if kp_max_px is None else round(kp_max_px, 2),
+    out = dict(best_metrics)
+    out.update({
         "a_conf": rec_a.get("conf"), "b_conf": rec_b.get("conf"),
-        "a_torso": torso_a, "b_torso": torso_b,
-        "a_sign": sign_a, "b_sign": sign_b,
+        "c_conf": rec_c.get("conf"),
+        "a_torso": _torso_count(rec_a.get("kps_conf")),
+        "b_torso": _torso_count(rec_b.get("kps_conf")),
+        "c_torso": _torso_count(rec_c.get("kps_conf")),
+        "a_sign": _sho_hip_sign(rec_a), "b_sign": _sho_hip_sign(rec_b),
         "n_det_a": rec_a.get("n_det", 0), "n_det_b": rec_b.get("n_det", 0),
-    }
-    return reasons, metrics
+    })
+    return reasons, out
 
 
 def score_frame(reasons, phase, metrics):
@@ -180,7 +210,7 @@ def score_frame(reasons, phase, metrics):
 
 def collect(predict_dir, notes, thresholds, clips=None, max_offset=None,
             min_offset=None, require_verified_entry=True):
-    """遍历两个模型的 per_frame 结果，返回全部命中信号的候选帧。
+    """遍历三个模型的 per_frame 结果，返回全部命中信号的候选帧。
 
     max_offset / min_offset 限制 `frame - entry_frame` 的范围。入水 6 帧之后
     运动员已没入水面，两模型开始各自锁住不同的水花伪影（实测 offset +6~+12 有
@@ -192,15 +222,18 @@ def collect(predict_dir, notes, thresholds, clips=None, max_offset=None,
     （20260707-105111 标 f93，实际 f98 之后才入水），偏移量与阶段权重都不可信。
     """
     manifest = {c.name: c for c in C.load_manifest()}
-    dir_a = os.path.join(predict_dir, MODEL_A, "per_frame")
-    dir_b = os.path.join(predict_dir, MODEL_B, "per_frame")
-    for d in (dir_a, dir_b):
+    dirs = {model: os.path.join(predict_dir, model, "per_frame")
+            for model in (MODEL_A, MODEL_B, MODEL_C)}
+    for d in dirs.values():
         if not os.path.isdir(d):
             raise SystemExit("缺少预测结果：%s（先运行 python -m "
                              "python.water_entry.predict）" % d)
 
-    names = sorted(set(os.listdir(dir_a)) & set(os.listdir(dir_b)))
-    names = [n[:-5] for n in names if n.endswith(".json")]
+    names = None
+    for d in dirs.values():
+        here = {n[:-5] for n in os.listdir(d) if n.endswith(".json")}
+        names = here if names is None else (names & here)
+    names = sorted(names)
     if clips:
         names = [n for n in names if n in clips]
 
@@ -210,16 +243,16 @@ def collect(predict_dir, notes, thresholds, clips=None, max_offset=None,
         note = clip.note if clip else ""
         if notes is not None and note not in notes:
             continue
-        with open(os.path.join(dir_a, name + ".json")) as f:
-            pay_a = json.load(f)
-        with open(os.path.join(dir_b, name + ".json")) as f:
-            pay_b = json.load(f)
-        if require_verified_entry and pay_a["entry_source"] != "backstroke":
+        payloads = {}
+        for model in (MODEL_A, MODEL_B, MODEL_C):
+            with open(os.path.join(dirs[model], name + ".json")) as f:
+                payloads[model] = json.load(f)
+        if require_verified_entry and payloads[MODEL_A]["entry_source"] != "backstroke":
             continue
-        by_a = {r["frame"]: r for r in pay_a["frames"]}
-        by_b = {r["frame"]: r for r in pay_b["frames"]}
-        shared = sorted(set(by_a) & set(by_b))
-        jump, entry = pay_a["jump_frame"], pay_a["entry_frame"]
+        by = {model: {r["frame"]: r for r in payloads[model]["frames"]}
+              for model in payloads}
+        shared = sorted(set(by[MODEL_A]) & set(by[MODEL_B]) & set(by[MODEL_C]))
+        jump, entry = payloads[MODEL_A]["jump_frame"], payloads[MODEL_A]["entry_frame"]
 
         totals["clips"] += 1
         totals["frames"] += len(shared)
@@ -234,14 +267,16 @@ def collect(predict_dir, notes, thresholds, clips=None, max_offset=None,
                 continue
             if min_offset is not None and offset < min_offset:
                 continue
-            reasons, metrics = analyze_frame(by_a[frame], by_b[frame], frame,
-                                             jump, entry, thresholds)
+            recs = [by[model].get(frame) for model in (MODEL_A, MODEL_B, MODEL_C)]
+            if any(r is None for r in recs):
+                continue
+            reasons, metrics = analyze_frame(recs, thresholds)
             if not reasons:
                 continue
             phase = phase_of(frame, jump, entry)
             rows.append(dict(metrics, clip=name, frame=frame,
                              offset_to_entry=offset, phase=phase,
-                             note=note, entry_source=pay_a["entry_source"],
+                             note=note, entry_source=payloads[MODEL_A]["entry_source"],
                              reasons="|".join(reasons),
                              score=score_frame(reasons, phase, metrics)))
     return rows, totals
