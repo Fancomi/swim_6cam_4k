@@ -119,11 +119,98 @@ class MergeTest(unittest.TestCase):
             paths = F.merge_camera("gemini_camera_1", proj["cameras"]["gemini_camera_1"],
                                    Path(tmp) / "20260807" / "snapshots", out)
             self.assertEqual(len(paths), 2)
+            # 背景统一命名 <相机>_background.png（不再有 mask_background）
+            self.assertEqual(Path(paths[0]).name, "gemini_camera_1_background.png")
+            self.assertEqual(Path(paths[1]).name, "gemini_camera_1_mask_merged.png")
             from python.common.media import read_image
             merged = read_image(paths[1])[:, :, ::-1]
             # mask 覆盖 (2,2) 取后帧 200；背景中值 (10+200)/2=105
             self.assertEqual(merged[2, 2].tolist(), [200, 200, 200])
             self.assertEqual(merged[0, 0].tolist(), [105, 105, 105])
+
+    def test_merge_background_uses_all_frames(self):
+        """背景取 bg_paths（全部快照帧）中值，与 organize/auto_merge 口径一致。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            for i, v in enumerate((10, 100, 200), 1):
+                make_snapshot(tmp, "raw_%d_%d" % (i, i), "gemini_camera_1",
+                              fill=(v, v, v))
+            snap = Path(tmp) / "20260807" / "snapshots"
+            # 工程只含前 2 帧，背景仍应用全部 3 帧的中值（=100）
+            proj = self._project(tmp, "gemini_camera_1", [], n=2)
+            bg_paths = sorted(str(p) for p in snap.glob("raw_*/*.jpg"))
+            out = Path(tmp) / "obj"
+            paths = F.merge_camera("gemini_camera_1",
+                                   proj["cameras"]["gemini_camera_1"], snap, out,
+                                   bg_paths=bg_paths)
+            from python.common.media import read_image
+            bg = read_image(paths[0])[:, :, ::-1]
+            self.assertEqual(bg[0, 0].tolist(), [100, 100, 100])
+
+    def test_merge_annotates_frame_ids(self):
+        """每块 mask 中心画 f<帧ID> 标签（改变了该处像素）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            for i in (1, 2):
+                make_snapshot(tmp, "raw_%d_%d" % (i, i), "gemini_camera_1",
+                              size=(200, 120), fill=(60, 60, 60))
+            proj = self._project(tmp, "gemini_camera_1",
+                                 [{"x1": 100, "y1": 60, "x2": 100, "y2": 60,
+                                   "r": 10}])
+            out = Path(tmp) / "obj"
+            paths = F.merge_camera("gemini_camera_1",
+                                   proj["cameras"]["gemini_camera_1"],
+                                   Path(tmp) / "20260807" / "snapshots", out)
+            from python.common.media import read_image
+            merged = read_image(paths[1])
+            # 标签是亮黄字 + 黑底，画在 mask 中心上方；应出现亮黄像素
+            yellow = ((merged[:, :, 0] < 120) & (merged[:, :, 1] > 180)
+                      & (merged[:, :, 2] > 200)).sum()
+            self.assertGreater(yellow, 0)
+
+    def test_merge_frame_index_by_snapshot_id(self):
+        """同一相机不同快照的文件名相同，帧 ID 必须按 snapshot_id 匹配，不能按 basename。
+
+        回归：basename 匹配会让所有帧都命中第一条（全标成 f01）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            # 两个快照目录，但文件用相同的名字（真实数据就是如此）
+            for i, sid in enumerate(("raw_1_1", "raw_2_2"), 1):
+                snap = Path(tmp) / "20260807" / "snapshots" / sid
+                snap.mkdir(parents=True)
+                from PIL import Image
+                img = np.full((120, 200, 3), 60, dtype=np.uint8)
+                Image.fromarray(img).save(
+                    snap / "18_stitch__under-xlj-all__gemini_camera_1.jpg")
+            proj = {"schema": F.SCHEMA, "cameras": {"gemini_camera_1": [
+                {"frame_index": 1, "snapshot_id": "raw_1_1",
+                 "image": "raw_1_1/18_stitch__under-xlj-all__gemini_camera_1.jpg",
+                 "strokes": [{"x1": 100, "y1": 60, "x2": 100, "y2": 60, "r": 10}]},
+                {"frame_index": 2, "snapshot_id": "raw_2_2",
+                 "image": "raw_2_2/18_stitch__under-xlj-all__gemini_camera_1.jpg",
+                 "strokes": [{"x1": 50, "y1": 60, "x2": 50, "y2": 60, "r": 10}]},
+            ]}}
+            out = Path(tmp) / "obj"
+            paths = F.merge_camera("gemini_camera_1",
+                                   proj["cameras"]["gemini_camera_1"],
+                                   Path(tmp) / "20260807" / "snapshots", out)
+            # 直接用 snapshot_id 查 frame_index（核心断言：不能全命中 f01）
+            self.assertEqual(
+                F._frame_index_of(proj["cameras"]["gemini_camera_1"], "raw_1_1"), 1)
+            self.assertEqual(
+                F._frame_index_of(proj["cameras"]["gemini_camera_1"], "raw_2_2"), 2)
+
+    def test_resolve_images_across_multiple_roots(self):
+        """跨数据集合成：工程帧分散在多个快照根下，逐个根反查。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            for d in ("20260807-6cam-Horizontal", "20260807-6cam-Vertical"):
+                make_snapshot(tmp, "raw_1_1", "gemini_camera_1", date=d)
+            roots = [Path(tmp) / d / "snapshots"
+                     for d in ("20260807-6cam-Horizontal", "20260807-6cam-Vertical")]
+            proj_cam = [{"frame_index": 1, "snapshot_id": "raw_1_1",
+                         "image": "raw_1_1/01_stitch__x__gemini_camera_1.jpg",
+                         "strokes": []}]
+            got = F._resolve_images(proj_cam, roots)
+            self.assertEqual(len(got), 1)
+            # 命中 Horizontal 根下的帧
+            self.assertIn("20260807-6cam-Horizontal", got[0][1])
 
     def test_load_project_validation(self):
         with tempfile.TemporaryDirectory() as tmp:

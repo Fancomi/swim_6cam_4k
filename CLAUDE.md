@@ -102,8 +102,57 @@ cd build/metal-release && ctest
 - `organize`：所有相机按时间序整理成帧文件夹（`f<NN>_<snapshot>__<orig>.jpg`，字节级拷贝）；水下 16 相机额外做中值背景差分筛选。
 - `auto_merge --camera X`：自动合成（中值背景 + 差分前景叠加，流式分带内存封顶），相机必填。
 - `merge`：手动合成，读 `mask_label_project.json`，mask 覆盖处取原帧、其余取中值背景，处理工程里所有相机。
-- `grid`：仅水下，16 相机 mask 合成图 4×4 cat 拼接（纯可视化），每格标相机 ID + 泳道米数，工程给定时再标每帧 mask 的帧 ID + 米数。
+- `grid`：仅水下，16 相机 mask 合成图 4×4 cat 拼接（纯可视化），每格标相机 ID + 泳道米数。
 - `label`：起浏览器 mask 标注器（选目录即通用：overhead/underwater/femto/gemini）。
+
+**merge 的融合与标米**：
+- `--dates D1 D2 ...`：多数据集融合，同名相机帧按 `--dates` 顺序叠加（后叠在上层），帧号重编号；产物写第一个数据集。单数据集不用传。
+- `--meter-overrides '28:14.5,34:17.0'`：帧→米数覆盖表；缺省按 `frame_meters` 内置表（f1=0.5m 每帧+0.5，f28→f29 补一空位、f34/f35 重合 f35 不标）。
+- **标注自动判断**：`underA*`（水下 16 相机）标 `f<帧ID> <米数>`；其余相机（overhead / gemini / femto / orbbec）**完全不标**（`annotate=False`）。
+
+### 4 类标定产物的完整产出命令
+
+数据根 `SWIM_UNDER_GRIDS_ROOT` = `swimming-xlj-under-grids`，产物在各数据集 `object-frames/`。
+
+**1. 水下 16 相机 mask 合成（20260807，带米标帧标）**
+```bash
+# 先 label 画 mask（20260807/snapshots/mask_label_project.json）
+bash scripts/run_frames.sh merge --date 20260807
+bash scripts/run_frames.sh grid --date 20260807     # 4×4 拼接（可选）
+```
+产物：`20260807/object-frames/underA*_merged.png`（标 `f<帧ID> <米数>`）+ `underwater_mask_grid.png`。
+
+**2. 6 相机 zcam 全自动（Horizontal / Vertical，不带标）**
+```bash
+for d in 20260807-6cam-Horizontal 20260807-6cam-Vertical; do
+  for cam in xlj_aux_zcam_1 xlj_aux_zcam_2 xlj_aux_zcam_3 xlj_aux_zcam_4 overhead5 overhead6; do
+    bash scripts/run_frames.sh auto_merge --camera $cam --date $d
+  done
+done
+```
+产物：各数据集 `object-frames/*_{background,merged}.png`（3840×2160）。
+
+**3. overhead 5/6 mask 合成（20260708 + Horizontal 融合，不带标）**
+```bash
+bash scripts/run_frames.sh merge \
+  --dates 20260807-6cam-Horizontal 20260708 \
+  --cameras overhead5 overhead6 \
+  --out-root 20260708/object-frames
+```
+产物：`20260708/object-frames/overhead5/6_merged.png`（H 2 帧 + 0708 38/40 帧融合）。
+
+**4. gemini/femto 单数据集 mask 合成（H / V / 20260807）+ 20260708 femto**
+```bash
+for d in 20260807 20260807-6cam-Horizontal 20260807-6cam-Vertical; do
+  bash scripts/run_frames.sh merge --date $d \
+    --cameras gemini_camera_1 xlj_aux_orbbec_femto_1 \
+    --out-root <$d>/object-frames
+done
+# 20260708 只有 femto（旧相机名 orbbec_camera_1）
+bash scripts/run_frames.sh merge --date 20260708 \
+  --cameras orbbec_camera_1 --out-root 20260708/object-frames
+```
+产物：各数据集 `object-frames/{gemini_camera_1,xlj_aux_orbbec_femto_1,orbbec_camera_1}_merged.png`。
 
 - 数据根 `<数据集根>/<date>/snapshots/`，产物统一 `<数据集根>/<date>/object-frames/`（与 20260708 的 object-frames 平级）：每相机一个目录、`detections.csv`（全帧差分统计）、`curated.csv`（is_object=1 的值得标注帧）。
 - 差分口径对齐旧 detections.csv：`score_frac_gt40` 是该帧与相机逐像素中值背景的 RGB 欧氏距离 > 40 的像素占比；`cam_median` 是全时段 score 中位数；`threshold = cam_median × 1.28`（对齐旧数据 ~34% 精选率）；`is_object = score > threshold`。

@@ -13,11 +13,16 @@ mask_merge / mask_grid）里的逻辑合并到这里，单一 CLI 子命令分�
   auto_merge  自动合成（中值背景 + 差分前景叠加，流式分带、内存按条带封顶）。
               --camera 必填：逐相机合成，避免误把全部相机都跑。
   merge       手动合成（读 mask_label_project.json，mask 覆盖处取原帧、其余取
-              中值背景）。处理工程里存在的所有相机。
+              中值背景）。处理工程里存在的所有相机；每块 mask 的中心标 f<帧ID>
+              与泳道米数，单张图自己就能看出哪块来自哪帧。
   grid        仅 underwater：把 16 相机的 mask 合成图按 4×4 cat 拼成一张大图，
-              每格标注相机 ID + 泳道米数（FBX 世界 X），并标注每帧 mask 的帧 ID
-              与米数。
+              每格标注相机 ID + 泳道米数（FBX 世界 X）。帧标签已在各相机的
+              mask_merged 图上，这里不重复画。
   label       起浏览器 mask 标注器（转发 server.py）。
+
+背景只有一份口径：全部快照帧的逐像素中值，三条链路（organize --write-background /
+auto_merge / merge）产物内容一致，统一命名 <相机>_background.png，不再有
+mask_background 与 median_background 两套名字。
 
 合成纯函数（bands / median_background / merge_frames / load_stack）继续复用
 merge_overhead.py，不复制实现。
@@ -249,52 +254,187 @@ def rasterize_strokes(strokes, width, height):
     return mask.astype(bool)
 
 
-def _resolve_images(project_cam, snapshots_root):
-    """工程 image 相对路径 → (snapshot_id, 绝对路径, 该帧笔画)。按文件名反查快照目录。"""
+def _resolve_images(project_cam, snapshots_roots):
+    """工程 image 相对路径 → (snapshot_id, 绝对路径, 该帧笔画)。按文件名反查快照目录。
+
+    snapshots_roots 可以是单个目录或目录列表：跨数据集合成时工程帧分散在多个
+    数据集的 snapshots 下。匹配**优先用 image 里记录的目录名**（raw_<ms>_<n>）
+    在所有根里精确找 `根/目录名/文件名`——glob 兜底会误命中同名文件（不同
+    数据集的帧文件名相同，如 1_stitch__under-overhead-xlj__overhead5.jpg），
+    把 A 数据集的帧错配成 B 数据集的。全部根都试过 exact 后仍无命中才走 glob。
+    """
+    roots = [Path(r) for r in (snapshots_roots if isinstance(snapshots_roots, (list, tuple))
+                               else [snapshots_roots])]
     resolved = []
-    snap_root = Path(snapshots_root)
     for f in project_cam:
         image = f.get("image")
         if not image:
             continue
         rel, fname = Path(image), Path(image).name
-        hits = []
-        cand = snap_root / rel.parent if rel.parent.parts else snap_root
-        if cand.is_dir():
-            hits = sorted(cand.glob("*" + fname))
+        # 1) 精确匹配：image 记录的 raw_xxx 目录名，逐个根找
+        hits = [snap_root / rel.parent / fname for snap_root in roots
+                if (snap_root / rel.parent / fname).is_file()]
+        # 2) 兜底：目录名对不上（工程可能是旧布局），按文件名扫 raw_* 目录
         if not hits:
-            hits = sorted(snap_root.glob("raw_*/*" + fname))
+            for snap_root in roots:
+                hits = sorted(snap_root.glob("raw_*/*" + fname))
+                if hits:
+                    break
         if not hits:
-            raise ProjectError("工程引用的帧找不到：%s（在 %s 下）" % (image, snap_root))
+            raise ProjectError("工程引用的帧找不到：%s（在 %s 下）"
+                               % (image, "、".join(str(r) for r in roots)))
         resolved.append((hits[0].parent.name, str(hits[0]), f.get("strokes") or []))
     return resolved
 
 
 def merge_camera(camera, project_cam, snapshots_root, out_dir,
-                 band_rows=MO_BAND_ROWS):
-    """手动合成一台相机：读帧栈 -> 中值背景 -> 逐帧按该帧 mask 叠前景，写两张 PNG。
+                 band_rows=MO_BAND_ROWS, bg_paths=None, meters=None,
+                 with_meters=True, annotate=True):
+    """手动合成一台相机：中值背景 -> 逐帧按该帧 mask 叠前景，可选标帧 ID/米数。
 
-    逐帧用该帧自己的笔画（mask_labeler 保存的 strokes），帧间位置不同不会互相污染。
+    背景一律用该相机**全部帧**的逐像素中值（bg_paths），与 organize/auto_merge
+    的背景逐位一致——三条链路进来产物内容相同，所以统一命名 <相机>_background.png。
+    工程帧只决定前景（哪帧的哪块保留）。
+
+    snapshots_root 可以是单个目录或列表（跨数据集：工程帧分散在多个快照根下）。
+    每帧恰一个 mask（工程每帧一个 stroke、一个唯一横向位置）。标注控制：
+      annotate=False     完全不标（入水机位 gemini/femto 不要帧号/米数）
+      annotate=True  + with_meters=True   标 `f<帧ID> <米数>`（水下 16 相机）
+      annotate=True  + with_meters=False  只标 `f<帧ID>`
+    返回 (背景路径, 合成路径)。
     """
     entries = _resolve_images(project_cam, snapshots_root)
     if not entries:
         raise ProjectError("该相机工程里没有可解析的帧")
-    stack = load_stack([p for _sid, p, _st in entries])
+    fg_paths = [p for _sid, p, _st in entries]
+    stack = load_stack(fg_paths)
     h, w = stack.shape[1], stack.shape[2]
-    background = median_background(stack, band_rows=band_rows)
+    # 背景取全帧中值（口径与 organize/auto_merge 一致）；未给则退回工程帧。
+    background = (median_background_streaming(bg_paths, band_rows=BAND_ROWS)
+                  if bg_paths else median_background(stack, band_rows=band_rows))
     merged = background.copy()
-    for frame, (_sid, _p, strokes) in zip(stack, entries):
+    labels = []
+    for frame, (snapshot_id, _p, strokes) in zip(stack, entries):
         if not strokes:
             continue
         mask = rasterize_strokes(strokes, w, h)
         merged[mask] = frame[mask]
+        # 帧 ID 用 snapshot_id 匹配工程条目：同一相机在不同快照目录里的文件名
+        # 相同（18_stitch__under-xlj-all__underA1.jpg），basename 匹配会全命中
+        # 第一条；snapshot_id（raw_<ms>_<n>）才是每帧唯一的。
+        labels.append((_frame_index_of(project_cam, snapshot_id), strokes))
+    if annotate:
+        _annotate_masks(merged, labels, meters or frame_meters(),
+                        with_meters=with_meters)
     out_dir = Path(out_dir)
     paths = []
-    for suffix, image in (("mask_background", background), ("mask_merged", merged)):
+    for suffix, image in (("background", background), ("mask_merged", merged)):
         path = write_image(out_dir / ("%s_%s.png" % (camera, suffix)),
                            image[:, :, ::-1], "mask-merge")
         paths.append(str(path))
     return paths
+
+
+def _frame_index_of(project_cam, snapshot_id):
+    """从工程里找这条快照对应的 frame_index（找不到返回 0）。
+
+    用 snapshot_id（raw_<ms>_<n>）匹配工程条目的 snapshot_id 字段——同一相机
+    在所有快照里的文件名相同，basename 匹配会全部命中第一条，frame_index 就
+    全错。"""
+    for f in project_cam:
+        if f.get("snapshot_id") == snapshot_id:
+            return int(f.get("frame_index", 0))
+    return 0
+
+
+def frame_meters(overrides=None):
+    """每帧对应的泳道米数，完全以 f 定：f1=0.5m，每帧 +0.5m。
+
+    泳者从 A1 端（最右，0.5m）游向 A16 端（最左，25.5m），每帧一个 mask、一个
+    唯一横向位置，米数不依赖 UV 几何换算。录制有两次异常，用修正表达：
+
+      - f28(14.0m) 与 f29(15.0m) 之间缺一帧：A9/A10 在该时刻没采到，补一个
+        14.5m 空位，所以 f29 从 15.0 起（而不是 14.5）。
+      - f34/f35 采到同一快照（A11-A13 重合）：f34=17.5m，f35 是 f34 的重复，
+        米数置 None 表示**不标**（删去），f36 恢复 18.0m。
+
+    overrides: {frame_index: 米数}，显式覆盖默认表（None 表示该帧不标）。
+    返回 {frame_index: 米数|None}。
+    """
+    meters, m = {}, 0.5
+    for f in range(1, 52):
+        meters[f] = m
+        if f == 28:
+            m = 15.0          # 跳过 14.5 空位（补帧），f29 从 15.0 起
+        elif f == 34:
+            m = 17.5          # f34 正常递增到 17.5
+        elif f == 35:
+            meters[f] = None  # f35 与 f34 重合，不标
+            m = 18.0          # f36 恢复 18.0
+        else:
+            m = round(m + 0.5, 1)
+    if overrides:
+        meters.update({int(k): (float(v) if v is not None else None)
+                       for k, v in overrides.items()})
+    return meters
+
+
+def _annotate_masks(image, labels, meters, with_meters=True):
+    """在每帧 mask 上方标帧 ID（可选米数），每帧恰一个标签，尽量不盖 mask。
+
+    每帧只标一个标签：工程里每帧一个 stroke（一个 mask、一个唯一横向位置）。
+    with_meters=True 时标 `f<帧ID> <米数>`（meters[frame_index] 为 None 的帧，
+    如 f35 与 f34 重合，不标）；False 时只标 `f<帧ID>`（入水机位不给米数）。
+    标签放在 mask 顶边之上、按 x 排序做矩形避让，撞了往下挪。
+    labels: [(frame_index, strokes)]。
+    """
+    items = []
+    for frame_index, strokes in labels:
+        if not strokes:
+            continue
+        if with_meters and meters.get(frame_index) is None:
+            continue
+        s = strokes[0]
+        top = min(float(s["y1"]), float(s["y2"])) - float(s["r"])
+        cx = (float(s["x1"]) + float(s["x2"])) / 2.0
+        if with_meters:
+            text = "f%02d %.1fm" % (frame_index, meters[frame_index])
+        else:
+            text = "f%02d" % frame_index
+        items.append((cx, top, text))
+    items.sort(key=lambda it: it[0])
+    placed = []
+    for cx, top, text in items:
+        box = _place_label(image, text, int(cx), int(top), placed)
+        if box:
+            placed.append(box)
+
+
+def _place_label(image, text, cx, cy, placed, line=15):
+    """在 (cx, cy) 附近找一个不与 placed 相交的位置画标签，返回占用矩形。
+
+    先试笔画中心正上方，撞了就逐行下移（最多 12 行，超出就放弃这条），避免
+    标签互相糊住。返回 None 表示没画。
+    """
+    font, scale, thick = cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1
+    (tw, th), _ = cv2.getTextSize(text, font, scale, thick)
+    pad = 2
+    bw, bh = tw + 2 * pad, th + 2 * pad
+    h, w = image.shape[:2]
+    if bw >= w or bh >= h:
+        return None
+    x = max(0, min(cx - bw // 2, w - bw - 1))
+    for step in range(12):
+        y = cy - bh - 6 + step * (bh + 2)
+        y = max(0, min(y, h - bh - 1))
+        if all(not (x < px + pw and px < x + bw and y < py + ph and py < y + bh)
+               for px, py, pw, ph in placed):
+            cv2.rectangle(image, (x, y), (x + bw, y + bh), (10, 10, 10),
+                          thickness=-1)
+            cv2.putText(image, text, (x + pad, y + th + pad), font, scale,
+                        (255, 220, 90), thick, cv2.LINE_AA)
+            return (x, y, bw, bh)
+    return None
 
 
 # ---------------- 差分筛选（仅 underwater，organize 时额外跑） ----------------
@@ -346,7 +486,7 @@ def screen_underwater(date=DEFAULT_DATE, out_root=None, band_rows=BAND_ROWS,
         background, scores = _compute_scores([r["source_path"] for r in records],
                                              band_rows=band_rows)
         if write_background:
-            write_image(out_root / ("%s_median_background.png" % cam),
+            write_image(out_root / ("%s_background.png" % cam),
                         background, "median background")
         cam_median = float(np.median(scores))
         threshold = cam_median * ratio
@@ -411,42 +551,16 @@ def camera_meters(mesh_json=MESH_JSON):
     return {cam: (cx - lane_min) for cam, cx in centers.items()}
 
 
-def _uv_to_world_x(mesh):
-    """由网格三角形拟合 UV → 世界 X 的线性映射，返回函数 u,v -> x。
 
-    underwater 平面是矩形、const_axis=1（Y 恒定），世界 X 由 UV 唯一决定，
-    用最小二乘拟合 x = a*u + b*v + c。返回 (a, b, c) 系数。
-    """
-    pts = []
-    for tri in mesh.get("triangles", []):
-        for v in tri:
-            if "uv" in v and "pos" in v:
-                pts.append((v["uv"][0], v["uv"][1], v["pos"][0]))
-    if len(pts) < 3:
-        return None
-    A = np.array([[u, v, 1.0] for u, v, _x in pts], dtype=np.float64)
-    b = np.array([x for _u, _v, x in pts], dtype=np.float64)
-    coef, *_ = np.linalg.lstsq(A, b, rcond=None)
-    return coef
-
-
-def stitch_4x4(input_dir, out_path, meters, project=None, date=DEFAULT_DATE,
+def stitch_4x4(input_dir, out_path, meters, date=DEFAULT_DATE,
                cameras=UNDER_CAMERAS):
     """把 16 相机 mask 合成图按 4×4 cat 拼接，每格标注相机 ID + 米数。
 
-    project 给定时，每格额外标注每帧 mask 的帧 ID 与米数（读工程笔画换算）。
-    缺图格子留淡底 + 仍标相机 ID/米数。返回 (输出路径, 每格信息)。
+    每帧 mask 的帧 ID/米数已由 merge 画在各相机的 mask_merged 图上，这里只标
+    每格的相机 ID + 平面米数，不再重复画帧标签。缺图格子留淡底 + 仍标相机 ID。
+    返回 (输出路径, 每格信息)。
     """
     input_dir = Path(input_dir)
-    meshes_by_cam = {}
-    if project is not None and Path(MESH_JSON).is_file():
-        doc = json.loads(Path(MESH_JSON).read_text(encoding="utf-8"))
-        for mesh in doc.get("meshes", []):
-            tex = mesh.get("texture_basename", "")
-            cam = next((c for c, t in TEX_NAME.items() if t == tex), None)
-            if cam is not None:
-                meshes_by_cam["underA%d" % cam] = mesh
-
     tiles, info = [], []
     for cam in cameras:
         p = input_dir / ("%s_mask_merged.png" % cam)
@@ -477,10 +591,6 @@ def stitch_4x4(input_dir, out_path, meters, project=None, date=DEFAULT_DATE,
             h, w = tile.shape[:2]
             y1, x1 = y0 + label_h + (cell_h - label_h - h) // 2, x0 + (cell_w - w) // 2
             canvas[y1:y1 + h, x1:x1 + w] = tile
-            # 每帧 mask 标注：帧 ID + 米数，画在该帧笔画中心附近
-            if project is not None and cam in meshes_by_cam:
-                _draw_frame_labels(canvas, project.get("cameras", {}).get(cam, []),
-                                   meshes_by_cam[cam], y1, x1, h, w)
         m = meters.get(cam)
         label = cam + ("  %.1fm" % m if m is not None else "")
         _put_label(canvas, label, x0 + 2, y0 + (label_h - 15) // 2, bg=(28, 32, 40))
@@ -489,41 +599,23 @@ def stitch_4x4(input_dir, out_path, meters, project=None, date=DEFAULT_DATE,
     return str(out_path), info
 
 
-def _draw_frame_labels(canvas, project_cam, mesh, y0, x0, h, w):
-    """在合成图上把工程每帧的 mask 笔画中心画上「帧ID 米数」标签。"""
-    coef = _uv_to_world_x(mesh)
-    if coef is None:
-        return
-    a, b, c = coef
-    for f in project_cam:
-        strokes = f.get("strokes") or []
-        if not strokes:
-            continue
-        xs = [float(s["x1"]) + float(s["x2"]) for s in strokes]
-        ys = [float(s["y1"]) + float(s["y2"]) for s in strokes]
-        cx = sum(xs) / (2 * len(xs))
-        cy = sum(ys) / (2 * len(ys))
-        # 图像像素 x → UV u（整幅平铺）→ 世界 X → 泳道米数
-        u = cx / max(1, w - 1)
-        world_x = a * u + b * 0.5 + c        # v 取中间行（v 不参与 X 变化的平面）
-        # 平移：米数 = world_x - lane_min（需 lane_min，从 mesh 的 pos 推）
-        all_x = [v["pos"][0] for tri in mesh.get("triangles", []) for v in tri]
-        meters = world_x - min(all_x)
-        px, py = int(x0 + cx), int(y0 + cy)
-        _put_label(canvas, "f%02d %.1fm" % (f.get("frame_index", 0), meters),
-                   px, py - 8)
+def _put_label(canvas, text, x, y, bg=(10, 10, 10), fg=(255, 255, 255)):
+    """在 (x,y) 画文字 + 底色条；越界则夹进画布，装不下就整条不画。
 
-
-def _put_label(canvas, text, x, y, bg=(10, 10, 10)):
-    """在 (x,y) 画白字黑底条（bg 可换淡底）。"""
+    装不下直接跳过（而不是夹到 0,0 铺满）：小图上一条标签能盖掉整幅内容。"""
     font = cv2.FONT_HERSHEY_SIMPLEX
     scale, thick = 0.5, 1
     (tw, th), _ = cv2.getTextSize(text, font, scale, thick)
     pad = 3
-    cv2.rectangle(canvas, (x, y), (x + tw + 2 * pad, y + th + 2 * pad), bg,
-                  thickness=-1)
-    cv2.putText(canvas, text, (x + pad, y + th + pad), font, scale,
-                (255, 255, 255), thick, cv2.LINE_AA)
+    h, w = canvas.shape[:2]
+    box_w, box_h = tw + 2 * pad, th + 2 * pad
+    if box_w >= w or box_h >= h:
+        return
+    x = max(0, min(x, w - box_w - 1))
+    y = max(0, min(y, h - box_h - 1))
+    cv2.rectangle(canvas, (x, y), (x + box_w, y + box_h), bg, thickness=-1)
+    cv2.putText(canvas, text, (x + pad, y + th + pad), font, scale, fg,
+                thick, cv2.LINE_AA)
 
 
 # ---------------- CLI ----------------
@@ -540,7 +632,7 @@ def _parser():
     p.add_argument("--band-rows", type=int, default=BAND_ROWS)
     p.add_argument("--ratio", type=float, default=CURATE_RATIO)
     p.add_argument("--write-background", action="store_true",
-                   help="额外写 <相机>_median_background.png 诊断图")
+                   help="额外写 <相机>_background.png 中值背景图")
     p.set_defaults(func=cmd_organize)
 
     p = sub.add_parser("auto_merge", help="自动合成（中值+差分），--camera 必填")
@@ -558,19 +650,23 @@ def _parser():
     p = sub.add_parser("merge", help="手动合成（mask 前景+中值背景），处理所有相机")
     p.add_argument("--project", default=None)
     p.add_argument("--date", default=DEFAULT_DATE)
+    p.add_argument("--dates", nargs="+", default=None,
+                   help="跨数据集合成：读各数据集工程、同名相机帧按时间合并重编号")
     p.add_argument("--root", default=str(DATASET))
     p.add_argument("--snapshots", default=None)
     p.add_argument("--cameras", nargs="+", default=None,
                    help="相机子集（默认工程里有的全部）")
     p.add_argument("--out-root", default=None)
     p.add_argument("--band-rows", type=int, default=MO_BAND_ROWS)
+    p.add_argument("--meter-overrides", default=None,
+                   help="帧→米数覆盖表，如 '28:14.5,34:17.0'；缺省按 frame_meters 内置表"
+                        "（f1=0.5m 每帧+0.5，f28→f29 补一帧、f34 重合不增）")
     p.set_defaults(func=cmd_merge)
 
     p = sub.add_parser("grid", help="仅水下：16 相机 4×4 拼接")
     p.add_argument("--date", default=DEFAULT_DATE)
     p.add_argument("--input-dir", default=None)
     p.add_argument("--out", default=None)
-    p.add_argument("--project", default=None, help="mask 工程，标注每帧帧 ID/米数")
     p.add_argument("--mesh-json", default=str(MESH_JSON))
     p.set_defaults(func=cmd_grid)
 
@@ -612,19 +708,70 @@ def cmd_auto_merge(args):
     print("\n共写出 %d 个文件 -> %s" % (len(written), out_root))
 
 
+def _find_project(snap_root, date):
+    """定位工程文件：优先 snapshots/ 内（mask_labeler 写回的落点），退回日期根。
+
+    mask_labeler 把工程写到所选 snapshots 目录里（File System Access 写回所选
+    根），但早期版本也存过日期根下，两个位置都找。"""
+    for cand in (Path(snap_root) / PROJECT_FILENAME,
+                 Path(snap_root).parent / PROJECT_FILENAME):
+        if cand.is_file():
+            return cand
+    return Path(snap_root) / PROJECT_FILENAME
+
+
+def _date_of_snapshot(snapshot_id, dates):
+    """snapshot_id（raw_<ms>_<n>）属于哪个数据集。
+
+    快照目录名在各数据集间不重复（时间戳不同），按目录存在性判断；找不到时
+    回退到第一个数据集。用于跨数据集帧按 --dates 顺序分组排序。"""
+    for d in dates:
+        if (snapshots_dir(d) / snapshot_id).is_dir():
+            return d
+    return dates[0] if dates else DEFAULT_DATE
+
+
 def cmd_merge(args):
+    dates = args.dates if args.dates else [args.date]
+    # 跨数据集时工程取第一个数据集（合并前景帧来自各数据集对应快照）。
     snap_root = Path(args.snapshots) if args.snapshots else \
-        snapshots_dir(args.date)
+        snapshots_dir(dates[0])
     if not snap_root.is_dir():
         raise SystemExit("缺少快照目录：%s" % snap_root)
     project = Path(args.project) if args.project else \
-        snap_root.parent / PROJECT_FILENAME
+        _find_project(snap_root, dates[0])
     if not project.is_file():
         raise SystemExit("缺少工程文件：%s（请先跑 label 画保留区域）" % project)
     cameras = load_project(project)
-    out_root = Path(args.out_root) if args.out_root else object_frames_root(args.date)
+    snap_roots = [snap_root]
+    # 跨数据集（--dates）：读各数据集的工程、把同名相机的帧按数据集顺序合并，
+    # 组内按时间序、组间按 --dates 传入顺序（H → V → 20260807 即后叠在上层）。
+    if args.dates:
+        for d in args.dates[1:]:
+            p2 = Path(args.project) if args.project else \
+                _find_project(snapshots_dir(d), d)
+            if not p2.is_file():
+                continue
+            snap_roots.append(snapshots_dir(d))
+            for cam, frames in load_project(p2).items():
+                cameras.setdefault(cam, []).extend(frames)
+        for cam in cameras:
+            # 组内（同数据集）按快照时间序，组间保持 --dates 顺序：按每帧所属
+            # 数据集在 dates 里的下标分组排序，同一数据集内再按 snapshot_id。
+            order = {d: i for i, d in enumerate(dates)}
+            cameras[cam].sort(key=lambda f: (order.get(
+                _date_of_snapshot(f["snapshot_id"], dates), 0), f["snapshot_id"]))
+            for i, f in enumerate(cameras[cam], 1):
+                f["frame_index"] = i      # 跨数据集后按叠加顺序重新编号
+    out_root = Path(args.out_root) if args.out_root else object_frames_root(dates[0])
     cams = tuple(args.cameras) if args.cameras else \
         [c for c in cameras if cameras.get(c)]
+    overrides = None
+    if args.meter_overrides:
+        # '28:14.5,34:17.0' -> {28: 14.5, 34: 17.0}
+        overrides = dict(pair.split(":") for pair in
+                         args.meter_overrides.replace(" ", "").split(",") if pair)
+    meters = frame_meters(overrides)   # 帧序×0.5，可传覆盖表
     total = 0
     try:
         for cam in cams:
@@ -632,10 +779,19 @@ def cmd_merge(args):
             if not project_cam:
                 print("%-24s 工程里没有该相机，跳过" % cam)
                 continue
-            paths = merge_camera(cam, project_cam, snap_root,
-                                 out_root, band_rows=args.band_rows)
+            # 背景口径与 organize/auto_merge 一致：该相机全部快照帧的中值；
+            # 跨数据集时把各数据集帧首尾相接当一段（帧数可能不同，尺寸需一致）。
+            bg_paths = [p for d in dates
+                        for _sid, p in frames_for_camera(cam, date=d)]
+            # 水下 16 相机标 f<帧ID>+米数；其余相机（overhead/gemini/femto）
+            # 完全不标——入水机位不需要帧号/米数，overhead 混合图也不标。
+            is_under = cam.startswith("underA")
+            paths = merge_camera(cam, project_cam, snap_roots, out_root,
+                                 band_rows=args.band_rows, bg_paths=bg_paths,
+                                 meters=meters, with_meters=is_under,
+                                 annotate=is_under)
             total += len(paths)
-            print("%-24s -> %s" % (cam, ", ".join(paths)))
+            print("%-24s -> %s" % (cam, ", ".join(Path(p).name for p in paths)))
     except (FrameSizeError, ProjectError) as exc:
         raise SystemExit(str(exc)) from None
     print("\n共写出 %d 个文件 -> %s" % (total, out_root))
@@ -645,10 +801,7 @@ def cmd_grid(args):
     meters = camera_meters(args.mesh_json)
     in_dir = Path(args.input_dir) if args.input_dir else object_frames_root(args.date)
     out = Path(args.out) if args.out else in_dir / "underwater_mask_grid.png"
-    project = None
-    if args.project:
-        project = load_project(args.project)
-    path, info = stitch_4x4(in_dir, out, meters, project=project, date=args.date)
+    path, info = stitch_4x4(in_dir, out, meters, date=args.date)
     for it in info:
         m = it["meters"]
         print("%-10s %s  %s  %s" % (it["cam"], it["state"],
