@@ -43,6 +43,7 @@ class StepError(RuntimeError):
     caller-supplied directory — is a profile method."""
 
 
+_POOL_MODELS = INPUTS / "pool" / "models"
 _UNDER_MODELS = INPUTS / "underwater" / "models"
 _OVERHEAD_MODELS = INPUTS / "overhead" / "models"
 
@@ -78,6 +79,11 @@ class Profile:
     blend_px: float | None = None
     clip_uv: bool = False
     neg_v: bool = False                  # flip world Y (the pool bake stores it down)
+    # Flip world X. With neg_v it makes a 180°-rotated file land on the shared
+    # axes, so every step (still, video, asset) reads geometry that is already
+    # aligned — the rotation stays one profile field, not a step each consumer
+    # would have to repeat.
+    neg_u: bool = False
     order: str = "world_x"               # "world_x" | "declared"
     planes_only: bool = False            # drop clutter meshes (all.fbx)
     full_res: bool = False
@@ -174,6 +180,49 @@ PROFILES = {
         sync="none",
         _out_dir=OUTPUTS / "pool",
     ),
+    # Same six cameras and the same clips as `pool`, but the designer rebuilt the
+    # meshes by hand (2.5m lanes gained two more strung lines, so the grid is
+    # denser: 442~494 triangles against the old 160~190). Three things differ and
+    # all three are profile fields — nothing in python/stitch/ branches on a line
+    # name, and no consumer post-processes the geometry:
+    #
+    #   const_axis        old file is flat in Y (pos = X,Z); this one is flat in Z
+    #                     (pos = X,Y). extract_mesh picks that up on its own.
+    #   neg_u + neg_v     the file models the pool rotated 180° from pool.fbx: the
+    #                     same camera sits on the opposite bank and the opposite
+    #                     end (cam1 is bottom-right here, top-left there). Setting
+    #                     BOTH mirrors is that rotation, so the mesh arrives on
+    #                     pool's axes and every step downstream — still, video,
+    #                     asset — sees an already-aligned pool. Verified by
+    #                     normalising each camera's centre into canvas fractions:
+    #                     with both flips the worst deviation from pool is 0.020
+    #                     (one flip alone leaves 0.50~0.67, none leaves 0.84).
+    #   camera_ids        comes from each mesh's OWN texture, not from where the
+    #                     mesh sits. The .fbm filenames are recycled from another
+    #                     shoot (overhead5_merged.png and friends) but the pixels
+    #                     are these six pool cameras; correlating each texture
+    #                     against the clips' first frames identifies them
+    #                     unambiguously (0.67~0.86, next-best 0.45~0.68). Guessing
+    #                     from world position instead gets all six wrong because
+    #                     of that same 180°, and the stitch then looks shattered
+    #                     while the UVs are in fact fine.
+    "pool2": Profile(
+        name="pool2",
+        fbx=_POOL_MODELS / "pool 1.fbx",
+        tex_dir=_POOL_MODELS / "pool 1.fbm",
+        camera_ids=("cam5", "cam6", "cam4", "cam1", "cam3", "cam2"),
+        order="declared",
+        clip_suffix=".mp4",
+        ppm=100.0,
+        source_size=(3840, 2160),
+        blend_px=None,
+        clip_uv=False,
+        neg_v=True,
+        neg_u=True,
+        still_margin=0,
+        sync="none",
+        _out_dir=OUTPUTS / "pool2",
+    ),
     "underwater": Profile(
         name="underwater",
         fbx=_UNDER_MODELS / "all.fbx",
@@ -241,9 +290,12 @@ def get(name):
 def default_video_dir(profile):
     """Where a line's clips live when --video-dir is not given.
 
-    Only pool has one worth defaulting: its session directory is a machine-wide
-    dataset, while the plane lines are per-sample directories chosen per run."""
-    if profile.name != "pool":
+    Only the pool lines have one worth defaulting: their session directory is a
+    machine-wide dataset, while the plane lines are per-sample directories chosen
+    per run. `pool2` is the same six cameras filming the same session as `pool`
+    (only the FBX was rebuilt), so it defaults to the same clips — that is what
+    makes the two lines comparable frame for frame."""
+    if profile.name not in ("pool", "pool2"):
         return None
     return dataset_root(
         "SWIMMING_DATASET_DIR",

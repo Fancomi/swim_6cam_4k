@@ -77,7 +77,7 @@ def resolve_bottom_crop(spec, coverage):
 
 def compile_asset(mesh_json, output, camera_ids, ppm, neg_v=False,
                   blend_px=None, clip_uv=False, source_size=(1280, 720),
-                  crop_bottom=None):
+                  crop_bottom=None, neg_u=False):
     """Compile one mesh JSON into runtime format v1; returns the header geometry.
 
     `blend_px` None bakes the pool's distance feather, a number bakes the plane
@@ -93,7 +93,7 @@ def compile_asset(mesh_json, output, camera_ids, ppm, neg_v=False,
     if len(camera_ids) != len(meshes):
         raise ValueError(f"camera count mismatch: {len(camera_ids)} IDs for "
                          f"{len(meshes)} meshes")
-    C.to_metres(meshes, 1.0, neg_v)
+    C.to_metres(meshes, 1.0, neg_v, neg_u)
     # margin 0: the runtime canvas is the published output size, and the shader
     # clamps rather than indexing, so it needs no padding of its own.
     canvas = C.Canvas(meshes, ppm, margin=0)
@@ -177,6 +177,7 @@ def compile_profile(profile, mesh_json=None, output=None, ppm=None,
         profile.camera_ids,
         profile.ppm if ppm is None else ppm,
         neg_v=profile.neg_v,
+        neg_u=profile.neg_u,
         blend_px=profile.blend_px if blend_px is None else blend_px,
         clip_uv=profile.clip_uv if clip_uv is None else clip_uv,
         source_size=profile.source_size,

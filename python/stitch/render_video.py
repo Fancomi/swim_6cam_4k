@@ -143,7 +143,8 @@ def render(profile, video_dir, out_path, seconds=None, ppm=None, blend_px=None,
     if not video_dir.is_dir():
         raise StepError(f"video directory does not exist: {video_dir}")
 
-    meshes = C.load_meshes(profile.mesh_json, neg_v=profile.neg_v)
+    meshes = C.load_meshes(profile.mesh_json, neg_v=profile.neg_v,
+                          neg_u=profile.neg_u)
     cameras = list(profile.camera_ids)
     if len(cameras) != len(meshes):
         raise StepError(f"{len(cameras)} cameras for {len(meshes)} meshes")

@@ -18,7 +18,8 @@ def render(profile, tex_dir, out_prefix, ppm=None, blend_px=None,
     if not tex_dir.is_dir():
         raise StepError(f"texture directory missing: {tex_dir}")
 
-    meshes = C.load_meshes(profile.mesh_json, neg_v=profile.neg_v)
+    meshes = C.load_meshes(profile.mesh_json, neg_v=profile.neg_v,
+                          neg_u=profile.neg_u)
     names = tex_names or [mesh["texture_basename"] for mesh in meshes]
     if len(names) != len(meshes):
         raise StepError(f"{len(names)} texture names for {len(meshes)} meshes")

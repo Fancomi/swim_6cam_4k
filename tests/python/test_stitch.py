@@ -121,6 +121,28 @@ class CanvasTest(unittest.TestCase):
         self.assertEqual(upright[0]["triangles"][0][0]["pos"][1], 2.0)
         self.assertEqual(flipped[0]["triangles"][0][0]["pos"][1], -2.0)
 
+    def test_to_metres_flips_x_only_when_asked(self):
+        """neg_u 单独存在才能表达"只镜像 X"；与 neg_v 合起来就是 180° 旋转。"""
+        plain = [_mesh("a", 1.0, 3.0, 2.0, 4.0)]
+        mirrored = json.loads(json.dumps(plain))
+        C.to_metres(plain, 1.0, False, False)
+        C.to_metres(mirrored, 1.0, False, True)
+        self.assertEqual(plain[0]["triangles"][0][0]["pos"][0], 1.0)
+        self.assertEqual(mirrored[0]["triangles"][0][0]["pos"][0], -1.0)
+        # X 翻了不该动 Y
+        self.assertEqual(mirrored[0]["triangles"][0][0]["pos"][1], 2.0)
+
+    def test_to_metres_both_mirrors_is_a_half_turn(self):
+        """两个镜像一起开 = 绕原点转 180°：每个顶点都取相反数。"""
+        plain = [_mesh("a", 1.0, 3.0, 2.0, 4.0)]
+        turned = json.loads(json.dumps(plain))
+        C.to_metres(plain, 1.0, False, False)
+        C.to_metres(turned, 1.0, True, True)
+        for tri_a, tri_b in zip(plain[0]["triangles"], turned[0]["triangles"]):
+            for a, b in zip(tri_a, tri_b):
+                self.assertEqual(b["pos"][0], -a["pos"][0])
+                self.assertEqual(b["pos"][1], -a["pos"][1])
+
 
 class BlendTest(unittest.TestCase):
     """clip and blend_px are the two knobs separating the pool's distance feather
@@ -240,8 +262,47 @@ class LoadMeshesTest(unittest.TestCase):
 class ProfileTest(unittest.TestCase):
     """A profile record is the single place a line's differences live."""
 
-    def test_registry_holds_the_three_lines(self):
-        self.assertEqual(P.names(), ["pool", "underwater", "overhead"])
+    def test_registry_holds_every_line(self):
+        self.assertEqual(P.names(), ["pool", "pool2", "underwater", "overhead"])
+
+    def test_pool2_mirrors_both_axes_to_land_on_pools_layout(self):
+        """pool2 是同一批相机、同一批片段，只换了设计师手工重建的 FBX。
+
+        新文件把泳池建成相对 pool.fbx 转了 180°，所以两个镜像都要开：只开一个
+        会变成单轴翻转（对不上），都不开则整池转 180°。相机身份按每块 mesh 自己
+        的贴图认（.fbm 文件名是从别处复用的，像素才是真身），不能按世界位置配。"""
+        pool2 = P.get("pool2")
+        self.assertEqual(pool2.camera_ids,
+                         ("cam5", "cam6", "cam4", "cam1", "cam3", "cam2"))
+        self.assertTrue(pool2.neg_u)              # 两个镜像合起来 = 180° 旋转
+        self.assertTrue(pool2.neg_v)
+        self.assertEqual(pool2.order, "declared")
+        # 其余渲染口径与 pool 一致，两条线才可逐帧对比
+        pool = P.get("pool")
+        for field in ("ppm", "source_size", "blend_px", "clip_uv",
+                      "still_margin", "sync", "clip_suffix"):
+            self.assertEqual(getattr(pool2, field), getattr(pool, field), field)
+        # 产物分开放，不覆盖旧线的产物
+        self.assertNotEqual(pool2.out_dir, pool.out_dir)
+
+    def test_only_pool2_needs_the_x_mirror(self):
+        """neg_u 是这个文件的属性，不是全局默认——其余线一个都不该开。"""
+        for name in ("pool", "underwater", "overhead"):
+            self.assertFalse(P.get(name).neg_u, name)
+
+    def test_pool2_lays_the_banks_out_opposite_to_pool(self):
+        """两条线的 6 台相机集合相同，但排布相反——这正是不能按位置配的原因。"""
+        pool, pool2 = P.get("pool"), P.get("pool2")
+        self.assertEqual(set(pool2.camera_ids), set(pool.camera_ids))
+        # 远排（声明序前三）：pool 是 cam3/cam2/cam1，pool2 是 cam5/cam6/cam4
+        self.assertEqual(pool.camera_ids[:3], ("cam3", "cam2", "cam1"))
+        self.assertEqual(pool2.camera_ids[:3], ("cam5", "cam6", "cam4"))
+
+    def test_both_pool_lines_default_to_the_same_clips(self):
+        """同一场录制：默认片段目录必须一致，否则"对比"比的是两批素材。"""
+        self.assertEqual(P.default_video_dir(P.get("pool2")),
+                         P.default_video_dir(P.get("pool")))
+        self.assertIsNone(P.default_video_dir(P.get("underwater")))
 
     def test_pool_values_reproduce_the_shipped_asset(self):
         # The committed pool_4k.swasset was baked with exactly these; a drift

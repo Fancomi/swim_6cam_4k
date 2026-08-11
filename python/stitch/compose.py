@@ -17,7 +17,7 @@ import numpy as np
 from python.stitch.profiles import StepError
 
 
-def load_meshes(path, neg_v=False, unit_scale=1.0):
+def load_meshes(path, neg_v=False, unit_scale=1.0, neg_u=False):
     """Mesh list from `path`, already scaled to metres."""
     path = Path(path)
     if not path.is_file():
@@ -26,20 +26,28 @@ def load_meshes(path, neg_v=False, unit_scale=1.0):
     if "meshes" not in loaded:
         raise StepError(f"mesh JSON has no 'meshes' key: {path}")
     meshes = loaded["meshes"]
-    to_metres(meshes, unit_scale, neg_v)
+    to_metres(meshes, unit_scale, neg_v, neg_u)
     return meshes
 
 
-def to_metres(meshes, unit_scale=1.0, neg_v=False):
-    """Scale positions in place, optionally flipping world Y.
+def to_metres(meshes, unit_scale=1.0, neg_v=False, neg_u=False):
+    """Scale positions in place, optionally mirroring either world axis.
 
-    The pool bake stores Y increasing downwards, so it needs the flip; the plane
-    lines are modelled upright and must not be flipped."""
+    `neg_v` flips world Y: the pool bake stores it increasing downwards, so it
+    needs the flip, while the plane lines are modelled upright and must not be
+    flipped.
+
+    `neg_u` flips world X. It exists so a file modelled with the pool rotated
+    180° lands on the same axes as the rest — set both and the mesh comes in
+    already aligned, which keeps the rotation a property of the file (one profile
+    field) instead of a post-processing step every consumer would have to repeat.
+    """
     for mesh in meshes:
         for triangle in mesh["triangles"]:
             for vertex in triangle:
-                vertex["pos"][0] /= unit_scale
+                x = -vertex["pos"][0] if neg_u else vertex["pos"][0]
                 y = -vertex["pos"][1] if neg_v else vertex["pos"][1]
+                vertex["pos"][0] = x / unit_scale
                 vertex["pos"][1] = y / unit_scale
 
 

@@ -82,7 +82,7 @@ def shaping_stamp(profile, args):
         profile.name, args.ppm if args.ppm is not None else profile.ppm,
         args.blend_px if args.blend_px is not None else profile.blend_px,
         args.crop_bottom if args.crop_bottom is not None else profile.crop_bottom,
-        profile.clip_uv, profile.neg_v, profile.source_size))
+        profile.clip_uv, profile.neg_v, profile.neg_u, profile.source_size))
 
 
 def step_extract(profile, args):

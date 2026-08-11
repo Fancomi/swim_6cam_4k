@@ -134,7 +134,8 @@ def patch(profile, dry_run=False):
     still = profile.out_dir / "stitch.png"
     if not still.is_file():
         raise StepError(f"stitched still missing (run the still step): {still}")
-    meshes = C.load_meshes(profile.mesh_json, neg_v=profile.neg_v)
+    meshes = C.load_meshes(profile.mesh_json, neg_v=profile.neg_v,
+                          neg_u=profile.neg_u)
     image = read_image(still, "stitched still")
     columns = line_columns(image)
 

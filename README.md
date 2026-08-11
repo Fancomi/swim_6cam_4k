@@ -11,7 +11,7 @@
 `python.labeling.snapshots`（那条线没有按次录制的片段可采首帧）。
 
 | 链路 | 做什么 | 入口 | 代码 |
-| --- | --- | --- | --- |
+| --- | --- | --- | --- | --- |
 | **相机拼接** | FBX → 网格 → 静图 / 视频 / `.swasset` → 实时拼接 | `scripts/run_stitch.sh LINE STEPS` | `python/stitch/`、`cpp/` |
 | **入水检测** | 单机位 YOLO-pose 预测、难例筛选、送标数据包 | `scripts/run_water_entry.sh` | `python/water_entry/` |
 | **数据集标注** | 浏览器标注器、快照合成、关键点复核页 | `scripts/run_label.sh` | `python/labeling/`、`python/keypoints/` |
@@ -25,21 +25,22 @@ Windows 双击入口 `scripts\run_win.bat` 走的就是第一条链路。三个 
 
 ## 相机拼接
 
-一套代码服务三条相机线，差异全部是 `python/stitch/profiles.py` 里的数据：
+一套代码服务四条相机线，差异全部是 `python/stitch/profiles.py` 里的数据：
 
-| | pool | underwater | overhead |
-| --- | --- | --- | --- |
-| 机位 | 六路 4K 俯视泳池 | 水下 16 块平面 | 水上 2 块平面 |
-| 视角 | 50m 泳池整体，两排机位 | 一条泳道，自下往上 | 同一条泳道，自上往下 |
-| 模型 | `pool.fbx`（6 块） | `all.fbx`（16 块 + 杂物需过滤） | `002.fbx`（2 块，干净） |
-| 相机 | `cam3 cam2 cam1 cam4 cam5 cam6` | `underA16` … `underA1` | `overhead5`、`overhead6` |
-| 网格顺序 | FBX 声明序（两排，不能按 X 排） | 世界 X 升序 | 世界 X 升序 |
-| 片段 | `*_camN.mp4` | `*_underAi.ts` | `*_overheadN.ts` |
-| 源尺寸 | 3840×2160 | 1280×720 | 3840×2160 |
-| 每米像素 | 100 | 240 | 170 |
-| 融合方式 | 距离变换羽化 | 竖直硬缝 + 120px 过渡 | 竖直硬缝 + 85px 过渡 |
-| 时间对齐 | 无 manifest，按 t=0 | manifest 墙钟 | manifest 墙钟 |
-| 资产画布 | 5001×2101 | 6001×656 | 4251×511 |
+| | pool | pool2 | underwater | overhead |
+| --- | --- | --- | --- | --- |
+| 机位 | 六路 4K 俯视泳池 | 同 pool（同批片段） | 水下 16 块平面 | 水上 2 块平面 |
+| 视角 | 50m 泳池整体，两排机位 | 同 pool | 一条泳道，自下往上 | 同一条泳道，自上往下 |
+| 模型 | `pool.fbx`（6 块） | `pool 1.fbx`（6 块，手工重建、网格更密） | `all.fbx`（16 块 + 杂物需过滤） | `002.fbx`（2 块，干净） |
+| 世界镜像 | `neg_v`（Y 向下） | `neg_u`+`neg_v`（文件建成转 180°） | 无 | 无 |
+| 相机 | `cam3 cam2 cam1 cam4 cam5 cam6` | `cam5 cam6 cam4 cam1 cam3 cam2`（按贴图认，非按位置） | `underA16` … `underA1` | `overhead5`、`overhead6` |
+| 网格顺序 | FBX 声明序（两排，不能按 X 排） | FBX 声明序 | 世界 X 升序 | 世界 X 升序 |
+| 片段 | `*_camN.mp4` | 同 pool | `*_underAi.ts` | `*_overheadN.ts` |
+| 源尺寸 | 3840×2160 | 3840×2160 | 1280×720 | 3840×2160 |
+| 每米像素 | 100 | 100 | 240 | 170 |
+| 融合方式 | 距离变换羽化 | 距离变换羽化 | 竖直硬缝 + 120px 过渡 | 竖直硬缝 + 85px 过渡 |
+| 时间对齐 | 无 manifest，按 t=0 | 同 pool | manifest 墙钟 | manifest 墙钟 |
+| 资产画布 | 5001×2101 | 5001×2101 | 6001×656 | 4251×511 |
 
 ### 七个步骤
 
