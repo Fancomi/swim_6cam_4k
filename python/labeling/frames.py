@@ -98,10 +98,10 @@ PRODUCTS = {
         {"kind": "merge", "dates": ("20260807",), "cameras": UNDER_CAMERAS},
         {"kind": "grid", "date": "20260807"},
     ),
-    # 2. 6 相机拉线自动合成：横竖两段当一段，MAD 门控滤水花，产物落 Horizontal
+    # 2. 6 相机拉线自动合成：横竖两段当一段（拉线每帧位置不同，帧全要）
     "sixcam": tuple(
         {"kind": "auto_merge", "camera": cam, "dates": SIXCAM_DATES,
-         "noise_gate": 5.0, "pick": "peak", "out_date": SIXCAM_DATES[0]}
+         "out_date": SIXCAM_DATES[0]}
         for cam in SIXCAM_CAMERAS
     ),
     # 3. overhead5/6 mask 合成：20260708 与 Horizontal 融合，产物落 20260708
@@ -195,24 +195,28 @@ def _bands(height, band_rows):
     return [(y, min(y + step, height)) for y in range(0, height, step)]
 
 
-# 单条带装全部帧 float32 的内存预算。合成质量与 band_rows 无关（只是分几次算），
-# 所以宁可自动收窄也不要让调用方忘传参数就吃满内存。
+# 单条带装全部帧的内存预算。中值背景必须把该带的所有帧同时装进来才能取中值，
+# 帧数翻倍内存就翻倍；分几次算不影响结果，所以宁可自动收窄也不要吃满内存。
 MEM_BUDGET_BYTES = 512 * 1024 * 1024
 
 
 def _fit_band_rows(band_rows, n_frames, width, height, budget=MEM_BUDGET_BYTES):
-    """把 band_rows 收到内存预算内：帧数×带高×宽×3×4B（float32）≤ budget。
+    """把 band_rows 收到内存预算内：帧数×带高×宽×3（uint8）≤ budget。
 
     返回不超过原值、且 >=1 的带高。帧数少时原值就够，直接返回。"""
-    per_row = max(1, n_frames * width * 3 * 4)
+    per_row = max(1, n_frames * width * 3)
     fit = max(1, int(budget // per_row))
     return max(1, min(int(band_rows), fit, int(height)))
 
 
 def median_background_streaming(paths, band_rows=BAND_ROWS):
-    """逐像素中值背景，内存按条带封顶；与 merge_overhead.median_background 逐位一致。"""
+    """逐像素中值背景，内存按条带封顶；与 merge_overhead.median_background 逐位一致。
+
+    band_rows 按 MEM_BUDGET_BYTES 自动收窄：中值要整条带装全部帧，帧数多时
+    调用方未必记得调小，收窄只是多分几次算，结果不变。"""
     first = _decode(paths[0])
     height, width = first.shape[:2]
+    band_rows = _fit_band_rows(band_rows, len(paths), width, height)
     out = np.empty((height, width, 3), dtype=np.uint8)
     for y0, y1 in _bands(height, band_rows):
         stack = np.stack([_decode_band(p, y0, y1) for p in paths])
@@ -221,72 +225,38 @@ def median_background_streaming(paths, band_rows=BAND_ROWS):
 
 
 def merge_frames_streaming(paths, background, thresh=DIST_THRESH,
-                           band_rows=BAND_ROWS, noise_gate=0.0, pick="last"):
-    """把每帧前景合成到背景上，按水平条带装栈、内存随带高封顶。
+                           band_rows=BAND_ROWS):
+    """把每帧前景按时间序叠到背景上（后帧覆盖前帧），流式逐帧、峰值内存一帧。
 
-    前景判据两级：
-      1. 绝对阈值：与中值背景的 RGB 距离 > thresh（老口径，一直有）。
-      2. 噪声门控（noise_gate > 0）：该偏离还须 > 该像素**常态波动** × noise_gate。
-         常态波动用逐像素 MAD（各帧偏离的中位数）度量：水花、灯光反射每帧都在
-         同一片区域晃，MAD 高；人工拉的线、游过的人只在个别帧出现，MAD 低。
-         所以门控留下"偏离远超自身常态"的瞬时目标，滤掉惯常晃动。实测 zcam
-         俯视：拉线 MAD≈3、水花 MAD≈34；underwater/overhead 同向（泳者 MAD≈6、
-         水光 MAD≈15~20），所以这是通用判据，不是某条链路的特例。
-      noise_gate=0（默认）关门控，行为与老版本逐位一致。
+    与 merge_overhead.merge_frames 逐位一致（单测断言），差别只在不装全栈。
 
-    pick 决定同一像素多帧都算前景时取哪一帧：
-      "last" 后帧覆盖（默认，老行为；泳者场景要看到运动叠加）
-      "peak" 取偏离最大的那一帧（瞬时目标场景更干净：拉线取最清楚的一帧）
-
-    内存：每条带装全部帧的 float32，峰值 ≈ 帧数×带高×宽×3×4B。帧数翻倍就翻倍，
-    所以按 MEM_BUDGET 自动收窄 band_rows（不改口径、只分更多次算），免得调用方
-    忘记传 --band-rows 就把机器打满。
+    曾试过用逐像素 MAD 门控滤掉"每帧都在晃"的水花与灯光反射，实测无效：
+    水花的 MAD 高（≈34 vs 拉线 ≈3）但偏离幅度也高（113 vs 95），所以
+    `偏离 > MAD×k` 对两者同时成立——拉线与水花按同比例一起掉，没有哪个 k
+    能只滤水花。要去水花得筛形状（拉线是长直线、水花是团块），不是筛时序统计量。
     """
     first = _decode(paths[0])
     height, width = first.shape[:2]
-    band_rows = _fit_band_rows(band_rows, len(paths), width, height)
-    base = background.astype(np.float32)
-    limit = float(thresh)
     merged = background.copy()
-
-    for y0, y1 in _bands(height, band_rows):
-        # 该带装全部帧：内存 = 帧数 × 带高 × 宽 × 3 × 4B，--band-rows 可压。
-        stack = np.stack([_decode_band(p, y0, y1) for p in paths]).astype(np.float32)
-        band_base = base[y0:y1]
-        dev = np.sqrt(((stack - band_base) ** 2).sum(axis=3))    # (N, h, w)
-        fg = dev > limit
-        if noise_gate > 0:
-            # MAD 作常态波动；下限 1 避免完全静止像素把门槛压成 0。
-            mad = np.maximum(np.median(dev, axis=0), 1.0)
-            fg &= dev > mad * float(noise_gate)
-        if not fg.any():
-            continue
-        out = merged[y0:y1]
-        if pick == "peak":
-            scored = np.where(fg, dev, -1.0)
-            idx = scored.argmax(axis=0)
-            hh, ww = y1 - y0, width
-            yy, xx = np.mgrid[0:hh, 0:ww]
-            hit = fg.any(axis=0)
-            out[hit] = stack[idx[hit], yy[hit], xx[hit]].astype(np.uint8)
-        else:
-            for i in range(stack.shape[0]):
-                m = fg[i]
-                if m.any():
-                    out[m] = stack[i][m].astype(np.uint8)
+    base = background.astype(np.float32)
+    limit = float(thresh) ** 2
+    for path in paths:
+        frame = _decode(path)
+        for y0, y1 in _bands(height, band_rows):
+            band, band_base = frame[y0:y1], base[y0:y1]
+            mask = ((band.astype(np.float32) - band_base) ** 2).sum(axis=2) > limit
+            if mask.any():
+                merged[y0:y1][mask] = band[mask]
     return merged
 
 
 def auto_merge_camera(camera, date=DEFAULT_DATE, out_root=None, thresh=DIST_THRESH,
-                      band_rows=BAND_ROWS, merge_step=1, dates=None,
-                      noise_gate=0.0, pick="last"):
+                      band_rows=BAND_ROWS, merge_step=1, dates=None):
     """自动合成一台相机：中值背景 + 差分前景叠加，输出 <相机>_{background,merged}.png。
 
     dates 给出时跨多个数据集收集该相机的全部帧（按各自快照时间序拼接），用于
     把时间连续的几段（如 6cam-Horizontal + 6cam-Vertical）当成一段重新合成；
     单 date 时不传。帧序 = 各数据集帧首尾相接（数据集间时间连续才正确）。
-
-    noise_gate / pick 直接转给 merge_frames_streaming，见那里的说明。
     """
     if dates is None:
         dates = [date]
@@ -301,12 +271,11 @@ def auto_merge_camera(camera, date=DEFAULT_DATE, out_root=None, thresh=DIST_THRE
     sampled = [p for _sid, p in frames][::merge_step]
     background = median_background_streaming(sampled, band_rows=band_rows)
     merged = merge_frames_streaming(sampled, background, thresh=thresh,
-                                    band_rows=band_rows,
-                                    noise_gate=noise_gate, pick=pick)
+                                    band_rows=band_rows)
     height, width = background.shape[:2]
     n_total = len(frames)
-    print("%-24s frames=%d（合成用 %d 帧）  %dx%d  gate=%.1f pick=%s"
-          % (camera, n_total, len(sampled), width, height, noise_gate, pick))
+    print("%-24s frames=%d（合成用 %d 帧）  %dx%d"
+          % (camera, n_total, len(sampled), width, height))
     written = []
     for suffix, image in (("background", background), ("merged", merged)):
         path = write_image(Path(out_root) / ("%s_%s.png" % (camera, suffix)),
@@ -792,12 +761,6 @@ def _parser():
     p.add_argument("--thresh", type=float, default=DIST_THRESH)
     p.add_argument("--band-rows", type=int, default=BAND_ROWS)
     p.add_argument("--merge-step", type=int, default=1)
-    p.add_argument("--noise-gate", type=float, default=0.0,
-                   help="常态波动门控倍率：偏离须 > 该像素 MAD × 倍率才算前景，"
-                        "滤掉每帧都在晃的水花/灯光反射（3~8 为常用区间，0=关）")
-    p.add_argument("--pick", choices=("last", "peak"), default="last",
-                   help="同一像素多帧都是前景时取哪帧：last 后帧覆盖（默认，"
-                        "泳者叠加）；peak 取偏离最大的一帧（瞬时目标更干净）")
     p.set_defaults(func=cmd_auto_merge)
 
     p = sub.add_parser("merge", help="手动合成（mask 前景+中值背景），处理所有相机")
@@ -869,8 +832,7 @@ def cmd_auto_merge(args):
     out_root = Path(args.out_root) if args.out_root else object_frames_root(dates[0])
     written = auto_merge_camera(args.camera, date=args.date, out_root=out_root,
                                 thresh=args.thresh, band_rows=args.band_rows,
-                                merge_step=args.merge_step, dates=dates,
-                                noise_gate=args.noise_gate, pick=args.pick)
+                                merge_step=args.merge_step, dates=dates)
     print("\n共写出 %d 个文件 -> %s" % (len(written), out_root))
 
 
@@ -1008,9 +970,7 @@ def cmd_products(args):
                     dates=dates or None, out_root=str(out_root),
                     thresh=step.get("thresh", DIST_THRESH),
                     band_rows=step.get("band_rows", BAND_ROWS),
-                    merge_step=step.get("merge_step", 1),
-                    noise_gate=step.get("noise_gate", 0.0),
-                    pick=step.get("pick", "last")))
+                    merge_step=step.get("merge_step", 1)))
             elif kind == "grid":
                 d = step.get("date", args.date)
                 cmd_grid(argparse.Namespace(

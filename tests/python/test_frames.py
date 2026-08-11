@@ -97,52 +97,25 @@ class AutoMergeTest(unittest.TestCase):
                 # 后帧 200 覆盖 -> merged 中心是 200。
                 self.assertEqual(merged[0, 0].tolist(), [200, 200, 200])
 
-    def test_merge_frames_noise_gate_filters_habitual_flicker(self):
-        """noise_gate 用 MAD 滤掉"每帧都在晃"的像素，保留只在个别帧出现的目标。
+    def test_streaming_matches_merge_overhead_bit_for_bit(self):
+        """流式合成与 merge_overhead 的全栈版本逐位一致。
 
-        (5,5) 每帧都在 10/200 之间跳（常态波动大，MAD 高）→ 被门控滤掉；
-        (0,0) 只有最后一帧跳到 200（MAD≈0）→ 被保留。用 PNG 避免 JPEG 有损。"""
+        auto_merge 是 4 条链路里唯一的自动合成实现，口径必须和老模块对齐；
+        这条断言是改动这块时的护栏（之前加 MAD 门控就是靠它确认没动老行为）。"""
+        from python.labeling.merge_overhead import (load_stack, median_background,
+                                                    merge_frames)
         with tempfile.TemporaryDirectory() as tmp:
-            for i in (1, 2, 3, 4):
-                snap = Path(tmp) / "d" / "snapshots" / ("raw_%d_%d" % (i, i))
-                snap.mkdir(parents=True)
-                from PIL import Image
-                img = np.full((20, 20, 3), 10, dtype=np.uint8)
-                if i % 2 == 0:
-                    img[5, 5] = 200          # 隔帧闪烁 → 常态波动（水花/灯光）
-                if i == 4:
-                    img[0, 0] = 200          # 只有一帧出现 → 瞬时目标（拉线）
-                Image.fromarray(img).save(snap / "01_stitch__x__zcam_1.png")
-            paths = [str(Path(tmp) / "d" / "snapshots" / ("raw_%d_%d" % (i, i)) /
-                         "01_stitch__x__zcam_1.png") for i in (1, 2, 3, 4)]
-            bg = F.median_background_streaming(paths, band_rows=4)
-            # 不开门控：两处都算前景，(5,5) 也被叠上去
-            plain = F.merge_frames_streaming(paths, bg, band_rows=4)
-            self.assertEqual(plain[0, 0].tolist(), [200, 200, 200])
-            self.assertEqual(plain[5, 5].tolist(), [200, 200, 200])
-            # 开门控：(5,5) 常态波动大被滤掉，(0,0) 瞬时目标保留
-            gated = F.merge_frames_streaming(paths, bg, band_rows=4, noise_gate=3.0)
-            self.assertEqual(gated[0, 0].tolist(), [200, 200, 200])
-            self.assertEqual(gated[5, 5].tolist(), bg[5, 5].tolist())
-
-    def test_merge_frames_pick_peak_takes_max_deviation_frame(self):
-        """pick='peak' 取偏离背景最大的那一帧，而非最后一帧。"""
-        with tempfile.TemporaryDirectory() as tmp:
-            # 帧2 偏离最大(250)，帧4 偏离较小(150)；last 取 150，peak 取 250
-            for i, v in ((1, 10), (2, 250), (3, 10), (4, 150)):
-                snap = Path(tmp) / "d" / "snapshots" / ("raw_%d_%d" % (i, i))
-                snap.mkdir(parents=True)
-                from PIL import Image
-                img = np.full((20, 20, 3), 10, dtype=np.uint8)
-                img[0, 0] = v
-                Image.fromarray(img).save(snap / "01_stitch__x__zcam_1.png")
-            paths = [str(Path(tmp) / "d" / "snapshots" / ("raw_%d_%d" % (i, i)) /
-                         "01_stitch__x__zcam_1.png") for i in (1, 2, 3, 4)]
-            bg = F.median_background_streaming(paths, band_rows=4)
-            last = F.merge_frames_streaming(paths, bg, band_rows=4, pick="last")
-            peak = F.merge_frames_streaming(paths, bg, band_rows=4, pick="peak")
-            self.assertEqual(last[0, 0].tolist(), [150, 150, 150])
-            self.assertEqual(peak[0, 0].tolist(), [250, 250, 250])
+            for i, v in enumerate((10, 90, 200, 40), 1):
+                make_snapshot(tmp, "raw_%d_%d" % (i, i), "zcam_1",
+                              size=(24, 16), fill=(v, v, v), date="d")
+            paths = sorted(str(p) for p in
+                           (Path(tmp) / "d" / "snapshots").glob("raw_*/*.jpg"))
+            bg_new = F.median_background_streaming(paths, band_rows=4)
+            bg_old = median_background(load_stack(paths), band_rows=4)
+            self.assertTrue(np.array_equal(bg_new, bg_old), "背景不一致")
+            mg_new = F.merge_frames_streaming(paths, bg_new, band_rows=4)
+            mg_old = merge_frames(load_stack(paths), bg_old, band_rows=4)
+            self.assertTrue(np.array_equal(mg_new, mg_old), "合成不一致")
 
 
 class MergeTest(unittest.TestCase):
@@ -401,11 +374,11 @@ class BandFitTest(unittest.TestCase):
     """MAD 要整条带装全部帧，帧数多时自动收窄带高，不靠调用方记得传参数。"""
 
     def test_shrinks_when_frames_would_blow_budget(self):
-        # 300 帧 3840 宽：512MB 预算下装不下 216 行
+        # 300 帧 3840 宽：512MB 预算下装不下 216 行（uint8 栈，3 通道）
         fit = F._fit_band_rows(216, 300, 3840, 2160)
         self.assertLess(fit, 216)
         self.assertGreaterEqual(fit, 1)
-        self.assertLessEqual(300 * fit * 3840 * 3 * 4, F.MEM_BUDGET_BYTES)
+        self.assertLessEqual(300 * fit * 3840 * 3, F.MEM_BUDGET_BYTES)
 
     def test_keeps_value_for_small_inputs(self):
         self.assertEqual(F._fit_band_rows(64, 16, 640, 360), 64)
@@ -428,7 +401,6 @@ class ProductsTest(unittest.TestCase):
             self.assertEqual(s["kind"], "auto_merge")
             self.assertEqual(list(s["dates"]), list(F.SIXCAM_DATES))
             self.assertEqual(s["out_date"], F.SIXCAM_DATES[0])
-            self.assertGreater(s["noise_gate"], 0)   # 拉线场景必须开门控
 
     def test_overhead_fuses_two_datasets_into_20260708(self):
         step, = F.PRODUCTS["overhead"]

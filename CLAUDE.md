@@ -126,7 +126,7 @@ bash scripts/run_frames.sh products --dry-run       # 只打印要跑什么
 | 类 | 内容 | 产物落点 |
 | --- | --- | --- |
 | `underwater` | 20260807 水下 16 相机 mask 合成（标 `f<帧ID> <米数>`）+ 4×4 拼接 | `20260807/object-frames/underA*_mask_merged.png` + `underwater_mask_grid.png` |
-| `sixcam` | Horizontal+Vertical 横竖合并的 6 相机拉线自动合成（zcam1-4 + overhead5/6，MAD 门控） | `20260807-6cam-Horizontal/object-frames/*_merged.png` |
+| `sixcam` | Horizontal+Vertical 横竖合并的 6 相机拉线自动合成（zcam1-4 + overhead5/6） | `20260807-6cam-Horizontal/object-frames/*_merged.png` |
 | `overhead` | 20260708 + Horizontal 融合的 overhead5/6 mask 合成 | `20260708/object-frames/overhead5|6_merged.png` |
 | `entry` | gemini/femto 各数据集**单独**出（20260708 是旧相机名 `orbbec_camera_1`） | 各数据集 `object-frames/*_merged.png` |
 
@@ -138,8 +138,8 @@ bash scripts/run_frames.sh products --dry-run       # 只打印要跑什么
 
 - **米数不写死在代码里**：录制事故是这批数据的属性，放 `<snapshots>/frame_meters.json`（`frame-meters/v1`）：`start`/`step` 定等距，`gaps:[n]` 表示第 n 帧后缺一帧（米数跳一格），`skip:[n]` 表示第 n 帧是重复帧（不标、不占位）。文件缺失按 0.5m 等距。20260807 的口径是 `gaps:[28] skip:[35]`。
 - **帧号只在跨数据集时重编号**：单数据集时工程里的 `frame_index` 就是该相机在全局时间轴的位置（如 underA11 是 f27~f36），重编号会压成 f01~f10 让米数全错，已加回归测试。
-- **MAD 门控（`--noise-gate`）**：人工拉的线不会在另一帧重复出现，水花与灯光反射却每帧都在同一片区域晃。用逐像素 MAD（各帧偏离中值背景的中位数）度量常态波动，要求偏离 > MAD×倍率。实测拉线 MAD≈3 / 水花 MAD≈34，泳者 MAD≈6 / 水光 MAD≈15~20，三条链路同向，是通用判据。`--pick peak` 取偏离最大的一帧。不传这两个参数时与老实现逐位一致（单测断言），泳者链路不受影响。
-- **内存自适应**：MAD 要整条带装全部帧，帧数多时按 `MEM_BUDGET_BYTES`（512MB）自动收窄带高，不必手动调 `--band-rows`。
+- **自动合成只有一个判据**：与中值背景的 RGB 距离 > `--thresh`（默认 40），按时间序后帧覆盖前帧，与 `merge_overhead` 逐位一致（单测断言）。曾试过用逐像素 MAD 门控滤"每帧都在晃"的水花/灯光反射，实测无效并已删除：水花的 MAD 高（≈34 vs 拉线 ≈3）但偏离幅度也高（113 vs 95），`偏离 > MAD×k` 对两者同时成立——量出来拉线保留率与水花残留率按同比例一起掉（gate=20 时分别 51%/57%），没有哪个 k 只滤水花。zcam 合成里的块状糊主要来自单帧本身的水面状态，要处理得筛形状（拉线是长直线、水花是团块）或在采集侧解决，不是筛时序统计量。
+- **内存自适应**：中值背景要整条带装全部帧，帧数多时按 `MEM_BUDGET_BYTES`（512MB）自动收窄带高，不必手动调 `--band-rows`（带高不影响结果，只是分几次算）。
 - **产物名**：水下出 `_mask_merged`（`grid` 要读），其余出 `_merged`（交付名），由 `--merged-suffix` 控制。背景统一 `_background`，三条链路内容一致。
 
 - 数据根 `<数据集根>/<date>/snapshots/`，产物统一 `<数据集根>/<date>/object-frames/`（与 20260708 的 object-frames 平级）：每相机一个目录、`detections.csv`（全帧差分统计）、`curated.csv`（is_object=1 的值得标注帧）。
