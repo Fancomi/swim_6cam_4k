@@ -4,6 +4,7 @@
 mask_merge / mask_grid）的全部核心行为，验证合并后功能不丢。
 跑法：.venv/bin/python -m unittest tests.python.test_frames
 """
+import argparse
 import json
 import os
 import tempfile
@@ -343,6 +344,253 @@ class CliTest(unittest.TestCase):
     def test_all_subcommands_exist(self):
         for cmd in ("organize", "auto_merge", "merge", "grid", "label"):
             self.assertIn(cmd, F._parser()._subparsers._group_actions[0].choices)
+
+
+class MeterSpecTest(unittest.TestCase):
+    """米数口径来自数据侧 sidecar，不写死在代码里。"""
+
+    def test_default_is_even_spacing(self):
+        m = F.frame_meters(n_frames=5)
+        self.assertEqual([m[i] for i in range(1, 6)], [0.5, 1.0, 1.5, 2.0, 2.5])
+
+    def test_gaps_skip_one_position(self):
+        # gaps=[2]：第2帧之后缺一帧，f3 比 f2 多两格（1.0 -> 2.0）
+        m = F.frame_meters({"gaps": [2]}, n_frames=4)
+        self.assertEqual([m[i] for i in range(1, 5)], [0.5, 1.0, 2.0, 2.5])
+
+    def test_skip_marks_frame_unlabelled_without_consuming_position(self):
+        # skip=[3]：第3帧是重复帧，不标且不占位，f4 接着 f2 继续
+        m = F.frame_meters({"skip": [3]}, n_frames=4)
+        self.assertEqual(m[1], 0.5)
+        self.assertEqual(m[2], 1.0)
+        self.assertIsNone(m[3])
+        self.assertEqual(m[4], 1.5)
+
+    def test_reproduces_20260807_recorded_anomalies(self):
+        """回归：spec 驱动的表要与之前写死在代码里的 20260807 口径一致。"""
+        spec = {"start": 0.5, "step": 0.5, "gaps": [28], "skip": [35],
+                "n_frames": 51}
+        m = F.frame_meters(spec)
+        for f, want in ((1, 0.5), (28, 14.0), (29, 15.0), (33, 17.0),
+                        (34, 17.5), (35, None), (36, 18.0), (51, 25.5)):
+            self.assertEqual(m[f], want, "f%d" % f)
+
+    def test_load_spec_missing_file_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(F.load_meter_spec(Path(tmp) / "none.json"))
+
+    def test_load_spec_rejects_wrong_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "s.json"
+            p.write_text(json.dumps({"schema": "other", "gaps": []}),
+                         encoding="utf-8")
+            with self.assertRaises(F.ProjectError):
+                F.load_meter_spec(p)
+
+    def test_load_spec_reads_valid_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "s.json"
+            p.write_text(json.dumps({"schema": F.METER_SPEC_SCHEMA,
+                                     "gaps": [28], "skip": [35]}),
+                         encoding="utf-8")
+            spec = F.load_meter_spec(p)
+            self.assertEqual(spec["gaps"], [28])
+
+
+class BandFitTest(unittest.TestCase):
+    """MAD 要整条带装全部帧，帧数多时自动收窄带高，不靠调用方记得传参数。"""
+
+    def test_shrinks_when_frames_would_blow_budget(self):
+        # 300 帧 3840 宽：512MB 预算下装不下 216 行
+        fit = F._fit_band_rows(216, 300, 3840, 2160)
+        self.assertLess(fit, 216)
+        self.assertGreaterEqual(fit, 1)
+        self.assertLessEqual(300 * fit * 3840 * 3 * 4, F.MEM_BUDGET_BYTES)
+
+    def test_keeps_value_for_small_inputs(self):
+        self.assertEqual(F._fit_band_rows(64, 16, 640, 360), 64)
+
+    def test_never_exceeds_image_height(self):
+        self.assertLessEqual(F._fit_band_rows(9999, 2, 64, 48), 48)
+
+
+class ProductsTest(unittest.TestCase):
+    """四类产物的配方是数据，products 子命令照它执行（不再靠人照文档敲命令）。"""
+
+    def test_recipe_covers_four_classes(self):
+        self.assertEqual(sorted(F.PRODUCTS),
+                         ["entry", "overhead", "sixcam", "underwater"])
+
+    def test_sixcam_merges_both_dates_into_horizontal(self):
+        steps = F.PRODUCTS["sixcam"]
+        self.assertEqual(len(steps), 6)          # zcam1-4 + overhead5/6
+        for s in steps:
+            self.assertEqual(s["kind"], "auto_merge")
+            self.assertEqual(list(s["dates"]), list(F.SIXCAM_DATES))
+            self.assertEqual(s["out_date"], F.SIXCAM_DATES[0])
+            self.assertGreater(s["noise_gate"], 0)   # 拉线场景必须开门控
+
+    def test_overhead_fuses_two_datasets_into_20260708(self):
+        step, = F.PRODUCTS["overhead"]
+        self.assertEqual(step["out_date"], "20260708")
+        self.assertEqual(len(step["dates"]), 2)
+
+    def test_entry_runs_each_dataset_separately(self):
+        steps = F.PRODUCTS["entry"]
+        # 每步只有一个数据集（单数据集出，不融合）
+        for s in steps:
+            self.assertEqual(len(s["dates"]), 1)
+        # 20260708 用旧相机名
+        self.assertIn(("orbbec_camera_1",),
+                      [tuple(s["cameras"]) for s in steps])
+
+    def test_dry_run_touches_no_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(F, "DATASET", Path(tmp)):
+                F.cmd_products(argparse.Namespace(
+                    only="sixcam", dry_run=True, date="20260807"))
+            # dry-run 不该建任何目录
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+
+    def test_unknown_product_exits(self):
+        with self.assertRaises(SystemExit):
+            F.cmd_products(argparse.Namespace(
+                only="nope", dry_run=True, date="20260807"))
+
+
+class AnnotateTest(unittest.TestCase):
+    """标签绘制：位置、避让、跳过未标米数的帧。"""
+
+    def _blank(self, h=200, w=400):
+        return np.full((h, w, 3), 60, dtype=np.uint8)
+
+    def _stroke(self, cx, cy, r=10):
+        return {"x1": cx, "y1": cy, "x2": cx, "y2": cy, "r": r}
+
+    def test_label_sits_above_mask_top(self):
+        img = self._blank()
+        F._annotate_masks(img, [(1, [self._stroke(200, 120)])], {1: 0.5})
+        # mask 顶边 = 120-10 = 110；标签应画在其上方，不压 mask 中心
+        painted = np.where((img != 60).any(axis=2))
+        self.assertTrue(painted[0].size > 0)
+        self.assertLess(painted[0].max(), 120)
+
+    def test_skips_frames_with_no_meter(self):
+        img = self._blank()
+        F._annotate_masks(img, [(35, [self._stroke(200, 120)])], {35: None})
+        self.assertTrue((img == 60).all())        # 一个像素都没画
+
+    def test_frame_id_only_when_meters_disabled(self):
+        a, b = self._blank(), self._blank()
+        F._annotate_masks(a, [(7, [self._stroke(200, 120)])], {7: 3.5},
+                          with_meters=True)
+        F._annotate_masks(b, [(7, [self._stroke(200, 120)])], {7: 3.5},
+                          with_meters=False)
+        # 带米数的标签更宽，涂到的像素更多
+        self.assertGreater((a != 60).sum(), (b != 60).sum())
+
+    def test_overlapping_labels_do_not_stack_on_one_row(self):
+        img = self._blank()
+        # 三个 mask 中心同高、横向紧邻，标签必须错开行
+        strokes = [(i + 1, [self._stroke(100 + i * 12, 120)]) for i in range(3)]
+        F._annotate_masks(img, strokes, {1: 0.5, 2: 1.0, 3: 1.5})
+        rows = sorted(set(np.where((img != 60).any(axis=2))[0].tolist()))
+        # 若三条挤在同一行，涂到的行数会接近单条标签高度（<20）
+        self.assertGreater(len(rows), 20)
+
+    def test_place_label_gives_up_when_image_too_small(self):
+        tiny = np.zeros((6, 6, 3), dtype=np.uint8)
+        self.assertIsNone(F._place_label(tiny, "f01 0.5m", 3, 3, []))
+
+
+class DateOfSnapshotTest(unittest.TestCase):
+    """跨数据集帧要按 --dates 顺序分组，靠快照目录归属判断属于哪批。"""
+
+    def test_finds_owning_dataset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for d in ("A", "B"):
+                (Path(tmp) / d / "snapshots" / ("raw_%s_1" % d)).mkdir(parents=True)
+            with patch.object(F, "DATASET", Path(tmp)):
+                self.assertEqual(F._date_of_snapshot("raw_A_1", ["A", "B"]), "A")
+                self.assertEqual(F._date_of_snapshot("raw_B_1", ["A", "B"]), "B")
+
+    def test_falls_back_to_first_date_when_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(F, "DATASET", Path(tmp)):
+                self.assertEqual(F._date_of_snapshot("raw_X_9", ["A", "B"]), "A")
+
+
+class MergedSuffixTest(unittest.TestCase):
+    """产物名进代码：水下留 mask_merged 给 grid 读，其余直接出交付名 merged。"""
+
+    def test_suffix_is_configurable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            snap = Path(tmp) / "20260807" / "snapshots" / "raw_1_1"
+            snap.mkdir(parents=True)
+            from PIL import Image
+            Image.fromarray(np.full((8, 8, 3), 40, dtype=np.uint8)).save(
+                snap / "01_stitch__x__gemini_camera_1.jpg")
+            cam = [{"frame_index": 1, "snapshot_id": "raw_1_1",
+                    "image": "raw_1_1/01_stitch__x__gemini_camera_1.jpg",
+                    "strokes": []}]
+            out = Path(tmp) / "obj"
+            paths = F.merge_camera("gemini_camera_1", cam,
+                                   Path(tmp) / "20260807" / "snapshots", out,
+                                   merged_suffix="merged")
+            self.assertEqual(Path(paths[1]).name, "gemini_camera_1_merged.png")
+
+
+class RenumberTest(unittest.TestCase):
+    """帧号重编号只在真跨数据集时做——单数据集重编号会把全局帧号压成 1..N。"""
+
+    def _dataset(self, tmp, date, snaps, cam="underA11", start_index=27):
+        """建一个数据集：snaps 个快照 + 工程（frame_index 从 start_index 起）。"""
+        frames = []
+        for i, sid in enumerate(snaps):
+            snap = Path(tmp) / date / "snapshots" / sid
+            snap.mkdir(parents=True, exist_ok=True)
+            from PIL import Image
+            Image.fromarray(np.full((8, 8, 3), 40 + i, dtype=np.uint8)).save(
+                snap / ("01_stitch__x__%s.jpg" % cam))
+            frames.append({"frame_index": start_index + i, "snapshot_id": sid,
+                           "image": "%s/01_stitch__x__%s.jpg" % (sid, cam),
+                           "strokes": [{"x1": 4, "y1": 4, "x2": 4, "y2": 4,
+                                        "r": 1}]})
+        proj = Path(tmp) / date / "snapshots" / F.PROJECT_FILENAME
+        proj.write_text(json.dumps({"schema": F.SCHEMA, "cameras": {cam: frames}}),
+                        encoding="utf-8")
+        return frames
+
+    def _run(self, tmp, dates, cam="underA11"):
+        seen = {}
+
+        def fake_merge(camera, project_cam, roots, out, **kw):
+            seen[camera] = [f["frame_index"] for f in project_cam]
+            return ["bg", "mg"]
+
+        with patch.object(F, "DATASET", Path(tmp)), \
+             patch.object(F, "merge_camera", fake_merge):
+            F.cmd_merge(argparse.Namespace(
+                project=None, date=dates[0],
+                dates=list(dates) if len(dates) > 1 else None,
+                root=str(tmp), snapshots=None, cameras=[cam], out_root=str(tmp),
+                band_rows=64, meter_spec=None, meter_overrides=None,
+                merged_suffix=None))
+        return seen[cam]
+
+    def test_single_dataset_keeps_global_frame_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._dataset(tmp, "20260807", ["raw_a_1", "raw_a_2", "raw_a_3"],
+                          start_index=27)
+            # 工程里是 f27~f29（该相机在全局时间轴上的位置），不能被压成 f1~f3
+            self.assertEqual(self._run(tmp, ["20260807"]), [27, 28, 29])
+
+    def test_cross_dataset_renumbers_from_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._dataset(tmp, "A", ["raw_a_1", "raw_a_2"], start_index=27)
+            self._dataset(tmp, "B", ["raw_b_1"], start_index=5)
+            # 两批各自从自己的号起，合并后必须统一重编号
+            self.assertEqual(self._run(tmp, ["A", "B"]), [1, 2, 3])
 
 
 if __name__ == "__main__":

@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
-# 快照整理/合成/标注/拼接统一入口（支持单数据集与多数据集融合、标米参数）。
+# 快照整理/合成/标注/拼接统一入口（支持单数据集与多数据集融合、标米口径外置）。
 #
-# 子命令：
+# 一键出全部标定产物（配方在 python/labeling/frames.py 的 PRODUCTS，可复现）：
+#   bash scripts/run_frames.sh products                 # 四类全跑
+#   bash scripts/run_frames.sh products --only sixcam   # 只跑一类
+#   bash scripts/run_frames.sh products --dry-run       # 只打印要跑什么
+#     四类：underwater 水下16相机 mask（带帧号+米数）+4×4拼接
+#           sixcam     横竖合并的 6 相机拉线自动合成（MAD 门控），落 Horizontal
+#           overhead   20260708+Horizontal 融合的 overhead5/6 mask，落 20260708
+#           entry      gemini/femto 各数据集单独 mask（20260708 是 orbbec_camera_1）
+#
+# 单步子命令：
 #   bash scripts/run_frames.sh organize [--date 20260807] [--cameras ...]
 #       整理所有相机成帧文件夹；水下 16 相机额外做中值差分筛选
 #       （detections.csv / curated.csv，对齐旧数据口径）。
@@ -14,17 +23,20 @@
 #                          0=关（默认，与老口径逐位一致）；3~8 为常用区间。
 #         --pick peak      同一像素多帧命中时取偏离最大的一帧（拉线更清楚）；
 #                          默认 last 后帧覆盖（泳者叠加要看运动轨迹）。
+#       带高按内存预算自动收窄（帧数多时无需手动调 --band-rows）。
 #   bash scripts/run_frames.sh merge [--date D] [--dates D1 D2 ...] [--cameras ...]
 #       手动合成：mask 覆盖处取原帧、其余取中值背景。默认处理工程里所有相机。
-#         --dates D1 D2       多数据集融合：同名相机帧按 --dates 顺序叠加
-#                              （后叠在上层），帧号重编号；产物写第一个数据集。
-#         --meter-overrides   帧→米数覆盖表，如 '28:14.5,34:17.0'；缺省按
-#                              frame_meters 内置表（f1=0.5m 每帧+0.5，f28→f29
-#                              补一帧、f34 重合不增）。
-#       标注规则（自动，无需参数）：
-#         underA*（水下 16 相机）标 `f<帧ID> <米数>`；其余相机（overhead /
-#         gemini / femto / orbbec）完全不标。要水下也不标米数用 --meter-overrides
-#         或按相机名判断不可改，只能手动删标签（不推荐）。
+#         --dates D1 D2    多数据集融合：同名相机帧按 --dates 顺序叠加（后叠在
+#                          上层）并统一重编号；只给一个日期时保留工程里的帧号。
+#         --meter-spec     帧→米数口径 json（默认 <snapshots>/frame_meters.json）：
+#                          {"schema":"frame-meters/v1","start":0.5,"step":0.5,
+#                           "gaps":[28],"skip":[35]}
+#                          gaps=该帧后缺一帧（米数跳一格），skip=该帧是重复帧
+#                          （不标不占位）。文件不存在按等距 0.5m 递增。
+#         --meter-overrides 临时纠个别帧，如 '28:14.5'；长期口径写进 --meter-spec。
+#         --merged-suffix   合成图后缀（默认水下 mask_merged 给 grid 读、其余 merged）。
+#       标注规则（按相机自动判断）：underA* 标 `f<帧ID> <米数>`；其余相机
+#       （overhead / gemini / femto / orbbec）完全不标。
 #   bash scripts/run_frames.sh grid [--date 20260807]
 #       仅水下：16 相机 mask 合成图 4×4 cat 拼接，每格标注相机 ID + 米数。
 #   bash scripts/run_frames.sh label [--port 8765]
@@ -32,15 +44,6 @@
 #
 # 数据根用 SWIM_UNDER_GRIDS_ROOT 覆盖（默认 swimming-xlj-under-grids），
 # 产物统一到 <数据集根>/<日期>/object-frames/。
-#
-# 用法:
-#   bash scripts/run_frames.sh organize
-#   bash scripts/run_frames.sh auto_merge --camera underA1
-#   bash scripts/run_frames.sh merge
-#   bash scripts/run_frames.sh merge --dates A B C --cameras gemini_camera_1
-#   bash scripts/run_frames.sh grid
-#   bash scripts/run_frames.sh label
-#   bash scripts/run_frames.sh help
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -50,7 +53,7 @@ PY="$ROOT/.venv/bin/python"
 
 case "${1:-}" in
   help|-h|--help)
-    sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,47p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     ;;
   *)
     "$PY" -m python.labeling.frames "$@"

@@ -67,7 +67,9 @@ cd build/metal-release && ctest
 # water-entry FBX 网格叠加（一键三张）
 ./scripts/run_fbx_overlay.sh [输出目录]
 
-# 快照整理/合成/标注/拼接统一入口（水下16 + overhead + femto/gemini）
+# 快照整理/合成/标注/拼接统一入口（水下16 + overhead + femto/gemini + 6cam zcam）
+./scripts/run_frames.sh products                      # 四类标定产物一键全出（配方在 PRODUCTS）
+./scripts/run_frames.sh products --only sixcam        # 只跑一类；--dry-run 只打印
 ./scripts/run_frames.sh organize                      # 整理所有相机；水下额外差分筛选
 ./scripts/run_frames.sh auto_merge --camera underA1   # 自动合成（中值+差分），--camera 必填
 ./scripts/run_frames.sh merge                         # 手动合成（mask 前景+中值背景）
@@ -97,71 +99,48 @@ cd build/metal-release && ctest
 
 ## 快照整理/合成/标注/拼接（frames）
 
-`scripts/run_frames.sh` → `python -m python.labeling.frames`（`python/labeling/frames.py`），五条子命令共用同一入口：
+`scripts/run_frames.sh` → `python -m python.labeling.frames`（`python/labeling/frames.py`），六条子命令共用同一入口：
 
+- `products`：按 `PRODUCTS` 配方一次跑完四类标定产物（见下），`--only` 挑一类、`--dry-run` 只打印。
 - `organize`：所有相机按时间序整理成帧文件夹（`f<NN>_<snapshot>__<orig>.jpg`，字节级拷贝）；水下 16 相机额外做中值背景差分筛选。
-- `auto_merge --camera X`：自动合成（中值背景 + 差分前景叠加，流式分带内存封顶），相机必填。
+- `auto_merge --camera X`：自动合成（中值背景 + 差分前景叠加，分带内存封顶），相机必填。
 - `merge`：手动合成，读 `mask_label_project.json`，mask 覆盖处取原帧、其余取中值背景，处理工程里所有相机。
 - `grid`：仅水下，16 相机 mask 合成图 4×4 cat 拼接（纯可视化），每格标相机 ID + 泳道米数。
 - `label`：起浏览器 mask 标注器（选目录即通用：overhead/underwater/femto/gemini）。
 
 **merge 的融合与标米**：
-- `--dates D1 D2 ...`：多数据集融合，同名相机帧按 `--dates` 顺序叠加（后叠在上层），帧号重编号；产物写第一个数据集。单数据集不用传。
-- `--meter-overrides '28:14.5,34:17.0'`：帧→米数覆盖表；缺省按 `frame_meters` 内置表（f1=0.5m 每帧+0.5，f28→f29 补一空位、f34/f35 重合 f35 不标）。
+- `--dates D1 D2 ...`：多数据集融合，同名相机帧按 `--dates` 顺序叠加（后叠在上层）并统一重编号；**只给一个日期时保留工程里的帧号**（那是该相机的全局位置，压成 1..N 会让米数全错）。
+- `--meter-spec`：帧→米数口径 json，默认 `<snapshots>/frame_meters.json`；`--meter-overrides '28:14.5'` 临时纠个别帧。
 - **标注自动判断**：`underA*`（水下 16 相机）标 `f<帧ID> <米数>`；其余相机（overhead / gemini / femto / orbbec）**完全不标**（`annotate=False`）。
 
-### 4 类标定产物的完整产出命令
+### 4 类标定产物：一条命令出全部
 
-数据根 `SWIM_UNDER_GRIDS_ROOT` = `swimming-xlj-under-grids`，产物在各数据集 `object-frames/`。
+配方写在 `python/labeling/frames.py` 的 `PRODUCTS`（数据即文档），`products` 子命令照它执行，产物名直接是交付名，不需要事后手工改名：
 
-**1. 水下 16 相机 mask 合成（20260807，带米标帧标）**
 ```bash
-# 先 label 画 mask（20260807/snapshots/mask_label_project.json）
-bash scripts/run_frames.sh merge --date 20260807
-bash scripts/run_frames.sh grid --date 20260807     # 4×4 拼接（可选）
+bash scripts/run_frames.sh products                 # 四类全跑
+bash scripts/run_frames.sh products --only sixcam   # 只跑一类
+bash scripts/run_frames.sh products --dry-run       # 只打印要跑什么
 ```
-产物：`20260807/object-frames/underA*_merged.png`（标 `f<帧ID> <米数>`）+ `underwater_mask_grid.png`。
 
-**2. 6 相机全自动拉线合成（Horizontal + Vertical 横竖合并 → 存 Horizontal，不带标）**
-```bash
-for cam in xlj_aux_zcam_1 xlj_aux_zcam_2 xlj_aux_zcam_3 xlj_aux_zcam_4 overhead5 overhead6; do
-  bash scripts/run_frames.sh auto_merge --camera $cam \
-    --dates 20260807-6cam-Horizontal 20260807-6cam-Vertical \
-    --noise-gate 5 --pick peak --band-rows 108
-done
-```
-这批 6 台相机（zcam1-4 + overhead5/6）是同一批次数据，横竖两段当一段合成，产物统一
-落 `20260807-6cam-Horizontal/object-frames/`。
-- `--noise-gate 5`：常态波动门控。每帧人工拉的线不会在另一帧重复出现，而水花与灯光
-  反射每帧都在同一片区域晃动——用逐像素 MAD（各帧偏离中值背景的中位数）度量常态
-  波动，要求偏离 > MAD×5 才算前景。实测拉线 MAD≈3、水花 MAD≈34，泳者 MAD≈6、
-  水光 MAD≈15~20，三条链路同向，是通用判据而非某相机特例。
-- `--pick peak`：同一像素多帧命中时取偏离最大的那一帧（拉线取最清楚的一帧）。
-- `--band-rows 108`：MAD 要整条带装全部帧，65 帧 3840 宽时峰值约 320MB；调小更省。
-- 不传这两个参数时行为与老版本逐位一致（单测断言），所以泳者链路不受影响。
-产物：`20260807-6cam-Horizontal/object-frames/*_{background,merged}.png`（3840×2160）。
+| 类 | 内容 | 产物落点 |
+| --- | --- | --- |
+| `underwater` | 20260807 水下 16 相机 mask 合成（标 `f<帧ID> <米数>`）+ 4×4 拼接 | `20260807/object-frames/underA*_mask_merged.png` + `underwater_mask_grid.png` |
+| `sixcam` | Horizontal+Vertical 横竖合并的 6 相机拉线自动合成（zcam1-4 + overhead5/6，MAD 门控） | `20260807-6cam-Horizontal/object-frames/*_merged.png` |
+| `overhead` | 20260708 + Horizontal 融合的 overhead5/6 mask 合成 | `20260708/object-frames/overhead5|6_merged.png` |
+| `entry` | gemini/femto 各数据集**单独**出（20260708 是旧相机名 `orbbec_camera_1`） | 各数据集 `object-frames/*_merged.png` |
 
-**3. overhead 5/6 mask 合成（20260708 + Horizontal 融合，不带标）**
-```bash
-bash scripts/run_frames.sh merge \
-  --dates 20260807-6cam-Horizontal 20260708 \
-  --cameras overhead5 overhead6 \
-  --out-root 20260708/object-frames
-```
-产物：`20260708/object-frames/overhead5/6_merged.png`（H 2 帧 + 0708 38/40 帧融合）。
+改配方就改 `PRODUCTS`，不要再往文档里抄命令——文档抄漏过一次（overhead5/6 本属 sixcam 批次却被落下）。
 
-**4. gemini/femto 单数据集 mask 合成（H / V / 20260807）+ 20260708 femto**
-```bash
-for d in 20260807 20260807-6cam-Horizontal 20260807-6cam-Vertical; do
-  bash scripts/run_frames.sh merge --date $d \
-    --cameras gemini_camera_1 xlj_aux_orbbec_femto_1 \
-    --out-root <$d>/object-frames
-done
-# 20260708 只有 femto（旧相机名 orbbec_camera_1）
-bash scripts/run_frames.sh merge --date 20260708 \
-  --cameras orbbec_camera_1 --out-root 20260708/object-frames
-```
-产物：各数据集 `object-frames/{gemini_camera_1,xlj_aux_orbbec_femto_1,orbbec_camera_1}_merged.png`。
+前置：水下与入水机位要先用 `label` 画 mask（工程落 `<date>/snapshots/mask_label_project.json`）；`sixcam` 全自动无需 mask。
+
+**关键口径**
+
+- **米数不写死在代码里**：录制事故是这批数据的属性，放 `<snapshots>/frame_meters.json`（`frame-meters/v1`）：`start`/`step` 定等距，`gaps:[n]` 表示第 n 帧后缺一帧（米数跳一格），`skip:[n]` 表示第 n 帧是重复帧（不标、不占位）。文件缺失按 0.5m 等距。20260807 的口径是 `gaps:[28] skip:[35]`。
+- **帧号只在跨数据集时重编号**：单数据集时工程里的 `frame_index` 就是该相机在全局时间轴的位置（如 underA11 是 f27~f36），重编号会压成 f01~f10 让米数全错，已加回归测试。
+- **MAD 门控（`--noise-gate`）**：人工拉的线不会在另一帧重复出现，水花与灯光反射却每帧都在同一片区域晃。用逐像素 MAD（各帧偏离中值背景的中位数）度量常态波动，要求偏离 > MAD×倍率。实测拉线 MAD≈3 / 水花 MAD≈34，泳者 MAD≈6 / 水光 MAD≈15~20，三条链路同向，是通用判据。`--pick peak` 取偏离最大的一帧。不传这两个参数时与老实现逐位一致（单测断言），泳者链路不受影响。
+- **内存自适应**：MAD 要整条带装全部帧，帧数多时按 `MEM_BUDGET_BYTES`（512MB）自动收窄带高，不必手动调 `--band-rows`。
+- **产物名**：水下出 `_mask_merged`（`grid` 要读），其余出 `_merged`（交付名），由 `--merged-suffix` 控制。背景统一 `_background`，三条链路内容一致。
 
 - 数据根 `<数据集根>/<date>/snapshots/`，产物统一 `<数据集根>/<date>/object-frames/`（与 20260708 的 object-frames 平级）：每相机一个目录、`detections.csv`（全帧差分统计）、`curated.csv`（is_object=1 的值得标注帧）。
 - 差分口径对齐旧 detections.csv：`score_frac_gt40` 是该帧与相机逐像素中值背景的 RGB 欧氏距离 > 40 的像素占比；`cam_median` 是全时段 score 中位数；`threshold = cam_median × 1.28`（对齐旧数据 ~34% 精选率）；`is_object = score > threshold`。

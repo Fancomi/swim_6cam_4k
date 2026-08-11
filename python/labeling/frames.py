@@ -18,11 +18,23 @@ mask_merge / mask_grid）里的逻辑合并到这里，单一 CLI 子命令分�
   grid        仅 underwater：把 16 相机的 mask 合成图按 4×4 cat 拼成一张大图，
               每格标注相机 ID + 泳道米数（FBX 世界 X）。帧标签已在各相机的
               mask_merged 图上，这里不重复画。
+  products    按 PRODUCTS 配方一次跑完四类标定产物（见下），产物名直接是交付名，
+              不需要事后手工改名。--only 挑一类，--dry-run 只打印要跑什么。
   label       起浏览器 mask 标注器（转发 server.py）。
+
+四类标定产物的配方写在 PRODUCTS 里（数据即文档），products 子命令照它执行：
+  1 underwater  20260807 水下 16 相机 mask 合成，带 f<帧ID> + 泳道米数，再 4×4 拼接
+  2 sixcam      Horizontal+Vertical 横竖合并的 6 相机拉线自动合成（zcam1-4 +
+                overhead5/6），MAD 门控滤水花，产物落 Horizontal
+  3 overhead    20260708 + Horizontal 融合的 overhead5/6 mask 合成，产物落 20260708
+  4 entry       gemini/femto 各数据集单独 mask 合成（20260708 只有 orbbec_camera_1）
 
 背景只有一份口径：全部快照帧的逐像素中值，三条链路（organize --write-background /
 auto_merge / merge）产物内容一致，统一命名 <相机>_background.png，不再有
 mask_background 与 median_background 两套名字。
+
+米数口径不写死在代码里：录制事故（缺帧、重复帧）是**这批数据的属性**，放
+<snapshots>/frame_meters.json（见 load_meter_spec），代码只读不猜。
 
 合成纯函数（bands / median_background / merge_frames / load_stack）继续复用
 merge_overhead.py，不复制实现。
@@ -74,6 +86,39 @@ TEX_NAME = {i: "underA%d-grid.png" % i for i in range(1, 17)}
 
 PROJECT_FILENAME = "mask_label_project.json"
 SCHEMA = "mask-label/project-v1"
+
+# 20260807 一批标定的四类产物配方。以前这些命令只写在文档里、靠人照抄重跑，
+# 中间还有一步手工改名——现在配方是数据、products 子命令照它执行，可复现。
+# 每条：kind 决定跑哪个子命令，其余键是该子命令的参数。
+SIXCAM_DATES = ("20260807-6cam-Horizontal", "20260807-6cam-Vertical")
+SIXCAM_CAMERAS = tuple("xlj_aux_zcam_%d" % i for i in range(1, 5)) + OVERHEAD_CAMERAS
+PRODUCTS = {
+    # 1. 水下 16 相机 mask 合成（带帧号 + 泳道米数）+ 4×4 拼接
+    "underwater": (
+        {"kind": "merge", "dates": ("20260807",), "cameras": UNDER_CAMERAS},
+        {"kind": "grid", "date": "20260807"},
+    ),
+    # 2. 6 相机拉线自动合成：横竖两段当一段，MAD 门控滤水花，产物落 Horizontal
+    "sixcam": tuple(
+        {"kind": "auto_merge", "camera": cam, "dates": SIXCAM_DATES,
+         "noise_gate": 5.0, "pick": "peak", "out_date": SIXCAM_DATES[0]}
+        for cam in SIXCAM_CAMERAS
+    ),
+    # 3. overhead5/6 mask 合成：20260708 与 Horizontal 融合，产物落 20260708
+    "overhead": (
+        {"kind": "merge", "dates": ("20260807-6cam-Horizontal", "20260708"),
+         "cameras": OVERHEAD_CAMERAS, "out_date": "20260708"},
+    ),
+    # 4. 入水机位 mask 合成：各数据集单独出，20260708 用旧相机名 orbbec_camera_1
+    "entry": (
+        {"kind": "merge", "dates": ("20260807",), "cameras": ENTRY_CAMERAS},
+        {"kind": "merge", "dates": ("20260807-6cam-Horizontal",),
+         "cameras": ENTRY_CAMERAS},
+        {"kind": "merge", "dates": ("20260807-6cam-Vertical",),
+         "cameras": ENTRY_CAMERAS},
+        {"kind": "merge", "dates": ("20260708",), "cameras": ("orbbec_camera_1",)},
+    ),
+}
 
 
 # ---------------- 路径 ----------------
@@ -150,6 +195,20 @@ def _bands(height, band_rows):
     return [(y, min(y + step, height)) for y in range(0, height, step)]
 
 
+# 单条带装全部帧 float32 的内存预算。合成质量与 band_rows 无关（只是分几次算），
+# 所以宁可自动收窄也不要让调用方忘传参数就吃满内存。
+MEM_BUDGET_BYTES = 512 * 1024 * 1024
+
+
+def _fit_band_rows(band_rows, n_frames, width, height, budget=MEM_BUDGET_BYTES):
+    """把 band_rows 收到内存预算内：帧数×带高×宽×3×4B（float32）≤ budget。
+
+    返回不超过原值、且 >=1 的带高。帧数少时原值就够，直接返回。"""
+    per_row = max(1, n_frames * width * 3 * 4)
+    fit = max(1, int(budget // per_row))
+    return max(1, min(int(band_rows), fit, int(height)))
+
+
 def median_background_streaming(paths, band_rows=BAND_ROWS):
     """逐像素中值背景，内存按条带封顶；与 merge_overhead.median_background 逐位一致。"""
     first = _decode(paths[0])
@@ -178,9 +237,14 @@ def merge_frames_streaming(paths, background, thresh=DIST_THRESH,
     pick 决定同一像素多帧都算前景时取哪一帧：
       "last" 后帧覆盖（默认，老行为；泳者场景要看到运动叠加）
       "peak" 取偏离最大的那一帧（瞬时目标场景更干净：拉线取最清楚的一帧）
+
+    内存：每条带装全部帧的 float32，峰值 ≈ 帧数×带高×宽×3×4B。帧数翻倍就翻倍，
+    所以按 MEM_BUDGET 自动收窄 band_rows（不改口径、只分更多次算），免得调用方
+    忘记传 --band-rows 就把机器打满。
     """
     first = _decode(paths[0])
     height, width = first.shape[:2]
+    band_rows = _fit_band_rows(band_rows, len(paths), width, height)
     base = background.astype(np.float32)
     limit = float(thresh)
     merged = background.copy()
@@ -327,7 +391,7 @@ def _resolve_images(project_cam, snapshots_roots):
 
 def merge_camera(camera, project_cam, snapshots_root, out_dir,
                  band_rows=MO_BAND_ROWS, bg_paths=None, meters=None,
-                 with_meters=True, annotate=True):
+                 with_meters=True, annotate=True, merged_suffix="mask_merged"):
     """手动合成一台相机：中值背景 -> 逐帧按该帧 mask 叠前景，可选标帧 ID/米数。
 
     背景一律用该相机**全部帧**的逐像素中值（bg_paths），与 organize/auto_merge
@@ -339,11 +403,21 @@ def merge_camera(camera, project_cam, snapshots_root, out_dir,
       annotate=False     完全不标（入水机位 gemini/femto 不要帧号/米数）
       annotate=True  + with_meters=True   标 `f<帧ID> <米数>`（水下 16 相机）
       annotate=True  + with_meters=False  只标 `f<帧ID>`
-    返回 (背景路径, 合成路径)。
+
+    merged_suffix 决定合成图叫什么：水下走 grid 拼接读 `_mask_merged`（默认），
+    overhead / 入水机位的交付名是 `_merged`——以前靠人手 mv 改名，现在参数化，
+    产物名进代码不再需要事后重命名。返回 (背景路径, 合成路径)。
     """
     entries = _resolve_images(project_cam, snapshots_root)
     if not entries:
         raise ProjectError("该相机工程里没有可解析的帧")
+    # 一帧多笔时后面的笔画会被合成但拿不到标签（_annotate_masks 只标一个位置），
+    # 静默漏标比报错更难查，所以出声提醒。
+    extra = [f.get("frame_index") for f in project_cam
+             if len(f.get("strokes") or []) > 1]
+    if extra:
+        print("  ! %s 有 %d 帧画了多笔（f%s…），标签只标第一笔"
+              % (camera, len(extra), extra[0]))
     fg_paths = [p for _sid, p, _st in entries]
     stack = load_stack(fg_paths)
     h, w = stack.shape[1], stack.shape[2]
@@ -366,7 +440,7 @@ def merge_camera(camera, project_cam, snapshots_root, out_dir,
                         with_meters=with_meters)
     out_dir = Path(out_dir)
     paths = []
-    for suffix, image in (("background", background), ("mask_merged", merged)):
+    for suffix, image in (("background", background), (merged_suffix, merged)):
         path = write_image(out_dir / ("%s_%s.png" % (camera, suffix)),
                            image[:, :, ::-1], "mask-merge")
         paths.append(str(path))
@@ -385,32 +459,67 @@ def _frame_index_of(project_cam, snapshot_id):
     return 0
 
 
-def frame_meters(overrides=None):
-    """每帧对应的泳道米数，完全以 f 定：f1=0.5m，每帧 +0.5m。
+METER_SPEC_FILENAME = "frame_meters.json"
+METER_SPEC_SCHEMA = "frame-meters/v1"
 
-    泳者从 A1 端（最右，0.5m）游向 A16 端（最左，25.5m），每帧一个 mask、一个
-    唯一横向位置，米数不依赖 UV 几何换算。录制有两次异常，用修正表达：
 
-      - f28(14.0m) 与 f29(15.0m) 之间缺一帧：A9/A10 在该时刻没采到，补一个
-        14.5m 空位，所以 f29 从 15.0 起（而不是 14.5）。
-      - f34/f35 采到同一快照（A11-A13 重合）：f34=17.5m，f35 是 f34 的重复，
-        米数置 None 表示**不标**（删去），f36 恢复 18.0m。
+def load_meter_spec(path):
+    """读帧→米数口径（sidecar）。文件不存在返回 None，表示用等距默认。
 
-    overrides: {frame_index: 米数}，显式覆盖默认表（None 表示该帧不标）。
-    返回 {frame_index: 米数|None}。
+    口径不写在代码里：录制事故（缺帧、重复帧）是**这批数据的属性**，写死在
+    函数里换一批数据就静默标错，而米数是下游 FBX 对齐的依据，错了很难发现。
+    所以放工程文件旁边的 frame_meters.json：
+
+        {"schema": "frame-meters/v1",
+         "start": 0.5, "step": 0.5,
+         "gaps": [28],        # 该帧之后缺一帧，米数跳过一格（补位）
+         "skip": [35]}        # 该帧与前一帧重复，不标米数
+
+    gaps / skip 都用帧号（frame_index）。缺字段按默认：start=step=0.5、无异常。
     """
-    meters, m = {}, 0.5
-    for f in range(1, 52):
-        meters[f] = m
-        if f == 28:
-            m = 15.0          # 跳过 14.5 空位（补帧），f29 从 15.0 起
-        elif f == 34:
-            m = 17.5          # f34 正常递增到 17.5
-        elif f == 35:
-            meters[f] = None  # f35 与 f34 重合，不标
-            m = 18.0          # f36 恢复 18.0
-        else:
-            m = round(m + 0.5, 1)
+    path = Path(path)
+    if not path.is_file():
+        return None
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise ProjectError("米数口径不是合法 JSON：%s：%s" % (path, exc)) from None
+    if doc.get("schema") != METER_SPEC_SCHEMA:
+        raise ProjectError("米数口径 schema 不符：期望 %s，实际 %s"
+                           % (METER_SPEC_SCHEMA, doc.get("schema")))
+    return doc
+
+
+def frame_meters(spec=None, n_frames=None, overrides=None):
+    """每帧对应的泳道米数：f1=start，逐帧 +step，按 spec 处理录制异常。
+
+    泳者从 A1 端（最右）游向 A16 端（最左），每帧一个 mask、一个唯一横向位置，
+    米数不依赖 UV 几何换算。spec（见 load_meter_spec）声明两类录制异常：
+
+      gaps=[n]  第 n 帧之后缺一帧：米数多跳一格（那一格是没采到的位置），
+                所以 f(n+1) 比 f(n) 多 2×step 而不是 1×step。
+      skip=[n]  第 n 帧与前一帧采到同一时刻：米数置 None 表示**不标**，且
+                不占位——下一帧接着前一帧继续递增。
+
+    n_frames 缺省按 spec 的 n_frames，再缺省 51（旧数据帧数）；调用方通常从
+    工程里的最大 frame_index 传进来，避免帧数写死。
+    overrides: {frame_index: 米数|None} 最后覆盖，用于临时纠一两帧。
+    """
+    spec = spec or {}
+    start = float(spec.get("start", 0.5))
+    step = float(spec.get("step", 0.5))
+    gaps = set(int(g) for g in spec.get("gaps", ()))
+    skip = set(int(s) for s in spec.get("skip", ()))
+    if n_frames is None:
+        n_frames = int(spec.get("n_frames", 51))
+
+    meters, m = {}, start
+    for f in range(1, int(n_frames) + 1):
+        if f in skip:
+            meters[f] = None          # 重复帧不标、不占位
+            continue
+        meters[f] = round(m, 1)
+        m += step * (2 if f in gaps else 1)   # gaps 之后多跳一格
     if overrides:
         meters.update({int(k): (float(v) if v is not None else None)
                        for k, v in overrides.items()})
@@ -702,9 +811,13 @@ def _parser():
                    help="相机子集（默认工程里有的全部）")
     p.add_argument("--out-root", default=None)
     p.add_argument("--band-rows", type=int, default=MO_BAND_ROWS)
+    p.add_argument("--meter-spec", default=None,
+                   help="帧→米数口径 json（默认 <snapshots>/frame_meters.json）；"
+                        "缺省文件不存在则按等距 f1=0.5m 每帧 +0.5m")
     p.add_argument("--meter-overrides", default=None,
-                   help="帧→米数覆盖表，如 '28:14.5,34:17.0'；缺省按 frame_meters 内置表"
-                        "（f1=0.5m 每帧+0.5，f28→f29 补一帧、f34 重合不增）")
+                   help="临时纠正个别帧，如 '28:14.5,34:17.0'；长期口径写进 --meter-spec")
+    p.add_argument("--merged-suffix", default=None,
+                   help="合成图后缀（默认水下 mask_merged 给 grid 读、其余 merged）")
     p.set_defaults(func=cmd_merge)
 
     p = sub.add_parser("grid", help="仅水下：16 相机 4×4 拼接")
@@ -713,6 +826,14 @@ def _parser():
     p.add_argument("--out", default=None)
     p.add_argument("--mesh-json", default=str(MESH_JSON))
     p.set_defaults(func=cmd_grid)
+
+    p = sub.add_parser("products",
+                       help="按 PRODUCTS 配方一次跑完四类标定产物")
+    p.add_argument("--only", choices=sorted(PRODUCTS), default=None,
+                   help="只跑其中一类（默认全部）")
+    p.add_argument("--dry-run", action="store_true", help="只打印要跑什么")
+    p.add_argument("--date", default=DEFAULT_DATE, help="配方没写日期时的兜底")
+    p.set_defaults(func=cmd_products)
 
     p = sub.add_parser("label", help="起浏览器 mask 标注器")
     p.add_argument("--port", type=int, default=8765)
@@ -791,8 +912,13 @@ def cmd_merge(args):
     snap_roots = [snap_root]
     # 跨数据集（--dates）：读各数据集的工程、把同名相机的帧按数据集顺序合并，
     # 组内按时间序、组间按 --dates 传入顺序（H → V → 20260807 即后叠在上层）。
-    if args.dates:
-        for d in args.dates[1:]:
+    # 跨数据集（--dates 给了两个以上）：读各数据集的工程、把同名相机的帧按数据集
+    # 顺序合并，组内按时间序、组间按 --dates 传入顺序（后叠在上层）。
+    # 只有真跨数据集才重编号——各批的 frame_index 各自从 1 起，合并后必须统一；
+    # 单数据集时工程里的 frame_index 就是该相机的全局帧号（如水下 A11 是 f27~f36），
+    # 重编号会把它压成 f01~f10，米数跟着全错。
+    if len(dates) > 1:
+        for d in dates[1:]:
             p2 = Path(args.project) if args.project else \
                 _find_project(snapshots_dir(d), d)
             if not p2.is_file():
@@ -801,8 +927,6 @@ def cmd_merge(args):
             for cam, frames in load_project(p2).items():
                 cameras.setdefault(cam, []).extend(frames)
         for cam in cameras:
-            # 组内（同数据集）按快照时间序，组间保持 --dates 顺序：按每帧所属
-            # 数据集在 dates 里的下标分组排序，同一数据集内再按 snapshot_id。
             order = {d: i for i, d in enumerate(dates)}
             cameras[cam].sort(key=lambda f: (order.get(
                 _date_of_snapshot(f["snapshot_id"], dates), 0), f["snapshot_id"]))
@@ -816,7 +940,13 @@ def cmd_merge(args):
         # '28:14.5,34:17.0' -> {28: 14.5, 34: 17.0}
         overrides = dict(pair.split(":") for pair in
                          args.meter_overrides.replace(" ", "").split(",") if pair)
-    meters = frame_meters(overrides)   # 帧序×0.5，可传覆盖表
+    # 米数口径来自数据侧 sidecar（frame_meters.json），不写死在代码里；
+    # 帧数按工程里的最大 frame_index，避免换批数据后帧数不符还静默出表。
+    spec = load_meter_spec(Path(args.meter_spec) if args.meter_spec
+                           else snap_root / METER_SPEC_FILENAME)
+    n_frames = max((f.get("frame_index", 0)
+                    for frames in cameras.values() for f in frames), default=0)
+    meters = frame_meters(spec, n_frames=n_frames or None, overrides=overrides)
     total = 0
     try:
         for cam in cams:
@@ -830,16 +960,63 @@ def cmd_merge(args):
                         for _sid, p in frames_for_camera(cam, date=d)]
             # 水下 16 相机标 f<帧ID>+米数；其余相机（overhead/gemini/femto）
             # 完全不标——入水机位不需要帧号/米数，overhead 混合图也不标。
+            # 产物名同理按链路分：水下留 _mask_merged 给 grid 拼接读，其余直接
+            # 出交付名 _merged（--merged-suffix 可覆盖）。
             is_under = cam.startswith("underA")
+            suffix = args.merged_suffix or ("mask_merged" if is_under else "merged")
             paths = merge_camera(cam, project_cam, snap_roots, out_root,
                                  band_rows=args.band_rows, bg_paths=bg_paths,
                                  meters=meters, with_meters=is_under,
-                                 annotate=is_under)
+                                 annotate=is_under, merged_suffix=suffix)
             total += len(paths)
             print("%-24s -> %s" % (cam, ", ".join(Path(p).name for p in paths)))
     except (FrameSizeError, ProjectError) as exc:
         raise SystemExit(str(exc)) from None
     print("\n共写出 %d 个文件 -> %s" % (total, out_root))
+
+
+def cmd_products(args):
+    """按 PRODUCTS 配方跑四类标定产物，复用各子命令自己的 cmd_*，不复制逻辑。"""
+    names = [args.only] if args.only else list(PRODUCTS)
+    for name in names:
+        steps = PRODUCTS.get(name)
+        if steps is None:
+            raise SystemExit("未知产物：%s（可选 %s）" % (name, ", ".join(PRODUCTS)))
+        print("\n=== %s（%d 步）===" % (name, len(steps)))
+        for step in steps:
+            kind = step["kind"]
+            dates = list(step.get("dates", ()))
+            out_date = step.get("out_date") or (dates[0] if dates else args.date)
+            out_root = object_frames_root(out_date)
+            if args.dry_run:
+                print("  %-10s %s -> %s" % (
+                    kind, step.get("camera") or ",".join(step.get("cameras", ()))[:60],
+                    out_root))
+                continue
+            # 复用真正的 cmd_*，参数用 Namespace 拼——配方只描述"跑什么"，
+            # "怎么跑"仍只有一份实现。
+            if kind == "merge":
+                cmd_merge(argparse.Namespace(
+                    project=None, date=dates[0], dates=dates or None,
+                    root=str(DATASET), snapshots=None,
+                    cameras=list(step["cameras"]), out_root=str(out_root),
+                    band_rows=MO_BAND_ROWS, meter_spec=None,
+                    meter_overrides=None, merged_suffix=None))
+            elif kind == "auto_merge":
+                cmd_auto_merge(argparse.Namespace(
+                    camera=step["camera"], date=dates[0] if dates else args.date,
+                    dates=dates or None, out_root=str(out_root),
+                    thresh=step.get("thresh", DIST_THRESH),
+                    band_rows=step.get("band_rows", BAND_ROWS),
+                    merge_step=step.get("merge_step", 1),
+                    noise_gate=step.get("noise_gate", 0.0),
+                    pick=step.get("pick", "last")))
+            elif kind == "grid":
+                d = step.get("date", args.date)
+                cmd_grid(argparse.Namespace(
+                    date=d, input_dir=None, out=None, mesh_json=str(MESH_JSON)))
+            else:
+                raise SystemExit("配方里未知 kind：%s" % kind)
 
 
 def cmd_grid(args):
