@@ -7,6 +7,13 @@
 #       （detections.csv / curated.csv，对齐旧数据口径）。
 #   bash scripts/run_frames.sh auto_merge --camera underA1 [--date 20260807]
 #       自动合成指定相机（中值背景 + 差分前景叠加）。--camera 必填。
+#         --dates D1 D2    跨数据集当一段合成（如横+竖两批拉线合成一张）。
+#         --noise-gate 5   常态波动门控：偏离须 > 该像素 MAD × 倍率才算前景。
+#                          水花/灯光反射每帧都在同一片区域晃（MAD 高）被滤掉，
+#                          只在个别帧出现的目标（人工拉线、泳者）MAD 低被保留。
+#                          0=关（默认，与老口径逐位一致）；3~8 为常用区间。
+#         --pick peak      同一像素多帧命中时取偏离最大的一帧（拉线更清楚）；
+#                          默认 last 后帧覆盖（泳者叠加要看运动轨迹）。
 #   bash scripts/run_frames.sh merge [--date D] [--dates D1 D2 ...] [--cameras ...]
 #       手动合成：mask 覆盖处取原帧、其余取中值背景。默认处理工程里所有相机。
 #         --dates D1 D2       多数据集融合：同名相机帧按 --dates 顺序叠加

@@ -122,15 +122,24 @@ bash scripts/run_frames.sh grid --date 20260807     # 4×4 拼接（可选）
 ```
 产物：`20260807/object-frames/underA*_merged.png`（标 `f<帧ID> <米数>`）+ `underwater_mask_grid.png`。
 
-**2. 6 相机 zcam 全自动（Horizontal / Vertical，不带标）**
+**2. 6 相机全自动拉线合成（Horizontal + Vertical 横竖合并 → 存 Horizontal，不带标）**
 ```bash
-for d in 20260807-6cam-Horizontal 20260807-6cam-Vertical; do
-  for cam in xlj_aux_zcam_1 xlj_aux_zcam_2 xlj_aux_zcam_3 xlj_aux_zcam_4 overhead5 overhead6; do
-    bash scripts/run_frames.sh auto_merge --camera $cam --date $d
-  done
+for cam in xlj_aux_zcam_1 xlj_aux_zcam_2 xlj_aux_zcam_3 xlj_aux_zcam_4 overhead5 overhead6; do
+  bash scripts/run_frames.sh auto_merge --camera $cam \
+    --dates 20260807-6cam-Horizontal 20260807-6cam-Vertical \
+    --noise-gate 5 --pick peak --band-rows 108
 done
 ```
-产物：各数据集 `object-frames/*_{background,merged}.png`（3840×2160）。
+这批 6 台相机（zcam1-4 + overhead5/6）是同一批次数据，横竖两段当一段合成，产物统一
+落 `20260807-6cam-Horizontal/object-frames/`。
+- `--noise-gate 5`：常态波动门控。每帧人工拉的线不会在另一帧重复出现，而水花与灯光
+  反射每帧都在同一片区域晃动——用逐像素 MAD（各帧偏离中值背景的中位数）度量常态
+  波动，要求偏离 > MAD×5 才算前景。实测拉线 MAD≈3、水花 MAD≈34，泳者 MAD≈6、
+  水光 MAD≈15~20，三条链路同向，是通用判据而非某相机特例。
+- `--pick peak`：同一像素多帧命中时取偏离最大的那一帧（拉线取最清楚的一帧）。
+- `--band-rows 108`：MAD 要整条带装全部帧，65 帧 3840 宽时峰值约 320MB；调小更省。
+- 不传这两个参数时行为与老版本逐位一致（单测断言），所以泳者链路不受影响。
+产物：`20260807-6cam-Horizontal/object-frames/*_{background,merged}.png`（3840×2160）。
 
 **3. overhead 5/6 mask 合成（20260708 + Horizontal 融合，不带标）**
 ```bash

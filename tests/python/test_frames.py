@@ -96,6 +96,53 @@ class AutoMergeTest(unittest.TestCase):
                 # 后帧 200 覆盖 -> merged 中心是 200。
                 self.assertEqual(merged[0, 0].tolist(), [200, 200, 200])
 
+    def test_merge_frames_noise_gate_filters_habitual_flicker(self):
+        """noise_gate 用 MAD 滤掉"每帧都在晃"的像素，保留只在个别帧出现的目标。
+
+        (5,5) 每帧都在 10/200 之间跳（常态波动大，MAD 高）→ 被门控滤掉；
+        (0,0) 只有最后一帧跳到 200（MAD≈0）→ 被保留。用 PNG 避免 JPEG 有损。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            for i in (1, 2, 3, 4):
+                snap = Path(tmp) / "d" / "snapshots" / ("raw_%d_%d" % (i, i))
+                snap.mkdir(parents=True)
+                from PIL import Image
+                img = np.full((20, 20, 3), 10, dtype=np.uint8)
+                if i % 2 == 0:
+                    img[5, 5] = 200          # 隔帧闪烁 → 常态波动（水花/灯光）
+                if i == 4:
+                    img[0, 0] = 200          # 只有一帧出现 → 瞬时目标（拉线）
+                Image.fromarray(img).save(snap / "01_stitch__x__zcam_1.png")
+            paths = [str(Path(tmp) / "d" / "snapshots" / ("raw_%d_%d" % (i, i)) /
+                         "01_stitch__x__zcam_1.png") for i in (1, 2, 3, 4)]
+            bg = F.median_background_streaming(paths, band_rows=4)
+            # 不开门控：两处都算前景，(5,5) 也被叠上去
+            plain = F.merge_frames_streaming(paths, bg, band_rows=4)
+            self.assertEqual(plain[0, 0].tolist(), [200, 200, 200])
+            self.assertEqual(plain[5, 5].tolist(), [200, 200, 200])
+            # 开门控：(5,5) 常态波动大被滤掉，(0,0) 瞬时目标保留
+            gated = F.merge_frames_streaming(paths, bg, band_rows=4, noise_gate=3.0)
+            self.assertEqual(gated[0, 0].tolist(), [200, 200, 200])
+            self.assertEqual(gated[5, 5].tolist(), bg[5, 5].tolist())
+
+    def test_merge_frames_pick_peak_takes_max_deviation_frame(self):
+        """pick='peak' 取偏离背景最大的那一帧，而非最后一帧。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            # 帧2 偏离最大(250)，帧4 偏离较小(150)；last 取 150，peak 取 250
+            for i, v in ((1, 10), (2, 250), (3, 10), (4, 150)):
+                snap = Path(tmp) / "d" / "snapshots" / ("raw_%d_%d" % (i, i))
+                snap.mkdir(parents=True)
+                from PIL import Image
+                img = np.full((20, 20, 3), 10, dtype=np.uint8)
+                img[0, 0] = v
+                Image.fromarray(img).save(snap / "01_stitch__x__zcam_1.png")
+            paths = [str(Path(tmp) / "d" / "snapshots" / ("raw_%d_%d" % (i, i)) /
+                         "01_stitch__x__zcam_1.png") for i in (1, 2, 3, 4)]
+            bg = F.median_background_streaming(paths, band_rows=4)
+            last = F.merge_frames_streaming(paths, bg, band_rows=4, pick="last")
+            peak = F.merge_frames_streaming(paths, bg, band_rows=4, pick="peak")
+            self.assertEqual(last[0, 0].tolist(), [150, 150, 150])
+            self.assertEqual(peak[0, 0].tolist(), [250, 250, 250])
+
 
 class MergeTest(unittest.TestCase):
     def _project(self, root, camera, strokes, n=2):
