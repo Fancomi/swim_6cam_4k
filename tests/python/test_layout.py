@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PACKAGES = {
     "common": "paths, media I/O, CSV tables, HTML pages",
     "fbx_tools": "the only place that imports the FBX SDK",
-    "fbx_overlay": "FBX UV mesh overlays for camera-image inspection",
+    "fbx_overlay": "line-organized FBX grid overlays (water_entry/overhead + 2) with meters",
     "stitch": "the three camera lines: pool, underwater, overhead",
     "water_entry": "the single water-entry camera",
     "labeling": "browser labelers over the dataset snapshots",
