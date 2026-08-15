@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 | 链路 | 入口 | 代码 |
 | --- | --- | --- |
-| 相机拼接（pool / underwater / overhead 三条相机线） | `scripts/run_stitch.{sh,ps1}` | `python/stitch/` + `cpp/` |
+| 相机拼接（pool / pool2 / underwater / underwater2 / overhead 五条相机线） | `scripts/run_stitch.{sh,ps1}` | `python/stitch/` + `cpp/` |
 | 入水检测机位 | `scripts/run_water_entry.sh` | `python/water_entry/` |
 | 数据集标注 | `scripts/run_label.sh` | `python/labeling/`、`python/keypoints/` |
 | 性能取证 | `scripts/run_bench.sh` | `python/benchmarks/` |
@@ -23,13 +23,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 相机拼接关键口径
 
-一套代码服务三条相机线，差异全部是 `python/stitch/profiles.py` 里的数据；**不要在 `python/stitch/` 其他模块按线路名分支**。加第四条线应只加一条 profile 记录。
+一套代码服务五条相机线，差异全部是 `python/stitch/profiles.py` 里的数据；**不要在 `python/stitch/` 其他模块按线路名分支**。加一条线应只加一条 profile 记录。三个物理机位、五条线：同一批相机换一份重建的 FBX 就是一条新线（`pool`/`pool2`、`underwater`/`underwater2`），不是一个新步骤。
 
-- `Profile` 是 frozen dataclass：`fbx`、`tex_dir`、`camera_ids`、`ppm`、`source_size`、`blend_px`、`clip_uv`、`neg_v`、`order`、`planes_only` 等。`camera_ids` 按顺序配 mesh，**相机身份是位置对应的**，不解析贴图文件名——改 FBX 平面相对位置或 id 顺序会静默错配。
-- pool 必须保持 FBX 声明序（两排网格，按 X 排会交错）；另两条线单排，按世界 X 升序。
-- `select_planes` 的 world-Y band 只为 underwater `all.fbx` 写的硬编码，不是通用选择器；overhead 的 `002.fbx` 不能过滤。
-- `neg_v`：pool 的 bake 存 Y 向下需翻转；plane 线直立不翻转。配错表现为静默镜像。
-- 步骤：`extract`（FBX→`outputs/<line>/mesh.json`）、`tex`、`still`（静图+网格诊断+融合热图）、`video`、`asset`（→`build/assets/generated/<line>.swasset`）、`build`、`live`。`extract`/`asset`/`build` 按 mtime/口令跳过，`still`/`video` 每次都渲。
+- `Profile` 是 frozen dataclass：`fbx`、`tex_dir`、`camera_ids`、`ppm`、`source_size`、`blend_px`、`clip_uv`、`neg_v`、`neg_u`、`order`、`planes_only`、`ref_tex` 等。`camera_ids` 按顺序配 mesh，**默认相机身份是位置对应的**，不解析贴图文件名——改 FBX 平面相对位置或 id 顺序会静默错配。
+- **新版 FBX 接入顺序**（pool2 / underwater2 都是这么定的，别跳步）：① `extract` 看节点数、贴图名、常量轴；② **相机身份用贴图像素相关认**（贴图 vs 片段首帧灰度归一化相关），`.fbm` 文件名可能是从别处复用的，按世界位置猜会被朝向差异整体带偏、症状伪装成「UV 标歪了」；③ 把每台相机中心归一化成画布比例与旧线比对，定 `neg_u`/`neg_v`；④ 加一条 profile 记录。
+- pool 必须保持 FBX 声明序（两排网格，按 X 排会交错）；平面线单排，按世界 X 升序。
+- `select_planes` 的 world-Y band `(-11.6, -8.0)` 只为 underwater `all.fbx` 写的硬编码，不是通用选择器。overhead 的 `002.fbx`（Y `[20.47, 23.47]`）和 underwater2 的 `8.15.fbx`（Y `[-10.09, -7.34]`）都**不能**过滤，开了会把平面全丢掉、只报「no pool plane found」。
+- **只挪顶点的 FBX 改版不是新线**：换 `fbx`/`tex_dir` 两个字段即可（underwater2 已从 `ALL OK.fbx` → `ALL OK- 8.14.fbx` → `ALL OK- 8.14-02.fbx` → `8.15.fbx`：整体去掉最下 0.25m，A16/A9 各短 0.5m；8.14-02 又把 A1 从网格里去掉——15 个节点 02..16，`camera_ids` 少一台，贴图从 mask 合成图换成裸背景 `underA*_background.png`，所以这一版 `camera_ids` 也变了；8.15 一个顶点没挪，只改 A10 一块：UV 下移约 5px/3.8cm 重新对准，贴图换成 `10.png`——那是样本 `swb_20260813-170549_24` 的 A10 片段首帧，不是干净背景，所以 `.fbm` 出的 `still` 里只有 A10 带泳者水花）。必须 `extract --force`（mtime 跳过看不出换了文件），并复核画布尺寸与 `blend_px` 是否还配得上新的重叠宽度。
+- **只换了贴图/UV 的改版怎么验**：让两版网格渲染**同一批**外部贴图（`still --tex-dir <数据集> --tex-pattern '{camera}_background.png' --still-suffix _vNNN`），把贴图这个变量固定住，剩下的差异只能来自几何/UV。逐块量最佳位移：没动的块 corr 1.0000/dy 0，动过的块会明确报出 dy。
+- `neg_v`：pool 的 bake 存 Y 向下需翻转；plane 线直立不翻转。`neg_u` 翻世界 X，与 `neg_v` 同开即 180° 旋转（只 pool2 需要）。配错表现为静默镜像。
+- `blend_px` 是**物理宽度**不是比例：120px @240ppm = 85px @170ppm = 0.5m。underwater2 相邻块只重叠 121~241px（8.14-02 起 14 对里 13 对正好 0.50m），underwater 重叠 361~1081px，两者同用 120。
+- `ppm` 是绝对量，世界尺度变了也不用改它。
+- `build_remap` 自己把三角形与画布求交，不靠 `still_margin` 保证不越界：margin=0 的资产画布上 underwater2 顶行实测落在 y=-1，而负切片起点会从对侧边缘取像素，既不报错也画错地方。
+- `ref_tex`：underwater 走 `snapshot`，但快照已移入日期层，`frames_for_camera(裸相机名)` 返回空 → 新线用 `video`（片段首帧）。
+- 步骤：`extract`（FBX→`outputs/<line>/mesh.json`）、`tex`、`still`（静图+网格诊断+**视野区间图**+融合热图）、`video`、`asset`（→`build/assets/generated/<line>.swasset`）、`build`、`live`。`extract`/`asset`/`build` 按 mtime/口令跳过，`still`/`video` 每次都渲。
+- `still` 的四张产物各答一个问题：`stitch` 成品、`_grid` 几何（只画网格不写字）、`_spans` 每台相机的视野区间（`|--- ---|`：实线独占、虚线过渡、端点视野边界、相邻交替高度、字号统一）、`_heat` 融合权重。`--tex-dir` + `--tex-pattern` 可换任意一批每相机贴图（如数据集的 `_background.png`），`--still-suffix` 给产物命名——两批数据同 pattern 会互相覆盖。
 - 运行时 config 每次按片段目录重新生成到 `inputs/configs/<line>_<backend>.conf`，声明顺序即通道顺序，不手工维护。
 - `.swasset` v1 格式真值：Python 在 `python/stitch/asset_format.py`，C++ 在 `cpp/core/src/asset.cpp` 与 `cpp/core/include/swim/core/asset_format.hpp`。改动几何/资产编译的验收是**逐字节**一致（比 sha256）。
 
@@ -64,8 +72,8 @@ cd build/metal-release && ctest
 ./scripts/run_water_entry.sh
 ./scripts/run_water_entry.sh --skip-predict   # 复用已有预测
 
-# water-entry FBX 网格叠加（一键三张）
-./scripts/run_fbx_overlay.sh [输出目录]
+# FBX 网格叠加（四线：water_entry/water_entry2/overhead/overhead2）
+./scripts/run_fbx_overlay.sh [输出目录] [--line water_entry|water_entry2|overhead|overhead2 ...] [--texture-set fbx|dataset]
 
 # 快照整理/合成/标注/拼接统一入口（水下16 + overhead + femto/gemini + 6cam zcam）
 ./scripts/run_frames.sh products                      # 四类标定产物一键全出（配方在 PRODUCTS）
@@ -87,15 +95,28 @@ cd build/metal-release && ctest
 - 判据集中在 `common.py`：入水帧取 `backstroke.entry_frame`（`res.json`）优先，`manifest.water_frame` 只作对照——`water_frame` 在 `backstroke_applied=False` 时不可信。
 - 筛选阈值唯一来源是 `select_frames.py` 的 `DEFAULT_*`，`run_water_entry.sh` 运行时读取而非复制。
 
-## water-entry FBX 网格叠加（fbx_overlay）
+## FBX 网格叠加（fbx_overlay）
 
-新增链路（本分支）：`scripts/run_fbx_overlay.sh` → `python -m python.fbx_overlay`（`python/fbx_overlay/`）。把 FBX 的归一化 UV 画到底图上检查网格与图像对齐。
+`scripts/run_fbx_overlay.sh` → `python -m python.fbx_overlay`（`python/fbx_overlay/`）。把 FBX 的网格画到底图上检查网格与图像对齐。**四条线**（旧新并存，同 stitch 的 pool/pool2 模式，`profiles.py` 每线一条记录；加线只加记录）：
 
-- 固定输入：底图 `inputs/water_entry/background.jpg`；`006.fbx`→`Plane004`（垂直水面，140 tris）、`005.fbx`→`Plane005`（水面，60 tris）。
+| line | mode | 内容 |
+|---|---|---|
+| `water_entry` | base_image | 旧 005/006 单 mesh（006.fbx/Plane004 垂直 + 005.fbx/Plane005 水面），底图 `background.jpg`（无全屏矩形，用 `base_image_path`） |
+| `water_entry2` | base_image | femto + gemini 子相机，各含全屏矩形（纹理=相机原图）+ 垂直 + 水面 |
+| `overhead` | canvas | 旧 002.fbx（Plane001/Plane002），镜像 stitch overhead 线 |
+| `overhead2` | canvas | 新 25 水面.fbx（Plane002/Plane011），重建网格 |
+
+- **base_image 线**：每个子相机一个 FBX（`CameraSpec` 支持一线多 FBX——femto+gemini 同属 water_entry2）。底图从全屏矩形 mesh 纹理提取（`.fbm` 目录）或 `base_image_path`（旧模型）。
+- **canvas 线**：用 **stitch Canvas 拼接**成 4255×515 全景（`overlay_stitch.py` 复用 `python.stitch.compose`），网格 + 米数标签叠加到拼接图上。`--texture-set fbx|dataset` 切换纹理组；默认另出与 `label_line.png`（泳道示意图，注意文件名前导空格）的左右对比图。`overhead` 产出在 `outputs/overhead/overlay/`（不覆盖 stitch 链路的 `outputs/overhead/mesh.json`），`overhead2` 在 `outputs/overhead2/`。
+- **CLI**：`--line` 主选择器（可重复）；`--camera` 线内子相机过滤；`--camera femto|gemini` 无 `--line` 时兼容映射到所属线；默认渲染两条 base_image 线（water_entry + water_entry2）。`--mesh FBX NODE` 旧回归路径不变。
+- 语义分类自动判定（`classify.py`，不硬编码节点名）：tris≤4 且 UV du≈dv≈1 → 全屏矩形；dv≥0.3 → 垂直水面；dv<0.3 且 v_min≥0.2 且 tris≥100 → **plane**（俯视泳道平面）；否则 → 水面（图像底部横带）。阈值是 `classify.py` 顶部常量，数据驱动。
+- **网格米数**（`meters.py`，纯模块）：两种规则按 kind 分发——
+  - vertical/surface：锚点 + 实测 step（"以网格为准"）：右列跳过（右2=0.5m，向左 +step）；垂直跳最下/最上行（下1=0m，向上 +0.25m）；水面 Y 按 gap 聚类成带（下带=0m，向上每带 +实测带距）。
+  - plane（overhead*）：**世界差**——X 不跳列，`meter = 泳道最右X - 列X`（两 plane 组合，Plane002 读 15-25m）；Y 跳最下/最上，下1=0m，`meter = y - 下1`（0/0.875/1.625/2.5）。
+- 产物：每子相机 `_mesh_overlay.png` 合成图 + 每 mesh 一图 + **`mesh.json`**（完整几何 + kind，**每个 vertex 内联 `meter: {x, y}`**——被跳过的网格线（最下行等）顶点无 meter；算法可做三角形内重心插值；`camera` 字段=线名）。合成图默认叠加米数标签（**标签颜色 = 所属 mesh 颜色**；X 米数标在网格上方、Y 米数标在图像右侧；超出可视范围的列/行不写），`--no-labels` 关闭但 JSON 仍写。
 - 默认 UV V 原点 `bottom`（FBX 惯例，像素 `y=(1-v)*(height-1)`）；模型按图像坐标制作时用 `--uv-v-origin top`。坐标不钳制，越界交给 OpenCV 裁剪。
-- 节点严格按名匹配：缺失/重名时报错并列出实际节点，禁止退化为取第一个 mesh。
-- 渲染纯函数在 `render.py`（不 import fbx，可无 SDK 测试）；CLI 在 `__main__.py` 负责场景生命周期与节点筛选。默认底图/模型已写入 CLI，无需重复传参。
-- 本机 FBX SDK 读取 005/006 会生成 `.mayaSwatches/*.swatch` 缓存文件，属本地产物，不要提交。
+- 渲染纯函数在 `render.py`（不 import fbx，可无 SDK 测试）；`classify.py`/`meters.py` 也是纯函数。CLI 在 `__main__.py` 负责场景生命周期（`read_scene` 的 `manager.Destroy()`）、分类与产物落盘。
+- 本机 FBX SDK 读取会生成 `.mayaSwatches/*.swatch` 缓存文件，属本地产物，不要提交。
 
 ## 快照整理/合成/标注/拼接（frames）
 

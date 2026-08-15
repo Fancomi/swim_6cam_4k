@@ -8,7 +8,7 @@
 
 | 链路 | 入口 | 代码 |
 | --- | --- | --- |
-| 相机拼接（pool / underwater / overhead 三条相机线） | `scripts/run_stitch.{sh,ps1}` | `python/stitch/` + `cpp/` |
+| 相机拼接（pool / pool2 / underwater / underwater2 / overhead 五条相机线） | `scripts/run_stitch.{sh,ps1}` | `python/stitch/` + `cpp/` |
 | 入水检测机位 | `scripts/run_water_entry.sh` | `python/water_entry/` |
 | 数据集标注 | `scripts/run_label.sh` | `python/labeling/`、`python/keypoints/` |
 | 性能取证 | `scripts/run_bench.sh` | `python/benchmarks/` |
@@ -17,7 +17,7 @@
 
 Python 侧一个包一件事：`common/` 是跨链路共用的路径 / 图像 IO / CSV / HTML 页面骨架，`fbx_tools/` 是**唯一** import `fbx` 的地方，其余五个包对应上表四条链路——`labeling` 与 `keypoints` 同属标注链路。`tests/python/test_layout.py` 把这些约束写成了断言——包清单、每个包必须有 docstring、`import fbx` 只允许出现在 `fbx_tools/`、除 `common/paths.py` 外任何模块都不许自己算仓库根。测试在 `tests/`（`cpp/`、`python/`、`fixtures/`），运行时 config 在 `inputs/configs/`，`build/` 与 `outputs/` 是本机产物，不放手写源码或文档。
 
-三条相机线共用一套拼接代码，**差异全部是 `python/stitch/profiles.py` 里的数据**（模型、相机 id、网格排序、每米像素、融合方式、时间对齐策略）。加第四条线应当只加一条 profile 记录；如果它需要一个新字段，那个字段本身就是需要先想清楚的东西。不要在 `python/stitch/` 的其他模块里按线路名分支。
+五条相机线共用一套拼接代码，**差异全部是 `python/stitch/profiles.py` 里的数据**（模型、相机 id、网格排序、每米像素、融合方式、时间对齐策略、参考贴图来源）。加一条线应当只加一条 profile 记录；如果它需要一个新字段，那个字段本身就是需要先想清楚的东西。不要在 `python/stitch/` 的其他模块里按线路名分支。三个物理机位对应五条线：同一批相机换一份重建的 FBX 就是一条新线（`pool`/`pool2`、`underwater`/`underwater2`），产物各自落 `outputs/<line>/`，两条线才能逐帧对比。
 
 相机数量、相机 ID、输出尺寸都是**数据而非代码**：`kMaxCameras = 16`（`cpp/core/include/swim/core/camera_capacity.hpp`），config 里 `source.<id>=<path>` 的声明顺序即通道顺序。新增机位布局应通过 config + `.swasset` 表达，不要在 C++ 里加分支。
 
@@ -116,7 +116,7 @@ Python 测试用 unittest：`.venv\Scripts\python.exe -m unittest discover -s te
 
 改动实时链路后跑真实数据冒烟，并记录命令与关键指标。判定标准不只看帧率，还要看 `decoded_pixel_host_copies=0`（没把解码像素读回 CPU）、`pool_exhaustion=0`、`malformed=0`。测试代码要保持跨平台：`tests/cpp/test_config.cpp` 曾因用了 POSIX 的 `setenv` 而在 MSVC 上编不过。
 
-改动拼接几何或资产编译时，验收标准是**逐字节**：三条线的 `.swasset` 与静图必须与改动前完全一致，除非改的正是那个口径。哪一条线该有多大画布、每米多少像素，README 的对照表里写着；不确定就先编一份、比 sha256，再动手。
+改动拼接几何或资产编译时，验收标准是**逐字节**：五条线的 `.swasset` 与静图必须与改动前完全一致，除非改的正是那个口径。哪一条线该有多大画布、每米多少像素，README 的对照表里写着；不确定就先编一份、比 sha256，再动手。
 
 不需要再补设计文档或实施计划：口径写在 profile 记录与代码注释里，取证写在 README 的实测表里。
 

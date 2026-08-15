@@ -25,22 +25,27 @@ Windows 双击入口 `scripts\run_win.bat` 走的就是第一条链路。三个 
 
 ## 相机拼接
 
-一套代码服务四条相机线，差异全部是 `python/stitch/profiles.py` 里的数据：
+一套代码服务五条相机线，差异全部是 `python/stitch/profiles.py` 里的数据。三个物理机位，
+其中两个各有两条线 —— 同一批相机换一份重建的 FBX 就是一条新线，不是一个新步骤：
 
-| | pool | pool2 | underwater | overhead |
-| --- | --- | --- | --- | --- |
-| 机位 | 六路 4K 俯视泳池 | 同 pool（同批片段） | 水下 16 块平面 | 水上 2 块平面 |
-| 视角 | 50m 泳池整体，两排机位 | 同 pool | 一条泳道，自下往上 | 同一条泳道，自上往下 |
-| 模型 | `pool.fbx`（6 块） | `pool 1.fbx`（6 块，手工重建、网格更密） | `all.fbx`（16 块 + 杂物需过滤） | `002.fbx`（2 块，干净） |
-| 世界镜像 | `neg_v`（Y 向下） | `neg_u`+`neg_v`（文件建成转 180°） | 无 | 无 |
-| 相机 | `cam3 cam2 cam1 cam4 cam5 cam6` | `cam5 cam6 cam4 cam1 cam3 cam2`（按贴图认，非按位置） | `underA16` … `underA1` | `overhead5`、`overhead6` |
-| 网格顺序 | FBX 声明序（两排，不能按 X 排） | FBX 声明序 | 世界 X 升序 | 世界 X 升序 |
-| 片段 | `*_camN.mp4` | 同 pool | `*_underAi.ts` | `*_overheadN.ts` |
-| 源尺寸 | 3840×2160 | 3840×2160 | 1280×720 | 3840×2160 |
-| 每米像素 | 100 | 100 | 240 | 170 |
-| 融合方式 | 距离变换羽化 | 距离变换羽化 | 竖直硬缝 + 120px 过渡 | 竖直硬缝 + 85px 过渡 |
-| 时间对齐 | 无 manifest，按 t=0 | 同 pool | manifest 墙钟 | manifest 墙钟 |
-| 资产画布 | 5001×2101 | 5001×2101 | 6001×656 | 4251×511 |
+| | pool | pool2 | underwater | underwater2 | overhead |
+| --- | --- | --- | --- | --- | --- |
+| 机位 | 六路 4K 俯视泳池 | 同 pool（同批片段） | 水下 16 块平面 | 同 underwater（同批片段） | 水上 2 块平面 |
+| 视角 | 50m 泳池整体，两排机位 | 同 pool | 一条泳道，自下往上 | 同 underwater | 同一条泳道，自上往下 |
+| 模型 | `pool.fbx`（6 块） | `pool 1.fbx`（6 块，手工重建、网格更密） | `all.fbx`（16 块 + 杂物需过滤） | `8.15.fbx`（15 块，干净；换标定物后重建，去掉 A1） | `002.fbx`（2 块，干净） |
+| 世界镜像 | `neg_v`（Y 向下） | `neg_u`+`neg_v`（文件建成转 180°） | 无 | 无（朝向与 `all.fbx` 一致） | 无 |
+| 相机 | `cam3 cam2 cam1 cam4 cam5 cam6` | `cam5 cam6 cam4 cam1 cam3 cam2`（按贴图认，非按位置） | `underA16` … `underA1` | `underA16` … `underA2`（少 A1） | `overhead5`、`overhead6` |
+| 网格顺序 | FBX 声明序（两排，不能按 X 排） | FBX 声明序 | 世界 X 升序 | 世界 X 升序 | 世界 X 升序 |
+| 杂物过滤 | 不需要 | 不需要 | `planes_only` | **不能开**（平面在判据 Y 带外） | 不能开 |
+| 片段 | `*_camN.mp4` | 同 pool | `*_underAi.ts` | 同 underwater | `*_overheadN.ts` |
+| 源尺寸 | 3840×2160 | 3840×2160 | 1280×720 | 1280×720 | 3840×2160 |
+| 每米像素 | 100 | 100 | 240 | 240 | 170 |
+| 世界跨度 | 50m | 50m | 25.00m × 3.00m（每块宽 3.0~5.5m） | 25.05m × 2.75m（每块宽 1.5~3.5m） | — |
+| 相邻重叠 | 大面积斜向 | 大面积斜向 | 1.5~4.5m | 0.50~1.00m（14 对里 13 对恰 0.50m） | 1.77m |
+| 融合方式 | 距离变换羽化 | 距离变换羽化 | 竖直硬缝 + 120px 过渡 | 竖直硬缝 + 120px 过渡 | 竖直硬缝 + 85px 过渡 |
+| 参考贴图来源 | 片段首帧 | 片段首帧 | 数据集快照 | 片段首帧（快照已移入日期层） | 片段首帧 |
+| 时间对齐 | 无 manifest，按 t=0 | 同 pool | manifest 墙钟 | manifest 墙钟 | manifest 墙钟 |
+| 资产画布 | 5001×2101 | 5001×2101 | 6001×656 | 6001×661 | 4251×511 |
 
 ### 七个步骤
 
@@ -55,7 +60,7 @@ pwsh scripts/run_stitch.ps1 LINE STEPS [选项…]    # Windows
 | --- | --- | --- |
 | `extract` | 读 FBX，提取三角形 + UV，按线路的顺序排列 | `outputs/<line>/mesh.json` |
 | `tex` | 导出每台相机的参考贴图（无标定线）：pool/overhead 取片段首帧，underwater 取数据集快照 | `outputs/<line>/ref_tex/<camera>.png` |
-| `still` | 静图 + 网格诊断图 + 融合热图 | `outputs/<line>/stitch{,_grid,_heat}.png` |
+| `still` | 静图 + 网格诊断图 + 视野区间图 + 融合热图 | `outputs/<line>/stitch{,_grid,_spans,_heat}.png` |
 | `video` | 每路片段逐帧拼接 | `outputs/<line>/stitch.mp4` |
 | `asset` | 网格 JSON 编译成 GPU 资产 | `build/assets/generated/<line>.swasset` |
 | `build` | 构建 `swim_realtime` | `build/<backend>-release/`（macOS）、`build/win-<backend>/`（Windows） |
@@ -73,12 +78,21 @@ pwsh scripts/run_stitch.ps1 LINE STEPS [选项…]    # Windows
 # 俯视两路：设计师标定图的静图，与真实首帧的静图
 ./scripts/run_stitch.sh overhead extract,still
 ./scripts/run_stitch.sh overhead tex,still --real --video-dir /path/to/swb_20260730-161710_7
+
+# 换一批每相机贴图渲静图（如数据集算好的中值背景），产物名自己指定
+./scripts/run_stitch.sh underwater2 still \
+  --tex-dir /path/to/20260807/object-frames --still-suffix _bg20260807
 ```
 
 常用选项：`--seconds N`（live 时长）、`--seconds-float N`（video 时长）、`--encode`、
 `--no-window`（离屏）、`--fps N`、`--blend-px N`、`--ppm N`、`--real`、`--force`、
-`--no-loop`、`--config PATH`（用现成 config）、`--backend metal|d3d11|cudagl`。
+`--no-loop`、`--config PATH`（用现成 config）、`--backend metal|d3d11|cudagl`、
+`--tex-dir DIR` + `--tex-pattern '{camera}_background.png'` + `--still-suffix S`。
 完整清单：`python -m python.stitch --help`。
+
+`--tex-dir` 换的是 still 读哪一批每相机贴图；后缀默认从 pattern 推（`_background`），
+但两批数据用同一个 pattern 会落到同一个文件名、后跑的静默覆盖前跑的，所以同时比较多批时
+必须给 `--still-suffix`。
 
 `pool` 的片段目录默认取 `SWIMMING_DATASET_DIR`（一个机器级会话目录）；另两条线是
 按次挑选的采样目录，必须显式给 `--video-dir`。
@@ -124,10 +138,49 @@ FBX 里平面的相对位置、或改 profile 的 id 顺序，会把相机错配
 在一条竖直缝相接，所以在有界过渡带内融合并裁剪 UV —— 否则越界 UV 会被 GPU 镜像
 采样，正好在缝上画出一条假的条带。
 
-**`all.fbx` 需要过滤，`002.fbx` 不能过滤**：前者夹带无纹理支架、泳道标记条与重复网格，
-所以 underwater 开 `planes_only`（只留「每个纹理一块、位于泳池 Y 带内的全高平面」）；
-后者恰好只有两块平面，且跨世界 Y `[20.47, 23.47]`（机位在池上方），不在判据的泳池
-Y 带 `(-11.6, -8.0)` 内 —— 对它开这个开关会滤掉全部两块。
+**只有 `all.fbx` 需要过滤**：它夹带无纹理支架、泳道标记条与重复网格，所以 underwater 开
+`planes_only`（只留「每个纹理一块、位于泳池 Y 带内的全高平面」）。另外两个模型都只装
+该有的平面，而且开了这个开关会**全部丢掉**：`002.fbx` 跨世界 Y `[20.47, 23.47]`（机位在
+池上方），`ALL OK- 8.14-02.fbx` 跨 `[-10.09, -7.34]`，都不在判据的泳池 Y 带 `(-11.6, -8.0)`
+内，失败信息是「no pool plane found」，看不出是判据越界。这个 Y 带是给 `all.fbx` 写死的
+一条硬编码，不是通用选择器。
+
+**`blend_px` 是物理宽度，不是比例**：underwater2 相邻块只重叠 121~241px（0.50~1.00m），
+underwater 重叠 361~1081px，两条线却都用 120px —— 因为 120px @240ppm 就是 0.5m，跟
+overhead 的 85px @170ppm 是同一个物理宽度。8.14-02 改版后 14 对邻块里 13 对恰好重叠 0.50m，
+也就是一次完整的线性交叉淡入刚好用满；再窄就会在缝上留台阶。
+
+**只挪顶点的 FBX 改版不是新线**：`ALL OK.fbx` → `ALL OK- 8.14.fbx` → `ALL OK- 8.14-02.fbx` → `8.15.fbx`
+每步都只换了 profile 的 `fbx`/`tex_dir` 两个字段。但 8.14-02 不只是挪顶点：它把 `underA1`
+从网格里去掉（15 个节点 02..16，`camera_ids` 少了一个），并把贴图从 mask 合成图
+`underA*_mask_merged.png` 换成裸背景 `underA*_background.png`，所以这一版 `camera_ids`
+也改了。前一步（8.14 版）的改动是整体去掉最下 0.25m（Y 跨度 3.00m → 2.75m）、A16 与 A9
+各短 0.5m。8.15 一个顶点都没挪（同 15 节点、同 X 跨度、同 Y 带 `[-10.092, -7.342]`），
+只改了 A10 那一块（节点 `017`，世界 X `[47.955, 49.955]`）两件事：
+
+- **UV 重新对准**：在 130px/m 画布上整体下移约 5px（3.8cm）。判据是让两版网格渲染**同一批**
+  数据集背景：其余 14 块逐位一致（corr 1.0000、dy 0），只有 A10 要 dy=+5 才对齐 —— 贴图
+  被固定住了，所以只能是 UV 变了。A10 两侧的缝依然对齐（dy 0，corr 0.96~0.97，之前
+  0.93~0.95），也就是这次重标是把 A10 标得更准了，不是标歪了。
+- **贴图换成 `10.png`**：那是样本 `swb_20260813-170549_24` 的 A10 片段首帧（与该样本 `tex`
+  导出的 `ref_tex/underA10.png` 字节一致），不是干净的中值背景。所以直接拿 `.fbm` 出 `still`
+  时，15 块里只有 A10 带着那一帧的泳者与水花，其余 14 块仍是干净背景（且仍与
+  `20260807/object-frames/` 逐字节一致）。
+
+必须 `extract --force`：`extract` 按 mtime 跳过，看不出换的是哪个文件。
+
+**两版水下网格的实测对照**（各配各数据集的中值背景，静态无泳者；横向被池底砖格的
+周期性搞成多峰、量不准，只量竖直错位）：
+
+| 网格 | 配 20260708 背景 | 配 20260807 背景 |
+| --- | --- | --- |
+| underwater（`all.fbx`，16 相机） | **均 0.07px / 最差 1px** | — |
+| underwater2（`8.15.fbx`，15 相机） | — | **均 1.0px / 最差 4px（1.7cm）** |
+
+每版网格在自己那批数据上最好（对角线是自己配自己）。这说明两版都标得没问题，**变的是
+相机**：直接比每台相机自己的两张背景（不经任何网格），16 台里 A16/A10/A2/A1 四台的相关
+增益 +0.18~+0.33，是被重新对准过的，集中在两端。所以配对要成套：新网格配新数据，交叉用
+会引入 4~5px（约 2cm）的缝错位。
 
 **`.ts` 第 0 帧不是同一时刻**：录制器把关键帧放在 lookback 窗口内的任意位置，GOP 粒度
 使各路偏差可达数秒。两条平面线都声明 `sync="manifest"`：按 manifest 的 `align_start_ms`
