@@ -172,6 +172,27 @@ class BlendTest(unittest.TestCase):
         for loose, tight in zip(plain, clipped):
             self.assertTrue(np.array_equal(loose[2], tight[2]))
 
+    def test_a_triangle_reaching_past_the_raster_is_clipped(self):
+        """越出画布的三角形要裁掉，不能靠 margin 保证"永远不越界"。
+
+        margin=0 的资产画布上，underwater2 的平面顶行实测落在 y=-1（浮点取整），
+        而负的切片起点会从对侧边缘取，既不报错也画错地方——所以 build_remap 自己
+        跟画布求交。这里把整块网格上移半米，让它必然越界。"""
+        mesh = _mesh("high", 0.0, 1.0, 0.5, 1.5)
+        canvas = C.Canvas([_mesh("base", 0.0, 1.0, 0.0, 1.0)], 64.0, margin=0)
+        m1, m2, mask = C.build_remap(mesh, canvas, (32, 32))
+        self.assertEqual(mask.shape, canvas.shape)
+        # 下半部分（落在画布内的那半）有覆盖，且没有任何像素被画到对侧边缘
+        self.assertGreater(int(mask.sum()), 0)
+        self.assertGreater(int(mask[0].sum()), 0)          # 顶部被裁到 y=0
+        self.assertEqual(int(mask[-1].sum()), 0)           # 底部本不该有内容
+
+    def test_a_triangle_entirely_outside_paints_nothing(self):
+        mesh = _mesh("away", 10.0, 11.0, 10.0, 11.0)
+        canvas = C.Canvas([_mesh("base", 0.0, 1.0, 0.0, 1.0)], 64.0, margin=0)
+        _m1, _m2, mask = C.build_remap(mesh, canvas, (32, 32))
+        self.assertEqual(int(mask.sum()), 0)
+
     def test_weights_sum_to_one_wherever_anything_is_covered(self):
         canvas, layers = self._layers(clip=True)
         masks = [layer[2] for layer in layers]
@@ -210,6 +231,129 @@ class BlendTest(unittest.TestCase):
         masks = [C.build_remap(m, canvas, (8, 8))[2] for m in meshes]
         for weight, mask in zip(C.blend_weights(masks, None), masks):
             np.testing.assert_allclose(weight[mask > 0], 1.0, atol=1e-6)
+
+
+class LaneSpanTest(unittest.TestCase):
+    """视野区间图：每台相机一条 |-- --|，实线独占、虚线过渡，相邻交替高度。"""
+
+    def _weights(self, spans, blend_px=0.0, ppm=32.0):
+        meshes = [_mesh("m%d" % i, x0, x1) for i, (x0, x1) in enumerate(spans)]
+        canvas = C.Canvas(meshes, ppm, margin=0)
+        masks = [C.build_remap(m, canvas, (8, 8))[2] for m in meshes]
+        return C.blend_weights(masks, blend_px), canvas
+
+    def test_span_separates_the_view_from_what_it_owns(self):
+        """四个数字分开两件事：能看到多少（端点）与其中多少是自己独占的（实线）。
+
+        合成一个区间会把"我能看到这里"和"这里归我"混为一谈，而这正是这张图要
+        回答的问题。"""
+        weights, _canvas = self._weights([(0.0, 2.0), (1.0, 3.0)], blend_px=8.0)
+        spans = C.lane_spans(weights)
+        for weight, span in zip(weights, spans):
+            cov0, own0, own1, cov1 = span
+            covered = np.flatnonzero((weight > 0).any(axis=0))
+            owned = np.flatnonzero((weight >= 0.99).any(axis=0))
+            self.assertEqual((cov0, cov1), (int(covered[0]), int(covered[-1])))
+            self.assertEqual((own0, own1), (int(owned[0]), int(owned[-1])))
+            self.assertLessEqual(cov0, own0)
+            self.assertLessEqual(own1, cov1)
+
+    def test_the_middle_lane_is_dashed_on_both_sides(self):
+        """夹在两块之间的那条，左右都该有过渡带；两端那两条各只有一侧。"""
+        weights, _canvas = self._weights(
+            [(0.0, 2.0), (1.5, 3.5), (3.0, 5.0)], blend_px=8.0)
+        left, middle, right = C.lane_spans(weights)
+        self.assertEqual(left[0], left[1])            # 最左：左侧无过渡
+        self.assertLess(middle[0], middle[1])         # 中间：左有
+        self.assertLess(middle[2], middle[3])         # 中间：右也有
+        self.assertEqual(right[2], right[3])          # 最右：右侧无过渡
+
+    def test_a_lane_with_no_solid_region_still_gets_a_span(self):
+        """完全落在别人过渡带里的一块，实线长度收成 0 但仍要画出视野区间——
+        少一条杠会被读成少一台相机。旧网格的 A10/A5 就是这样（重叠太宽）。"""
+        weights = [np.full((4, 6), 0.5, np.float32), np.full((4, 6), 0.5, np.float32)]
+        spans = C.lane_spans(weights)
+        for span in spans:
+            self.assertIsNotNone(span)
+            self.assertEqual(span[1], span[2])        # 无独占区
+            self.assertEqual((span[0], span[3]), (0, 5))
+
+    def test_a_lane_owning_nothing_draws_all_dashed(self):
+        """独占区为 0 时整条画成虚线，而不是只剩两个端点——虚线才表达
+        "我看到的每一处都跟别人共享"。"""
+        image = np.zeros((120, 300, 3), np.uint8)
+        C.draw_spans(image, [(20, 150, 150, 280)], ["shared"], levels=1)
+        middle = image[:, 60:240]
+        columns = np.flatnonzero(middle.any(axis=(0, 2)))
+        self.assertGreater(len(columns), 20)          # 中段有笔画
+        self.assertLess(len(columns), middle.shape[1])  # 但不连续（是虚线）
+
+    def test_ownership_bounds_are_the_outer_extent(self):
+        """独占区可能被邻居切成两段（三块交汇处的偏置就会这样），
+        取"最深列附近的连续段"会静默丢掉另一段，所以取外边界。"""
+        weight = np.zeros((4, 10), np.float32)
+        weight[:, 1] = 1.0                            # 左段
+        weight[:, 5] = 0.5                            # 中间归邻居
+        weight[:, 8] = 1.0                            # 右段
+        weight[:, 0] = weight[:, 9] = 0.2             # 两端过渡
+        span = C.lane_spans([weight])[0]
+        self.assertEqual((span[1], span[2]), (1, 8))
+        self.assertEqual((span[0], span[3]), (0, 9))
+
+    def test_an_uncovered_lane_has_no_span(self):
+        weights = [np.zeros((4, 6), np.float32), np.ones((4, 6), np.float32)]
+        self.assertIsNone(C.lane_spans(weights)[0])
+        self.assertIsNotNone(C.lane_spans(weights)[1])
+
+    def test_neighbours_alternate_height(self):
+        """相邻的杠必然重叠（重叠就是融合区），画在同一高度会让虚线端互相盖住，
+        分不出谁是谁——所以交替两个高度。"""
+        image = np.zeros((200, 400, 3), np.uint8)
+        C.draw_spans(image, [(0, 40, 200, 240), (200, 240, 399, 399)],
+                     ["a", "b"], levels=2)
+        rows = [np.flatnonzero(image[:, x].any(axis=1)) for x in (120, 320)]
+        self.assertTrue(len(rows[0]) and len(rows[1]))
+        self.assertNotEqual(int(np.median(rows[0])), int(np.median(rows[1])))
+
+    def test_every_lane_gets_the_same_text_size(self):
+        """字号统一：宽度信息已经由杠表达，再按块宽缩字会让窄块的编号看不清，
+        还会诱人把字号大小当成一种含义。
+
+        只量文字所在的行（杠压在底部），否则量到的是杠本身的长度。"""
+        def text_width(span):
+            image = np.zeros((200, 400, 3), np.uint8)
+            C.draw_spans(image, [span], ["underA10"], levels=1, band=(0.9, 0.9))
+            text_rows = image[:int(200 * 0.9) - 10]
+            painted = np.flatnonzero(text_rows.any(axis=(0, 2)))
+            return int(painted[-1] - painted[0] + 1) if len(painted) else 0
+
+        wide, narrow = text_width((0, 10, 390, 399)), text_width((180, 195, 205, 220))
+        self.assertGreater(narrow, 0)
+        self.assertAlmostEqual(wide, narrow, delta=4)
+
+    def test_labels_and_caps_stay_inside_the_canvas(self):
+        image = np.zeros((120, 300, 3), np.uint8)
+        C.draw_spans(image, [(0, 0, 299, 299)], ["underA1"], levels=1)
+        painted = np.flatnonzero(image.any(axis=(0, 2)))
+        self.assertGreaterEqual(painted[0], 0)
+        self.assertLess(painted[-1], image.shape[1])
+
+    def test_a_missing_span_is_skipped_not_drawn_at_zero(self):
+        image = np.zeros((120, 300, 3), np.uint8)
+        C.draw_spans(image, [None, (100, 120, 180, 200)], ["gone", "here"])
+        self.assertEqual(int(image[:, :50].sum()), 0)
+
+    def test_grid_carries_no_labels(self):
+        """grid 只管几何：十六套三角边已经很密，身份是另一张图的事。"""
+        meshes = [_mesh("a", 0.0, 2.0), _mesh("b", 1.0, 3.0)]
+        canvas = C.Canvas(meshes, 32.0, margin=0)
+        base = np.zeros((canvas.height, canvas.width, 3), np.uint8)
+        import inspect
+        # Only an optional palette override is allowed — never a label/name
+        # mechanism (identity is a separate question, answered by draw_spans).
+        self.assertEqual(list(inspect.signature(C.draw_grid).parameters),
+                         ["image", "meshes", "canvas", "colors"])
+        self.assertIsNotNone(C.draw_grid(base, meshes, canvas))
 
 
 class CropTest(unittest.TestCase):
@@ -263,7 +407,9 @@ class ProfileTest(unittest.TestCase):
     """A profile record is the single place a line's differences live."""
 
     def test_registry_holds_every_line(self):
-        self.assertEqual(P.names(), ["pool", "pool2", "underwater", "overhead"])
+        self.assertEqual(P.names(),
+                         ["pool", "pool2", "underwater", "underwater2",
+                          "overhead"])
 
     def test_pool2_mirrors_both_axes_to_land_on_pools_layout(self):
         """pool2 是同一批相机、同一批片段，只换了设计师手工重建的 FBX。
@@ -287,7 +433,7 @@ class ProfileTest(unittest.TestCase):
 
     def test_only_pool2_needs_the_x_mirror(self):
         """neg_u 是这个文件的属性，不是全局默认——其余线一个都不该开。"""
-        for name in ("pool", "underwater", "overhead"):
+        for name in ("pool", "underwater", "underwater2", "overhead"):
             self.assertFalse(P.get(name).neg_u, name)
 
     def test_pool2_lays_the_banks_out_opposite_to_pool(self):
@@ -337,7 +483,49 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(line.ref_tex, "snapshot")
         self.assertEqual(line.asset.name, "underwater.swasset")
 
-    def test_overhead_values_match_the_design(self):
+    def test_underwater2_reuses_underwaters_shaping(self):
+        """underwater2 是同 15 台相机（旧 16 台去了 A1）、同一批片段。
+
+        渲染口径必须与 underwater 逐字段一致，否则"对比"比的是两套参数而不是两个
+        网格。ppm 是绝对量（px/m），所以世界尺度变了也不用改它。唯一例外是
+        camera_ids：8.14-02 版本把 underA1 从网格里去掉（只有 15 个 mesh），
+        所以这行只有 15 台相机。"""
+        line, old = P.get("underwater2"), P.get("underwater")
+        for field in ("clip_suffix", "ppm", "blend_px", "clip_uv",
+                      "full_res", "crop_bottom", "source_size", "sync",
+                      "neg_v", "neg_u", "order", "still_margin"):
+            self.assertEqual(getattr(line, field), getattr(old, field), field)
+        # 相机数少了 A1：新网格是 15 节点 02..16，贴图是裸背景。
+        self.assertEqual(line.camera_ids,
+                         tuple(f"underA{i}" for i in range(16, 1, -1)))
+        # 只挪顶点/换背景的改版不是新线：文件名带日期，但仍是同 15 个节点。
+        self.assertEqual(line.fbx.name, "8.15.fbx")
+        self.assertEqual(line.fbx.with_suffix(".fbm"), line.tex_dir)
+        self.assertNotEqual(line.out_dir, old.out_dir)   # 不覆盖旧线产物
+
+    def test_underwater2_must_not_filter_planes(self):
+        """这个文件只有 15 个节点，且平面落在 select_planes 硬编码 band 之外。
+
+        band 是 (-11.6, -8.0)，8.14-02 改版后这些平面是 (-10.09, -7.34)——开了
+        过滤会把 15 块全丢掉并报 "no pool plane found"，和当初 overhead 一样的坑。"""
+        self.assertFalse(P.get("underwater2").planes_only)
+        self.assertTrue(P.get("underwater").planes_only)
+        plane = _mesh("02", 59.95, 62.95, -10.09, -7.34,
+                      tex="underA2_background.png")
+        self.assertEqual(select_planes([plane]), [])
+
+    def test_underwater2_reads_reference_textures_from_video(self):
+        """underwater 走 snapshot，但快照现在多了一层日期目录，
+        frames_for_camera(裸相机名) 什么都找不到，tex 会导出空目录。"""
+        self.assertEqual(P.get("underwater2").ref_tex, "video")
+        self.assertEqual(P.get("underwater").ref_tex, "snapshot")
+
+    def test_underwater2_keeps_one_texture_directory(self):
+        """underwater 把 .fbm 和 still 贴图分开是因为 .fbm 里的副本过期了；
+        8.15.fbm 装的就是交付的裸背景本身，所以一个目录服务两个读者。"""
+        line = P.get("underwater2")
+        self.assertEqual(line.still_textures, line.tex_dir)
+
         line = P.get("overhead")
         self.assertEqual(line.camera_ids, ("overhead5", "overhead6"))
         self.assertEqual(line.ppm, 170.0)
@@ -356,6 +544,7 @@ class ProfileTest(unittest.TestCase):
         # opposite one's plane; only the plane lines are a single row.
         self.assertEqual(P.get("pool").order, "declared")
         self.assertEqual(P.get("underwater").order, "world_x")
+        self.assertEqual(P.get("underwater2").order, "world_x")
         self.assertEqual(P.get("overhead").order, "world_x")
 
     def test_unknown_name_lists_the_registered_ones(self):
@@ -382,7 +571,7 @@ class ProfileTest(unittest.TestCase):
     def test_still_textures_default_to_the_model_directory(self):
         # Only underwater splits them: its canonical grids live in the dataset,
         # while the .fbm copies are stale.
-        for name in ("pool", "overhead"):
+        for name in ("pool", "pool2", "underwater2", "overhead"):
             line = P.get(name)
             self.assertEqual(line.still_textures, line.tex_dir)
         self.assertNotEqual(P.get("underwater").still_textures,
@@ -394,6 +583,7 @@ class ProfileTest(unittest.TestCase):
         self.assertIsNotNone(P.default_video_dir(P.get("pool")))
         self.assertIsNone(P.default_video_dir(P.get("overhead")))
         self.assertIsNone(P.default_video_dir(P.get("underwater")))
+        self.assertIsNone(P.default_video_dir(P.get("underwater2")))
 
     def test_clip_for_matches_the_suffix(self):
         overhead = P.get("overhead")
@@ -1010,6 +1200,7 @@ class RenderTest(unittest.TestCase):
                          tex_names=["overhead5.png"])
             self.assertIn("1", str(caught.exception))
             self.assertIn("2", str(caught.exception))
+
 
     def test_full_res_rescales_back_to_the_source_height(self):
         from python.stitch import render as R

@@ -1,13 +1,17 @@
 """One record per camera line. Every difference between lines lives here.
 
-A line is "N planes covering one area, driven by N cameras". Three exist:
+A line is "N planes covering one area, driven by N cameras". Five exist, covering
+three physical areas — two of them twice, because a rebuilt FBX of the same
+cameras is a new line, not a new step:
 
-    pool        6 cameras over a 50m pool, two rows, distance-feathered
-    underwater  16 planes down one lane, seen from below, hard vertical seams
-    overhead    2 planes down the same lane, seen from above
+    pool         6 cameras over a 50m pool, two rows, distance-feathered
+    pool2        the same 6, from a hand-rebuilt FBX modelled 180° round
+    underwater   16 planes down one lane, seen from below, hard vertical seams
+    underwater2  the same 16, re-surveyed against a changed calibration target
+    overhead     2 planes down the same lane, seen from above
 
 They share every step — extract, still, video, asset, build, live — and differ
-only in the fields below. Adding a fourth line means adding a record here and
+only in the fields below. Adding a sixth line means adding a record here and
 nothing else; if it needs a new field, that field is the thing to think about.
 
 Field pairs that look redundant but are not:
@@ -241,6 +245,86 @@ PROFILES = {
         planes_only=True,
         sync="manifest",
         ref_tex="snapshot",
+    ),
+    # Same 16 cameras and the same clips as `underwater`, re-surveyed against a
+    # changed calibration target and rebuilt by hand. Three fields differ and every
+    # one of them is a property of the file, not a step:
+    #
+    #   planes_only   OFF, and that is not merely unnecessary — it is required.
+    #                 all.fbx needs the Y-band filter to reject rigging and
+    #                 duplicate copies; this file holds exactly 16 nodes, one per
+    #                 texture, and its planes span Y [-10.33, -7.58], well above
+    #                 select_planes' hardcoded (-11.6, -8.0) band. Turn it on and
+    #                 all 16 are dropped ("no pool plane found").
+    #   still_tex_dir NOT split. underwater points the still at the dataset's
+    #                 annotation-grids because the copies in all.fbm are stale;
+    #                 here the .fbm holds the delivered mask composites verbatim
+    #                 (byte-identical to 20260807/object-frames/), so the .fbm IS
+    #                 canonical and one directory serves both readers.
+    #   ref_tex       "video", not "snapshot": the snapshots moved under a date
+    #                 layer, so frames_for_camera() finds nothing for a bare
+    #                 camera id and `tex` would export an empty directory.
+    #
+    # Everything else is deliberately identical to underwater, which is what makes
+    # the two lines comparable frame for frame. The planes are narrower here
+    # (1.5~3.5m against 3.0~5.5m), so neighbours overlap 0.50~1.00m where they used
+    # to overlap 1.5~4.5m. blend_px stays 120 because it is a physical width —
+    # 120px @240ppm is 0.5m — so the tightest pair is now exactly one full
+    # crossfade rather than a narrow band inside a wide overlap.
+    #
+    # The FBX is on its fourth revision (`8.15.fbx` replaced
+    # `ALL OK- 8.14-02.fbx`). 8.14-02 was not "only vertices moved": it dropped
+    # A1 entirely and re-baked the textures. The mesh nodes number 02..16,
+    # texture names are `underA{2..16}_background.png` (the dataset's bare
+    # backgrounds, byte-identical to 20260807/object-frames/, where the earlier
+    # revision used the mask composites `underA*_mask_merged.png`). So
+    # camera_ids loses underA1 and every per-mesh texture changes. Geometry
+    # also moved: planes now span Y [-10.092, -7.342] (0.25m lower than the 8.14
+    # revision's [-10.332, -7.582]) and the X extents differ from the old file —
+    # A2 reaches 62.955 where it used to stop at 61.955, so the rightmost plane
+    # now overlaps the lane differently. Orientation still needs no mirror: A16
+    # sits at min world X and the vertical axis rises, the same way round as
+    # all.fbx.
+    #
+    # 8.15 keeps every vertex position (same 15 nodes, same X spans, same Y band
+    # [-10.092, -7.342]) and changes A10 alone — the node at A10's world X
+    # [47.955, 49.955], named `017`. Two things about it moved:
+    #
+    #   its UVs      re-registered ~5px down on a 130px/m canvas (3.8cm). Proved
+    #                by rendering both revisions against the SAME dataset
+    #                backgrounds: every other plane matches bit for bit
+    #                (corr 1.0000, dy 0), A10 needs dy=+5 to line up. Since the
+    #                texture is held constant there, only the UVs can explain it.
+    #   its texture  `10.png` instead of `underA10_background.png` — and that file
+    #                is the A10 clip's first frame from sample
+    #                swb_20260813-170549_24 (byte-identical to what `tex` exports
+    #                for that sample), not a clean median background. So a `still`
+    #                off the .fbm shows one plane carrying that frame's swimmer
+    #                and splash while the other 14 stay clean. The other 14 .fbm
+    #                textures are still byte-identical to 20260807/object-frames/.
+    #
+    # The seams either side of A10 stay registered (dy 0, corr 0.96~0.97 against
+    # 0.93~0.95 before), so the re-registration improved A10 rather than skewing
+    # it. Camera identity is positional, so camera_ids is unchanged.
+    #
+    # 13 of 14 neighbour overlaps are exactly 0.50m, so blend_px stays 120
+    # (a physical width: 120px @240ppm is 0.5m, a full crossfade at the tightest
+    # pair and bounded at the widest).
+    "underwater2": Profile(
+        name="underwater2",
+        fbx=_UNDER_MODELS / "8.15.fbx",
+        tex_dir=_UNDER_MODELS / "8.15.fbm",
+        camera_ids=tuple(f"underA{index}" for index in range(16, 1, -1)),
+        clip_suffix=".ts",
+        ppm=240.0,
+        source_size=(1280, 720),
+        blend_px=120.0,
+        clip_uv=True,
+        full_res=True,
+        crop_bottom="auto",
+        planes_only=False,
+        sync="manifest",
+        ref_tex="video",
     ),
     "overhead": Profile(
         name="overhead",

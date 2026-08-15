@@ -1,8 +1,13 @@
-"""Still images for one line: composite, grid diagnostic, fusion heatmap.
+"""Still images for one line: composite, grid diagnostic, span map, fusion heatmap.
 
-The three outputs come from one pass over the same layers, because a grid drawn
+The four outputs come from one pass over the same layers, because a grid drawn
 from a second projection would show rounding differences that are not really
 there.
+
+Why the span map is its own file rather than more ink on the grid: the grid answers
+"is the geometry right" and is already dense (sixteen sets of triangle edges),
+while the span map answers "which camera covers this stretch, and where does it
+hand over". Overlaying the second on the first buried both.
 """
 import cv2
 
@@ -12,8 +17,8 @@ from python.stitch.profiles import StepError
 
 
 def render(profile, tex_dir, out_prefix, ppm=None, blend_px=None,
-           full_res=None, tex_names=None, grid=True, heatmap=True):
-    """Write `<out_prefix>{,_grid,_heat}.png`. Returns (width, height)."""
+           full_res=None, tex_names=None, grid=True, heatmap=True, spans=True):
+    """Write `<out_prefix>{,_grid,_spans,_heat}.png`. Returns (width, height)."""
     tex_dir = profile.still_textures if tex_dir is None else tex_dir
     if not tex_dir.is_dir():
         raise StepError(f"texture directory missing: {tex_dir}")
@@ -48,6 +53,16 @@ def render(profile, tex_dir, out_prefix, ppm=None, blend_px=None,
         images.append((f"{out_prefix}_grid.png",
                        C.draw_grid(composite.copy(), meshes, canvas),
                        cv2.INTER_LINEAR, "grid"))
+    if spans:
+        # A separate product from the grid, because the two answer different
+        # questions and stacking them buries both: the grid shows the mesh, this
+        # shows which camera covers which stretch of the panorama and where the
+        # blends are. Drawn before the crop/rescale below so the bars travel with
+        # the pixels they describe.
+        images.append((f"{out_prefix}_spans.png",
+                       C.draw_spans(composite.copy(), C.lane_spans(weights),
+                                    list(profile.camera_ids)),
+                       cv2.INTER_LINEAR, "span map"))
     if heatmap:
         # Nearest for the heatmap: interpolating between two lanes' hues invents a
         # third colour that reads as a transition band where there is none.

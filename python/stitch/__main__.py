@@ -3,6 +3,7 @@
     python -m python.stitch pool still
     python -m python.stitch overhead extract,still
     python -m python.stitch underwater still --real --blend-px 120
+    python -m python.stitch underwater2 still --tex-dir DIR
     python -m python.stitch overhead extract,asset,build,live --video-dir DIR
 
 The line is an argument and the steps are a table. The alternative — a subcommand
@@ -38,9 +39,22 @@ def step_tex(profile, args):
 def step_still(profile, args):
     """Composite, grid diagnostic and fusion heatmap.
 
-    --real swaps the designer's calibration frames for the exported camera
-    frames; the outputs take a _real suffix so the two never overwrite."""
-    if args.real:
+    Three texture sources, one code path. By default the designer's calibration
+    frames baked into the .fbm; --real the camera frames `tex` exported; --tex-dir
+    any other per-camera set (a dataset's median backgrounds, another session's
+    frames). Each writes its own suffix so no two overwrite.
+
+    --tex-dir derives its suffix from the pattern, which is enough to tell one
+    KIND of texture set from another but NOT one dataset from another: two dates'
+    `{camera}_background.png` would both land on stitch_background.png and the
+    second would silently overwrite the first. Name the product with
+    --still-suffix whenever more than one set is in play."""
+    if args.tex_dir is not None:
+        tex_dir = args.tex_dir
+        names = [args.tex_pattern.format(camera=camera)
+                 for camera in profile.camera_ids]
+        suffix = args.still_suffix or _suffix_of(args.tex_pattern)
+    elif args.real:
         tex_dir = profile.ref_tex_dir
         if not tex_dir.is_dir():
             raise StepError(
@@ -51,6 +65,17 @@ def step_still(profile, args):
     R.render(profile, tex_dir, profile.out_dir / f"stitch{suffix}",
              ppm=args.ppm, blend_px=args.blend_px,
              full_res=False if args.no_full_res else None, tex_names=names)
+
+
+def _suffix_of(pattern):
+    """Output suffix for a --tex-pattern: what it says beyond the camera id.
+
+    `{camera}_background.png` -> `_background`, so the still is named after the
+    texture set it came from and cannot overwrite another set's. A pattern that
+    adds nothing (`{camera}.png`) falls back to `_tex`, because an empty suffix
+    would clobber the calibration still."""
+    stem = Path(pattern).stem.format(camera="")
+    return stem or "_tex"
 
 
 def step_video(profile, args):
@@ -88,6 +113,15 @@ def parse_args(argv=None):
     parser.add_argument("--real", action="store_true",
                         help="still: use the exported camera frames instead of "
                              "the designer's calibration textures")
+    parser.add_argument("--tex-dir", type=Path, default=None,
+                        help="still: composite this directory's per-camera "
+                             "images instead (overrides --real)")
+    parser.add_argument("--tex-pattern", default="{camera}_background.png",
+                        help="still: filename pattern inside --tex-dir "
+                             "(default: %(default)s)")
+    parser.add_argument("--still-suffix", default=None,
+                        help="still: name the output stitch<SUFFIX>.png; needed "
+                             "when two --tex-dir sets share a pattern")
     parser.add_argument("--ppm", type=float, default=None,
                         help="override the line's pixels per metre")
     parser.add_argument("--blend-px", type=float, default=None,

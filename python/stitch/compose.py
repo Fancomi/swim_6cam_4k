@@ -87,6 +87,11 @@ class Canvas:
                           self.height - 1 - (v["pos"][1] - self.ymin) * self.ppm]
                          for v in triangle], dtype)
 
+    def point(self, x, y):
+        """One world point as a canvas pixel (y down from the top)."""
+        return (int(round((x - self.xmin) * self.ppm)),
+                int(round(self.height - 1 - (y - self.ymin) * self.ppm)))
+
     def __repr__(self):
         return f"Canvas({self.width}x{self.height} @ {self.ppm:.2f}px/m)"
 
@@ -116,6 +121,13 @@ def build_remap(mesh, canvas, tex_size, clip=False):
 
     The pool line leaves it off: its meshes overlap broadly and blend by
     distance, so clipping at the image edge would cut into the feather.
+
+    Triangles are clipped to the raster rather than assumed to fit. A vertex
+    sitting exactly on the boundary rounds a pixel outside often enough (the
+    underwater planes' top row lands on y=-1 at margin 0), and a negative slice
+    start silently selects from the far edge instead of raising — so relying on a
+    margin to keep every bbox inside would fail quietly, in whichever line's
+    geometry happens to round outward next.
     """
     height, width = canvas.shape
     mapx = np.zeros((height, width), np.float32)
@@ -142,9 +154,19 @@ def build_remap(mesh, canvas, tex_size, clip=False):
         if clip:
             inside &= ((sx >= 0) & (sx <= tex_w - 1)
                        & (sy >= 0) & (sy <= tex_h - 1))
-        mapx[y:y + h, x:x + w][inside] = sx[inside]
-        mapy[y:y + h, x:x + w][inside] = sy[inside]
-        mask[y:y + h, x:x + w][inside] = 1
+        # Intersect the triangle's box with the raster. Taking the slice first and
+        # trimming the mask to match keeps the two shapes in step; slicing with a
+        # negative start would index from the opposite edge and paint there.
+        x0, y0 = max(x, 0), max(y, 0)
+        x1, y1 = min(x + w, width), min(y + h, height)
+        if x1 <= x0 or y1 <= y0:
+            continue
+        window = (slice(y0, y1), slice(x0, x1))
+        local_window = (slice(y0 - y, y1 - y), slice(x0 - x, x1 - x))
+        inside = inside[local_window]
+        mapx[window][inside] = sx[local_window][inside]
+        mapy[window][inside] = sy[local_window][inside]
+        mask[window][inside] = 1
     m1, m2 = cv2.convertMaps(mapx, mapy, cv2.CV_16SC2)
     return m1, m2, mask
 
@@ -282,13 +304,134 @@ LANE_COLOURS = [
 ]
 
 
-def draw_grid(image, meshes, canvas):
+def lane_spans(weights, threshold=0.99):
+    """Per lane, `(cov0, own0, own1, cov1)` column bounds, or None if uncovered.
+
+    Four numbers because a lane's field of view has two parts that answer
+    different questions: between `own0..own1` this lane alone represents the image,
+    while `cov0..own0` and `own1..cov1` are the transition bands it shares with a
+    neighbour. A single interval would conflate "I can see this" with "this is
+    mine", which is exactly the distinction the diagnostic exists to show.
+
+    A lane with no solid region at all (entirely inside someone else's blend)
+    collapses to a zero-length middle at its own centre rather than being dropped —
+    it still has a field of view worth drawing, and a missing bar would read as a
+    missing camera. This happens for real: on the old 16-lane mesh, A10 and A5 sit
+    inside their neighbours' wide overlaps and own no pixel outright.
+
+    The bounds are the OUTER extent of ownership, not a contiguous run. A lane can
+    own two stretches with a neighbour's territory between them (the plane lines'
+    seam bias puts one there whenever three lanes meet), and reporting the run
+    around the deepest column would silently drop the other stretch."""
+    spans = []
+    for weight in weights:
+        covered = np.flatnonzero((weight > 0.0).any(axis=0))
+        if not len(covered):
+            spans.append(None)
+            continue
+        owned = np.flatnonzero((weight >= threshold).any(axis=0))
+        if len(owned):
+            own0, own1 = int(owned[0]), int(owned[-1])
+        else:
+            own0 = own1 = int((covered[0] + covered[-1]) // 2)
+        spans.append((int(covered[0]), own0, own1, int(covered[-1])))
+    return spans
+
+
+def _dashed(image, y, x0, x1, colour, thickness, dash, gap):
+    for x in range(x0, x1 + 1, dash + gap):
+        cv2.line(image, (x, y), (min(x + dash, x1), y), colour, thickness,
+                 cv2.LINE_AA)
+
+
+def _span_bar(image, y, span, colour, thickness, cap, dash, gap):
+    """One `|-- --|`: caps at the view limits, solid where owned, dashed across
+    the blend.
+
+    A lane owning nothing draws as an all-dashed bar rather than as a bare pair of
+    caps — the dashes are what say "everything I see, I share"."""
+    cov0, own0, own1, cov1 = span
+    for x in (cov0, cov1):
+        cv2.line(image, (x, y - cap), (x, y + cap), colour, thickness, cv2.LINE_AA)
+    if own1 > own0:
+        if own0 > cov0:
+            _dashed(image, y, cov0, own0, colour, thickness, dash, gap)
+        if cov1 > own1:
+            _dashed(image, y, own1, cov1, colour, thickness, dash, gap)
+        cv2.line(image, (own0, y), (own1, y), colour, thickness, cv2.LINE_AA)
+    else:
+        _dashed(image, y, cov0, cov1, colour, thickness, dash, gap)
+
+
+def draw_spans(image, spans, labels, colours=None, levels=2, scale=None,
+               band=(0.42, 0.72)):
+    """Draw each lane's field of view as a `|-- --|` bar, named at its centre.
+
+    Solid means this lane owns those pixels outright; dashed means a transition
+    band shared with a neighbour; the end caps are the true limits of what the
+    camera sees.
+
+    Neighbours are drawn at ALTERNATING heights because their bars necessarily
+    overlap — the overlap is the blend. On one line the dashed ends would land on
+    top of each other exactly where the interesting part is, and it would be
+    impossible to tell whose dash is whose.
+
+    Text is ONE size for every lane. The bar now carries the width information, so
+    the label no longer has to fit inside its own block; shrinking it per lane
+    (which is what fitting requires — solid regions differ six-fold on the 16-lane
+    panorama) made the narrow lanes' ids unreadable and invited comparing font
+    sizes as if they meant something.
+    """
+    height, width = image.shape[:2]
+    if scale is None:
+        scale = max(0.35, min(1.6, height / 500.0))
+    palette = colours or LANE_COLOURS
+    thickness = max(1, int(round(height / 240.0)))
+    cap = max(3, int(round(height * 0.025)))
+    # Long dashes with a short gap: at dash≈gap the black underlay rounds every
+    # segment into a bead and the bar reads as dotted, which loses the "this is one
+    # continuous band, just shared" meaning.
+    dash = max(6, int(round(width / 150.0)))
+    gap = max(3, int(round(dash * 0.55)))
+    text_thickness = max(1, int(round(scale * 1.8)))
+    span_of_level = max(1, levels - 1)
+    for index, (span, label) in enumerate(zip(spans, labels)):
+        if span is None:
+            continue
+        level = index % levels
+        y = int(height * (band[0] + (band[1] - band[0]) * level / span_of_level))
+        colour = palette[index % len(palette)]
+        # Black underlay first, then the lane's own hue: an outline keeps the bar
+        # legible over both the bright floor and the dark water without a filled
+        # plate, which would hide the pixels the bar is describing.
+        _span_bar(image, y, span, (0, 0, 0), thickness + 2, cap, dash, gap)
+        _span_bar(image, y, span, colour, thickness, cap, dash, gap)
+
+        (text_w, text_h), _base = cv2.getTextSize(
+            label, cv2.FONT_HERSHEY_SIMPLEX, scale, text_thickness)
+        centre = (span[1] + span[2]) // 2
+        origin_x = min(max(int(centre - text_w / 2), 2), max(2, width - text_w - 2))
+        origin_y = max(text_h + 2, y - cap - 4)
+        for text_colour, extra in (((0, 0, 0), 2), (colour, 0)):
+            cv2.putText(image, label, (origin_x, origin_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, scale, text_colour,
+                        text_thickness + extra, cv2.LINE_AA)
+    return image
+
+
+def draw_grid(image, meshes, canvas, colors=None):
     """Overlay each mesh's triangle edges and its region outline.
 
     Projected exactly the way build_remap does, so a misalignment in the diagnostic
-    is a real misalignment and not a second projection's rounding."""
+    is a real misalignment and not a second projection's rounding.
+
+    Deliberately carries no camera names: sixteen sets of triangle edges is already
+    a dense picture, and identity is a separate question answered by draw_spans.
+
+    `colors` overrides the per-mesh palette; overhead draws both planes in one
+    colour so the overlay reads against its lane-schematic reference."""
     for index, mesh in enumerate(meshes):
-        colour = LANE_COLOURS[index % len(LANE_COLOURS)]
+        colour = (colors or LANE_COLOURS)[index % len(colors or LANE_COLOURS)]
         region = np.zeros(canvas.shape, np.uint8)
         for triangle in mesh["triangles"]:
             dst = canvas.project(triangle, np.int32)
