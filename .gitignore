@@ -18,6 +18,14 @@ __pycache__/
 inputs/underwater/models/
 inputs/overhead/models/
 inputs/pool/models/*.fbx
+# The overlay's water_entry2 models and the overhead lane diagram are the same
+# kind of local drop, but they land beside committed fixtures rather than in a
+# directory of their own, so they need naming: ignore every FBX here and let
+# the two tracked ones (005/006, the old single-mesh regression path) back in.
+inputs/water_entry/models/*.fbx
+!inputs/water_entry/models/005.fbx
+!inputs/water_entry/models/006.fbx
+inputs/overhead/*.png
 
 # Prebuilt CUDA/GL backend deps (FFmpeg+cuvid, GLFW) — large binaries, fetched
 # locally by install.bat. downloads/ is its installer/zip cache (already covered
