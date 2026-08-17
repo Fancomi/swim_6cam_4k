@@ -25,7 +25,12 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+# The venv interpreter sits in bin/ on POSIX and Scripts/ on Windows. Check both
+# before falling back: on Windows `python3` resolves to the WindowsApps App
+# Execution Alias, which opens the Microsoft Store and exits 49 printing nothing
+# — the script looks like it did no work at all.
 PY="$ROOT/.venv/bin/python"
+[[ -x "$PY" ]] || PY="$ROOT/.venv/Scripts/python.exe"
 [[ -x "$PY" ]] || PY="$(command -v python3)"
 
 # 筛选口径不在这里写死：select_frames 的 DEFAULT_* 是唯一来源，脚本读取它，

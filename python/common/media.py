@@ -4,12 +4,22 @@
 each decide what to do about that — three of them ignored it entirely, so a
 full disk or a missing directory produced a silent no-op. One helper that
 raises, plus one reader that refuses to return None, removes that class of bug.
+
+Both helpers go through the codec on a byte buffer and let Python open the file,
+rather than handing the path to OpenCV. `cv2.imread`/`imwrite` open through the
+C runtime's narrow API, which on Windows resolves the name in the system ANSI
+code page — so a perfectly ordinary path like `inputs/overhead/models/25 水面.fbm`
+fails with "can't open/read file: check file path/integrity" on a machine whose
+ACP is not UTF-8, while a copy of the identical bytes at an ASCII path reads
+fine. The failure names the path, so it reads like a missing file rather than an
+encoding problem.
 """
 import shutil
 import subprocess
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 
 class MediaError(RuntimeError):
@@ -21,17 +31,26 @@ def write_image(path, image, kind="image"):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        ok = cv2.imwrite(str(path), image)
+        ok, buffer = cv2.imencode(path.suffix, image)
     except cv2.error as error:
         raise MediaError(f"cannot write {kind}: {path}: {error}") from None
     if not ok:
         raise MediaError(f"cannot write {kind}: {path}")
+    try:
+        path.write_bytes(buffer.tobytes())
+    except OSError as error:
+        raise MediaError(f"cannot write {kind}: {path}: {error}") from None
     return path
 
 
 def read_image(path, kind="image"):
     """Decode `path` as BGR uint8. Raises rather than returning None."""
-    image = cv2.imread(str(path))
+    path = Path(path)
+    try:
+        data = np.frombuffer(path.read_bytes(), dtype=np.uint8)
+    except OSError as error:
+        raise MediaError(f"cannot read {kind}: {path}: {error}") from None
+    image = cv2.imdecode(data, cv2.IMREAD_COLOR) if data.size else None
     if image is None:
         raise MediaError(f"cannot read {kind}: {path}")
     return image

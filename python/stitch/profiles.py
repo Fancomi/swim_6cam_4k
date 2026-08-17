@@ -159,8 +159,16 @@ class Profile:
 
         Both a missing and an ambiguous match are errors: silently picking one of
         two candidates puts the wrong camera on a plane, which shows up as a
-        mis-registered seam far away from here."""
-        matches = sorted(Path(video_dir).glob(f"*_{camera}{self.clip_suffix}"))
+        mis-registered seam far away from here.
+
+        `._name` sidecars are skipped. A dataset copied through a Mac or an
+        exFAT/SMB share carries one AppleDouble stub per file, 4KB of resource
+        fork with the same name — it matches the glob and made every camera
+        "ambiguous", and picking it instead would hand the decoder 4KB of
+        non-video."""
+        matches = sorted(clip for clip in
+                         Path(video_dir).glob(f"*_{camera}{self.clip_suffix}")
+                         if not clip.name.startswith("._"))
         if not matches:
             raise StepError(
                 f"no {self.clip_suffix} clip for {camera} in {video_dir}")
@@ -375,13 +383,22 @@ PROFILES = {
     # 120/204) and the model moved up in world Y ([31.94, 34.94] against
     # [20.47, 23.47]) — a translation, so nothing downstream changes. ppm,
     # blend_px and clip_uv are identical, which is what makes the two lines
-    # comparable: both land on the same 4255x515 canvas.
+    # comparable: both land on the same 4255x515 canvas. The X extents match to
+    # the millimetre too (Plane002 [-35.223, -25.223], Plane011
+    # [-27.723, -10.223]), so the overlap is still 2.50m = 425px and blend_px
+    # stays 85.
+    #
+    # That Y translation is also why `planes_only` must stay off here, as it is
+    # for overhead: select_planes' hardcoded (-11.6, -8.0) band belongs to the
+    # underwater model, and this one sits even further outside it than 002.fbx —
+    # turning it on drops both planes and reports "no pool plane found".
     #
     # Camera identity verified by pixel correlation against the clips' first
     # frames rather than by filename: overhead5_merged.png -> overhead5 (0.858
     # vs 0.372 next-best), `overhead6_merged 拷贝.png` -> overhead6 (0.843 vs
     # 0.377). Positional order after the world-X sort agrees, so camera_ids is
-    # unchanged.
+    # unchanged. Worth measuring rather than assuming: pool2 recycled its texture
+    # NAMES from another shoot, and they are these same two names.
     "overhead2": Profile(
         name="overhead2",
         fbx=_OVERHEAD_MODELS / "25 水面.fbx",

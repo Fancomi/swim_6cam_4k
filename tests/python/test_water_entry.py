@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from python.water_entry import common as C
 from python.water_entry import export_package as E
@@ -286,6 +287,15 @@ class CapPerClipTest(unittest.TestCase):
 class CollectFilterTest(unittest.TestCase):
     """collect() 的片段级过滤：入水帧不可信的片段必须被排除。"""
 
+    def setUp(self):
+        # collect() 读 manifest.csv 只为取每条片段的 note，而这些用例自己写
+        # per_frame 载荷、notes=None 不按 note 过滤，所以空清单与真清单等价。
+        # 不打桩的话测试会去读作者机器上的数据集路径，在别的机器上直接
+        # FileNotFoundError —— 那是数据缺失，不是判据出错。
+        patcher = patch.object(C, "load_manifest", return_value=[])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _write_pair(self, root, clip, entry_source, frames=(100,)):
         for model in (S.MODEL_A, S.MODEL_B, S.MODEL_C):
             d = os.path.join(root, model, "per_frame")
@@ -367,7 +377,11 @@ class DefaultsTest(unittest.TestCase):
     """筛选口径只有一个来源：CLI 默认值与 run_water_entry.sh 都读 DEFAULT_*。"""
 
     def test_cli_references_the_constants_instead_of_copying_literals(self):
-        with open(S.__file__) as f:
+        # encoding="utf-8" explicitly: bare open() decodes in the locale encoding,
+        # which is GBK on a Chinese Windows box, and both these files carry
+        # Chinese help text — the read raised UnicodeDecodeError rather than
+        # testing anything.
+        with open(S.__file__, encoding="utf-8") as f:
             src = f.read()
         for name in ("DEFAULT_IOU", "DEFAULT_KP_MEAN_NORM",
                      "DEFAULT_MIN_GAP", "DEFAULT_MAX_OFFSET"):
@@ -378,7 +392,7 @@ class DefaultsTest(unittest.TestCase):
         script = os.path.join(os.path.dirname(os.path.dirname(
             os.path.dirname(os.path.abspath(__file__)))),
             "scripts", "run_water_entry.sh")
-        with open(script) as f:
+        with open(script, encoding="utf-8") as f:
             text = f.read()
         self.assertIn("S.DEFAULT_KP_MEAN_NORM", text)
         self.assertIn("S.DEFAULT_MIN_GAP", text)

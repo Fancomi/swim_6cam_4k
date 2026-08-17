@@ -7,5 +7,14 @@
 #
 # opencv-python-headless, not opencv-python: nothing in python/ opens a cv2
 # window (previews are native Metal/D3D11/GL), so the GUI libs are dead weight.
+#
+# Pillow is a hard requirement of the frames chain, not an extra:
+# python/labeling/merge_overhead.py imports it at module scope and
+# python/labeling/frames.py imports that, so `run_frames.sh` and
+# tests/python/test_{frames,merge_overhead}.py fail to import without it. It was
+# missing here while the macOS prep check already asked for it
+# (`python -c "import fbx, numpy, cv2, PIL"`), so a Windows box installed by
+# install.bat could not run that chain at all.
 numpy>=2.0,<3
 opencv-python-headless>=4.10,<6
+pillow>=10.0,<12
