@@ -13,19 +13,21 @@ outputs/
 __pycache__/
 *.py[cod]
 
-# Controlled inputs that are local-only (heavy FBX assets, not the committed
-# pool fixture already tracked at inputs/pool/models/pool.fbx).
-inputs/underwater/models/
-inputs/overhead/models/
-inputs/pool/models/*.fbx
-# The overlay's water_entry2 models and the overhead lane diagram are the same
-# kind of local drop, but they land beside committed fixtures rather than in a
-# directory of their own, so they need naming: ignore every FBX here and let
-# the two tracked ones (005/006, the old single-mesh regression path) back in.
-inputs/water_entry/models/*.fbx
-!inputs/water_entry/models/005.fbx
-!inputs/water_entry/models/006.fbx
-inputs/overhead/*.png
+# Calibration inputs are NOT in this repository — not the models, not the
+# textures, not one committed fixture. They were purged from history on
+# 2026-08-17: 225MB of pool photography that a 25MB source tree should not carry,
+# and versioning them here would have meant a second copy per FBX revision.
+# They travel out of band (see docs/DATA.md) and land in this tree by hand.
+#
+# Ignore everything under inputs/ except the runtime configs, which are small,
+# hand-maintained, and belong with the code that reads them. python.stitch
+# regenerates <line>_<backend>.conf per machine and clip directory, so only the
+# two hand-written reference configs are named back in.
+inputs/*
+!inputs/configs/
+inputs/configs/*
+!inputs/configs/macos_*.conf
+!inputs/configs/windows_*.conf
 
 # Prebuilt CUDA/GL backend deps (FFmpeg+cuvid, GLFW) — large binaries, fetched
 # locally by install.bat. downloads/ is its installer/zip cache (already covered
@@ -36,16 +38,7 @@ inputs/overhead/*.png
 # Agent worktrees and downloaded model weights are local scratch
 .claude/worktrees/
 *.pt
-# Runtime configs python.stitch regenerates per machine and per clip directory.
-# The committed ones (macos_*, windows_*) are hand-maintained references.
-inputs/configs/pool_*.conf
-inputs/configs/underwater_*.conf
-inputs/configs/overhead_*.conf
-# Loose model drops straight into inputs/ (before they are filed under a line)
-inputs/*.fbx
-inputs/*.fbm/
 
-# FBX 配套纹理目录（任意深度）是本地大资产，不提交；FBX SDK 还会在
-# 旁边生成 .mayaSwatches/ 缓存，一并忽略。
-**/*.fbm/
+# The FBX SDK drops .mayaSwatches/ caches beside any model it reads. Everything
+# under inputs/ is already ignored; this catches a model opened elsewhere.
 **/.mayaSwatches/

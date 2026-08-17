@@ -13,11 +13,11 @@
 | 数据集标注 | `scripts/run_label.sh` | `python/labeling/`、`python/keypoints/` |
 | 性能取证 | `scripts/run_bench.sh` | `python/benchmarks/` |
 
-`scripts\run_win.bat` 是 Windows 双击入口，走第一条链路——它与 `install.bat` 是两个例外：双击就要干活，所以不带参数即执行，用法写在顶部被 `goto` 跳过的说明区里。三个 `.sh` 入口不带参数或 `--help` 打印自己的用法，且说明只存在脚本顶部一处（用法函数把那段注释打出来，不再复制）；`run_bench.sh` 的选项清单是个例外，它带默认值太多，另用一段 heredoc。新增脚本请延续「一条链路一个入口」的口径，不要再按平台或语言拆。
+`scripts\run_win.bat` 是 Windows 双击入口，走第一条链路——它与 `install.bat` 是两个例外：双击就要干活，所以不带参数即执行，用法写在顶部被 `goto` 跳过的说明区里。三个 `.sh` 入口不带参数或 `--help` 打印自己的用法，且说明只存在脚本顶部一处（用法函数把那段注释打出来，不再复制）；`run_bench.sh` 的选项清单是个例外，它带默认值太多，另用一段 heredoc。另有两个辅助入口 `run_fbx_overlay.sh`（入水机位网格叠加 + 米数）与 `check_inputs.sh`（标定数据验收），同样把用法写在顶部注释里。新增脚本请延续「一条链路一个入口」的口径，不要再按平台或语言拆。
 
-Python 侧一个包一件事：`common/` 是跨链路共用的路径 / 图像 IO / CSV / HTML 页面骨架，`fbx_tools/` 是**唯一** import `fbx` 的地方，其余五个包对应上表四条链路——`labeling` 与 `keypoints` 同属标注链路。`tests/python/test_layout.py` 把这些约束写成了断言——包清单、每个包必须有 docstring、`import fbx` 只允许出现在 `fbx_tools/`、除 `common/paths.py` 外任何模块都不许自己算仓库根。测试在 `tests/`（`cpp/`、`python/`、`fixtures/`），运行时 config 在 `inputs/configs/`，`build/` 与 `outputs/` 是本机产物，不放手写源码或文档。
+Python 侧一个包一件事：`common/` 是跨链路共用的路径 / 图像 IO / CSV / HTML 页面骨架，`fbx_tools/` 是**唯一** import `fbx` 的地方，`dataset/` 看管不在 git 里的 `inputs/`，其余包对应上表四条链路——`labeling` 与 `keypoints` 同属标注链路。`tests/python/test_layout.py` 把这些约束写成了断言——包清单、每个包必须有 docstring、`import fbx` 只允许出现在 `fbx_tools/`、除 `common/paths.py` 外任何模块都不许自己算仓库根、**链路之间的 import 必须登记在 `CROSS_CHAIN_IMPORTS` 里**（目前四条，新增一条得先改断言）。测试在 `tests/`（`cpp/`、`python/`、`fixtures/`），运行时 config 在 `inputs/configs/`，`build/` 与 `outputs/` 是本机产物，不放手写源码或文档。
 
-五条相机线共用一套拼接代码，**差异全部是 `python/stitch/profiles.py` 里的数据**（模型、相机 id、网格排序、每米像素、融合方式、时间对齐策略、参考贴图来源）。加一条线应当只加一条 profile 记录；如果它需要一个新字段，那个字段本身就是需要先想清楚的东西。不要在 `python/stitch/` 的其他模块里按线路名分支。三个物理机位对应五条线：同一批相机换一份重建的 FBX 就是一条新线（`pool`/`pool2`、`underwater`/`underwater2`），产物各自落 `outputs/<line>/`，两条线才能逐帧对比。
+六条相机线共用一套拼接代码，**差异全部是 `python/stitch/profiles.py` 里的数据**（模型、相机 id、网格排序、每米像素、融合方式、时间对齐策略、参考贴图来源、泳道示意图、是否标米数）。加一条线应当只加一条 profile 记录；如果它需要一个新字段，那个字段本身就是需要先想清楚的东西。不要在 `python/stitch/` 的其他模块里按线路名分支。三个物理机位各有两条线：同一批相机换一份重建的 FBX 就是一条新线（`pool`/`pool2`、`underwater`/`underwater2`、`overhead`/`overhead2`），产物各自落 `outputs/<line>/`，两条线才能逐帧对比。
 
 相机数量、相机 ID、输出尺寸都是**数据而非代码**：`kMaxCameras = 16`（`cpp/core/include/swim/core/camera_capacity.hpp`），config 里 `source.<id>=<path>` 的声明顺序即通道顺序。新增机位布局应通过 config + `.swasset` 表达，不要在 C++ 里加分支。
 
@@ -126,6 +126,10 @@ Python 测试用 unittest：`.venv\Scripts\python.exe -m unittest discover -s te
 
 ## 安全与配置提示
 
-不要提交大型视频、`.swasset`、`third_party/` 预编译依赖、`build/` 或 `outputs/` 产物。以下都被 gitignore 但是运行必需，新机器靠 `install.bat` 补齐：`outputs/pool/mesh.json`（`CMakeLists.txt` 的硬依赖，缺了任何 target 都编不过；用 `run_stitch.sh pool extract` 生成）、`inputs/underwater/models/all.fbx` + `all.fbm/`、`third_party/{ffmpeg,glfw}`、`.venv`。
+不要提交大型视频、`.swasset`、`third_party/` 预编译依赖、`build/` 或 `outputs/` 产物。
+
+**`inputs/` 的标定数据整体不在 git 里**（除 `configs/`）：225MB 的两代 FBX 与实拍贴图，已于 2026-08-17 从全部历史抹除，也没有走 LFS——GitHub 免费额度 1GiB 存储 + 1GiB/月流量装不下按 FBX 版本迭代的它。数据带外搬运，两代差异与验收指南见 `docs/DATA.md`，搬完跑 `./scripts/check_inputs.sh [v1|v2]`；清单 `docs/data-manifest.tsv` 的路径由 profiles 导出而非手写（`python/dataset/`）。`.gitignore` 的写法是 `inputs/*` 全忽略再放行 `configs/` 里两组手写 config，**不要再往 inputs 加 `!` 例外**。
+
+其余被 gitignore 但运行必需的，新机器靠 `install.bat` 补齐：`outputs/pool/mesh.json`（`CMakeLists.txt` 的硬依赖，缺了任何 target 都编不过；用 `run_stitch.sh pool extract` 从 `pool.fbx` 生成，所以**只想编 C++ 也得先有 pool 的一代数据**）、`third_party/{ffmpeg,glfw}`、`.venv`。
 
 `inputs/configs/<line>_<backend>.conf` 是 `python.stitch` 每次按片段目录重新生成的，不要手工维护；手写的参考 config 只有 `macos_*.conf` 与 `windows_*.conf`。

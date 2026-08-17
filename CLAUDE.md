@@ -8,6 +8,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 本仓库存在一份非常详尽的仓库指南 `AGENTS.md`，权威口径以它和 README 为准。以下是最关键、最容易被新会话踩到的部分。
 
+## 标定数据不在 git 里
+
+`inputs/` 的 225MB 标定数据（两代 FBX + 实拍贴图）**已于 2026-08-17 从全部历史抹除**，`.git` 从 60MB 降到 1.8MB。**不入库，也不上 LFS**——GitHub 免费额度是 1GiB 存储 + 1GiB/月流量，一次完整 clone 就吃掉 225MB 流量，而这批数据按 FBX 版本迭代（underwater2 已四版），每版都存就是每版一份 61MB 副本。数据走带外搬运，仓库只留代码与验收依据。
+
+- 唯一入库的 inputs 是 `inputs/configs/` 的手写参考 config（`macos_*` / `windows_*`）；`.gitignore` 是 `inputs/*` 全忽略再放行它们，**不要再往 inputs 里加 `!` 例外**。
+- 两代差异、目录结构、按链路最少搬多少：`docs/DATA.md`。搬完用 `./scripts/check_inputs.sh [v1|v2]` 验收，它分辨 MISSING / TRUNCATED / **CONTENT**（同大小不同内容——贴图版本错了，照样能跑但缝会错位，最危险的一种）。
+- 验收清单 `docs/data-manifest.tsv` 的**路径由 profiles 导出、不手写**（`python/dataset/manifest.py`）；加一条线后 `./scripts/check_inputs.sh --write` 重新生成，校验脚本不用改。
+- **只想编 C++ 也得先有 pool 的一代数据**：`outputs/pool/mesh.json` 是 CMake 硬依赖，而它由 `run_stitch.sh pool extract` 从 `pool.fbx` 生成。
+
 ## 四条互不交叉的链路（一个脚本一条）
 
 | 链路 | 入口 | 代码 |
@@ -19,7 +28,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - 改哪条链路只看哪条；共用 `python/common/`（路径 / 图像 IO / CSV / HTML）与 `.venv`。**跨链路依赖只有两处**，都登记在 `tests/python/test_layout.py` 的 `CROSS_CHAIN_IMPORTS` 里（新增一条得先改那个断言）：`python/stitch/export_ref_tex.py` import `python.labeling.snapshots`（水下线没有按次片段可采首帧）；`python/stitch/extract.py` import `python.fbx_overlay.meters`（俯视线的网格就是标定物，米数规则不复制第二份）。
 - 三个 `.sh` 入口无参数或 `--help` 打印自身用法；`run_win.bat` / `install.bat` 是双击入口，无参数即执行。新增脚本延续「一条链路一个入口」口径。
-- 另有入水机位网格叠加入口 `scripts/run_fbx_overlay.sh`（见下）。
+- 另有两个辅助入口：`scripts/run_fbx_overlay.sh`（入水机位网格叠加，见下）与 `scripts/check_inputs.sh`（标定数据验收，`python/dataset/`）。
 
 ## 相机拼接关键口径
 
@@ -77,6 +86,11 @@ cd build/metal-release && ctest
 
 # FBX 网格叠加（入水机位两线：water_entry/water_entry2）
 ./scripts/run_fbx_overlay.sh [输出目录] [--line water_entry|water_entry2 ...]
+
+# 标定数据验收（inputs/ 不在 git，搬运后跑这个）
+./scripts/check_inputs.sh                             # 两代
+./scripts/check_inputs.sh v2                          # 只校验二代
+./scripts/check_inputs.sh --write                     # 重写清单（当前树已知正确时）
 
 # 快照整理/合成/标注/拼接统一入口（水下16 + overhead + femto/gemini + 6cam zcam）
 ./scripts/run_frames.sh products                      # 四类标定产物一键全出（配方在 PRODUCTS）
@@ -178,4 +192,4 @@ bash scripts/run_frames.sh products --dry-run       # 只打印要跑什么
 - 源码 UTF-8；注释解释**为什么**，尤其是「看起来可以简化但实际不能」的地方。
 - `scripts/**/*.bat` 必须 UTF-8 无 BOM + CRLF，第三行 `goto :run`，中文只放在被 goto 跳过的说明区，执行区注释一律 ASCII；改动后运行 `scripts\checks\check_bat_format.ps1`。
 - 提交信息 `type(scope): 简短祈使句`，与现有历史一致。
-- 不提交：`build/`、`outputs/`、`third_party/`、`*.pt`、大视频、`.swasset`、`.venv`、`inputs/{underwater,overhead}/models/`。`outputs/pool/mesh.json` 被 gitignore 却是 CMake 硬依赖（缺了任何 target 都编不过），用 `./scripts/run_stitch.sh pool extract` 生成。
+- 不提交：`build/`、`outputs/`、`third_party/`、`*.pt`、大视频、`.swasset`、`.venv`、**`inputs/` 除 `configs/` 外的全部**（见开头「标定数据不在 git 里」）。`outputs/pool/mesh.json` 被 gitignore 却是 CMake 硬依赖（缺了任何 target 都编不过），用 `./scripts/run_stitch.sh pool extract` 生成。

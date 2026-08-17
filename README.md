@@ -4,11 +4,21 @@
 附带三类标注与评测工具。C++20 实时核心 + Python 离线资产链，三个原生后端
 （Metal / D3D11 / CUDA-GL）共用同一份 `swim_core` 逻辑。
 
+## 先搬数据
+
+`inputs/` 的标定数据（225MB 的 FBX 与实拍贴图）**不在 git 里**，也不在 LFS——GitHub 的
+免费额度装不下按版本迭代的它。搬运与验收见 **[docs/DATA.md](docs/DATA.md)**，它同时讲清
+了两代标定的差异；搬完跑：
+
+```bash
+./scripts/check_inputs.sh          # 校验两代；只搬一代就 check_inputs.sh v1|v2
+```
+
 ## 这个仓库有四条互不交叉的链路
 
-要改哪一条，只需要看它那一行。四条链路共用 `python/common/` 与 `.venv`，此外只有一处跨链路依赖：
-水下线的参考贴图取自标注数据集的快照索引，所以 `python/stitch/export_ref_tex.py` import
-`python.labeling.snapshots`（那条线没有按次录制的片段可采首帧）。
+要改哪一条，只需要看它那一行。四条链路共用 `python/common/` 与 `.venv`；跨链路依赖只有
+几处，全部登记在 `tests/python/test_layout.py` 的 `CROSS_CHAIN_IMPORTS` 里并由测试断言，
+新增一条得先改那个断言。
 
 | 链路 | 做什么 | 入口 | 代码 |
 | --- | --- | --- | --- | --- |
@@ -16,6 +26,9 @@
 | **入水检测** | 单机位 YOLO-pose 预测、难例筛选、送标数据包 | `scripts/run_water_entry.sh` | `python/water_entry/` |
 | **数据集标注** | 浏览器标注器、快照合成、关键点复核页 | `scripts/run_label.sh` | `python/labeling/`、`python/keypoints/` |
 | **性能取证** | 48 格性能矩阵、十分钟 soak | `scripts/run_bench.sh` | `python/benchmarks/` |
+
+另有两个辅助入口：`scripts/run_fbx_overlay.sh`（入水机位网格叠加 + 米数）与
+`scripts/check_inputs.sh`（标定数据验收）。
 
 Windows 双击入口 `scripts\run_win.bat` 走的就是第一条链路。三个 `.sh` 入口不带参数或
 `--help` 就打印自己的完整用法，不必先读本文；两个 `.bat` 是双击入口，不带参数即执行，
@@ -439,9 +452,10 @@ swim_fbx_demo/
 │   ├── install.bat              # Windows 一键装环境
 │   └── checks/check_bat_format.ps1
 ├── inputs/
-│   ├── pool/{models,textures}/  # 项目自带的源模型与合成纹理
-│   ├── {underwater,overhead}/models/    # 重资产，本地未入库
 │   └── configs/                 # 运行时 config（<line>_<backend>.conf 由脚本生成）
+│                                #   其余 inputs/ 全部不在 git 里，见 docs/DATA.md
+├── docs/DATA.md                 # 标定数据两代差异 + 搬运与验收指南
+├── docs/data-manifest.tsv       # 85 个输入文件的 sha256（由 profiles 导出，不手写）
 ├── tests/{cpp,python,fixtures}/
 ├── cmake/                       # 编译告警 / sanitizer 开关，与两个 CLI 契约测试
 ├── requirements-win.txt         # Windows 核心 Python 依赖（install.bat 用）
@@ -496,9 +510,11 @@ FBX Python SDK 的发行包取决于操作系统、CPU 架构与 Python ABI，�
 ffmpeg -version
 ```
 
-以下都被 gitignore 但运行必需：`outputs/pool/mesh.json`（CMake 的硬依赖，缺了任何 target
-都编不过，用 `./scripts/run_stitch.sh pool extract` 生成）、
-`inputs/{underwater,overhead}/models/`、`third_party/{ffmpeg,glfw}`、`.venv`、
+以下都被 gitignore 但运行必需：**`inputs/` 的全部标定数据**（225MB，两代 FBX 与贴图，
+不在 git 也不在 LFS——见 [docs/DATA.md](docs/DATA.md) 的搬运与验收指南，搬完跑
+`./scripts/check_inputs.sh` 校验）、`outputs/pool/mesh.json`（CMake 的硬依赖，缺了任何
+target 都编不过，用 `./scripts/run_stitch.sh pool extract` 从 `pool.fbx` 生成——所以
+**只想编 C++ 也得先有 pool 的一代数据**）、`third_party/{ffmpeg,glfw}`、`.venv`、
 模型权重 `*.pt`。
 
 ## 测试

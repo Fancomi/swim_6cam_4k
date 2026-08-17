@@ -10,6 +10,7 @@ PACKAGES = {
     "fbx_tools": "the only place that imports the FBX SDK",
     "fbx_overlay": "FBX gridline metres, and the water-entry mesh overlays",
     "stitch": "the six camera lines: pool, underwater, overhead, + 2 each",
+    "dataset": "custody of inputs/, which git does not carry",
     "water_entry": "the single water-entry camera",
     "labeling": "browser labelers over the dataset snapshots",
     "keypoints": "COCO-17 annotation review pages",
@@ -17,7 +18,7 @@ PACKAGES = {
 }
 
 # Chains may lean on python/common freely; anything else crossing between them is
-# listed here, so a new one is a decision rather than a drift. Both entries are a
+# listed here, so a new one is a decision rather than a drift. Each entry is a
 # chain reaching for a PURE module (no FBX SDK, no OpenCV) that owns a rule it
 # would otherwise copy.
 CROSS_CHAIN_IMPORTS = {
@@ -27,6 +28,10 @@ CROSS_CHAIN_IMPORTS = {
     # the overhead lines' gridlines ARE the calibration target, so extract writes
     # their metres into the one mesh.json using fbx_overlay's rules.
     ("stitch", "fbx_overlay"),
+    # dataset asks both line registries which files a generation consists of, so
+    # the manifest is derived rather than typed.
+    ("dataset", "stitch"),
+    ("dataset", "fbx_overlay"),
 }
 
 
