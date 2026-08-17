@@ -25,27 +25,28 @@ Windows 双击入口 `scripts\run_win.bat` 走的就是第一条链路。三个 
 
 ## 相机拼接
 
-一套代码服务五条相机线，差异全部是 `python/stitch/profiles.py` 里的数据。三个物理机位，
-其中两个各有两条线 —— 同一批相机换一份重建的 FBX 就是一条新线，不是一个新步骤：
+一套代码服务六条相机线，差异全部是 `python/stitch/profiles.py` 里的数据。三个物理机位，
+每个各有两条线 —— 同一批相机换一份重建的 FBX 就是一条新线，不是一个新步骤：
 
-| | pool | pool2 | underwater | underwater2 | overhead |
-| --- | --- | --- | --- | --- | --- |
-| 机位 | 六路 4K 俯视泳池 | 同 pool（同批片段） | 水下 16 块平面 | 同 underwater（同批片段） | 水上 2 块平面 |
-| 视角 | 50m 泳池整体，两排机位 | 同 pool | 一条泳道，自下往上 | 同 underwater | 同一条泳道，自上往下 |
-| 模型 | `pool.fbx`（6 块） | `pool 1.fbx`（6 块，手工重建、网格更密） | `all.fbx`（16 块 + 杂物需过滤） | `8.15.fbx`（15 块，干净；换标定物后重建，去掉 A1） | `002.fbx`（2 块，干净） |
-| 世界镜像 | `neg_v`（Y 向下） | `neg_u`+`neg_v`（文件建成转 180°） | 无 | 无（朝向与 `all.fbx` 一致） | 无 |
-| 相机 | `cam3 cam2 cam1 cam4 cam5 cam6` | `cam5 cam6 cam4 cam1 cam3 cam2`（按贴图认，非按位置） | `underA16` … `underA1` | `underA16` … `underA2`（少 A1） | `overhead5`、`overhead6` |
-| 网格顺序 | FBX 声明序（两排，不能按 X 排） | FBX 声明序 | 世界 X 升序 | 世界 X 升序 | 世界 X 升序 |
-| 杂物过滤 | 不需要 | 不需要 | `planes_only` | **不能开**（平面在判据 Y 带外） | 不能开 |
-| 片段 | `*_camN.mp4` | 同 pool | `*_underAi.ts` | 同 underwater | `*_overheadN.ts` |
-| 源尺寸 | 3840×2160 | 3840×2160 | 1280×720 | 1280×720 | 3840×2160 |
-| 每米像素 | 100 | 100 | 240 | 240 | 170 |
-| 世界跨度 | 50m | 50m | 25.00m × 3.00m（每块宽 3.0~5.5m） | 25.05m × 2.75m（每块宽 1.5~3.5m） | — |
-| 相邻重叠 | 大面积斜向 | 大面积斜向 | 1.5~4.5m | 0.50~1.00m（14 对里 13 对恰 0.50m） | 1.77m |
-| 融合方式 | 距离变换羽化 | 距离变换羽化 | 竖直硬缝 + 120px 过渡 | 竖直硬缝 + 120px 过渡 | 竖直硬缝 + 85px 过渡 |
-| 参考贴图来源 | 片段首帧 | 片段首帧 | 数据集快照 | 片段首帧（快照已移入日期层） | 片段首帧 |
-| 时间对齐 | 无 manifest，按 t=0 | 同 pool | manifest 墙钟 | manifest 墙钟 | manifest 墙钟 |
-| 资产画布 | 5001×2101 | 5001×2101 | 6001×656 | 6001×661 | 4251×511 |
+| | pool | pool2 | underwater | underwater2 | overhead | overhead2 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 机位 | 六路 4K 俯视泳池 | 同 pool（同批片段） | 水下 16 块平面 | 同 underwater（同批片段） | 水上 2 块平面 | 同 overhead（同批片段） |
+| 视角 | 50m 泳池整体，两排机位 | 同 pool | 一条泳道，自下往上 | 同 underwater | 同一条泳道，自上往下 | 同 overhead |
+| 模型 | `pool.fbx`（6 块） | `pool 1.fbx`（6 块，手工重建、网格更密） | `all.fbx`（16 块 + 杂物需过滤） | `8.15.fbx`（15 块，干净；换标定物后重建，去掉 A1） | `002.fbx`（2 块，干净） | `25 水面.fbx`（2 块，手工重建：2.5m 泳道多一条中间拉线，200/340 三角） |
+| 世界镜像 | `neg_v`（Y 向下） | `neg_u`+`neg_v`（文件建成转 180°） | 无 | 无（朝向与 `all.fbx` 一致） | 无 | 无 |
+| 相机 | `cam3 cam2 cam1 cam4 cam5 cam6` | `cam5 cam6 cam4 cam1 cam3 cam2`（按贴图认，非按位置） | `underA16` … `underA1` | `underA16` … `underA2`（少 A1） | `overhead5`、`overhead6` | 同 overhead（按贴图相关认，corr 0.858/0.843） |
+| 网格顺序 | FBX 声明序（两排，不能按 X 排） | FBX 声明序 | 世界 X 升序 | 世界 X 升序 | 世界 X 升序 | 世界 X 升序 |
+| 杂物过滤 | 不需要 | 不需要 | `planes_only` | **不能开**（平面在判据 Y 带外） | 不能开 | 不能开 |
+| 片段 | `*_camN.mp4` | 同 pool | `*_underAi.ts` | 同 underwater | `*_overheadN.ts` | 同 overhead |
+| 源尺寸 | 3840×2160 | 3840×2160 | 1280×720 | 1280×720 | 3840×2160 | 3840×2160 |
+| 每米像素 | 100 | 100 | 240 | 240 | 170 | 170 |
+| 世界跨度 | 50m | 50m | 25.00m × 3.00m（每块宽 3.0~5.5m） | 25.05m × 2.75m（每块宽 1.5~3.5m） | — | 同 overhead（整体上移 11.47m，纯平移） |
+| 相邻重叠 | 大面积斜向 | 大面积斜向 | 1.5~4.5m | 0.50~1.00m（14 对里 13 对恰 0.50m） | 2.50m | 2.50m |
+| 融合方式 | 距离变换羽化 | 距离变换羽化 | 竖直硬缝 + 120px 过渡 | 竖直硬缝 + 120px 过渡 | 竖直硬缝 + 85px 过渡 | 竖直硬缝 + 85px 过渡 |
+| 参考贴图来源 | 片段首帧 | 片段首帧 | 数据集快照 | 片段首帧（快照已移入日期层） | 片段首帧 | 片段首帧 |
+| 时间对齐 | 无 manifest，按 t=0 | 同 pool | manifest 墙钟 | manifest 墙钟 | manifest 墙钟 | manifest 墙钟 |
+| 泳道示意图 | — | — | — | — | `label_line` | `label_line` |
+| 资产画布 | 5001×2101 | 5001×2101 | 6001×656 | 6001×661 | 4251×511 | 4251×511 |
 
 ### 七个步骤
 
@@ -58,9 +59,9 @@ pwsh scripts/run_stitch.ps1 LINE STEPS [选项…]    # Windows
 
 | 步骤 | 作用 | 产物 |
 | --- | --- | --- |
-| `extract` | 读 FBX，提取三角形 + UV，按线路的顺序排列 | `outputs/<line>/mesh.json` |
+| `extract` | 读 FBX，提取三角形 + UV，按线路的顺序排列；`overhead*` 另把网格线换算成真实米数写进同一份 JSON | `outputs/<line>/mesh.json` |
 | `tex` | 导出每台相机的参考贴图（无标定线）：pool/overhead 取片段首帧，underwater 取数据集快照 | `outputs/<line>/ref_tex/<camera>.png` |
-| `still` | 静图 + 网格诊断图 + 视野区间图 + 融合热图 | `outputs/<line>/stitch{,_grid,_spans,_heat}.png` |
+| `still` | 静图 + 网格诊断图 + 视野区间图 + 融合热图（带 `label_line` 的线再加一张示意图叠加） | `outputs/<line>/stitch{,_grid,_spans,_heat,_label}.png` |
 | `video` | 每路片段逐帧拼接 | `outputs/<line>/stitch.mp4` |
 | `asset` | 网格 JSON 编译成 GPU 资产 | `build/assets/generated/<line>.swasset` |
 | `build` | 构建 `swim_realtime` | `build/<backend>-release/`（macOS）、`build/win-<backend>/`（Windows） |
@@ -78,6 +79,9 @@ pwsh scripts/run_stitch.ps1 LINE STEPS [选项…]    # Windows
 # 俯视两路：设计师标定图的静图，与真实首帧的静图
 ./scripts/run_stitch.sh overhead extract,still
 ./scripts/run_stitch.sh overhead tex,still --real --video-dir /path/to/swb_20260730-161710_7
+
+# 俯视重建版（同一批相机、同一批片段，只换 FBX）
+./scripts/run_stitch.sh overhead2 extract,still
 
 # 换一批每相机贴图渲静图（如数据集算好的中值背景），产物名自己指定
 ./scripts/run_stitch.sh underwater2 still \

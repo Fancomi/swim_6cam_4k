@@ -156,20 +156,16 @@ def _put_text(image, text, pixel, color, font_scale, thickness, offset,
     """`text` anchored at `pixel`, offset clear of the mesh edge, on a dark pad.
 
     ``side`` says where the text sits relative to the anchor: "above" (X labels
-    anchored at a mesh edge the label clears), "below" (the same but for an
-    anchor at the image top, where "above" would draw off-canvas), or "left"
-    (Y labels anchored at the mesh's right end so the row meters run down the
-    right side). The dark backing keeps the text legible even where the camera
-    image or another mesh sits behind it.
+    anchored at a mesh edge the label clears) or "left" (Y labels anchored at the
+    mesh's right end so the row meters run down the right side). The dark backing
+    keeps the text legible even where the camera image or another mesh sits
+    behind it.
     """
     (text_width, text_height), baseline = cv2.getTextSize(
         text, LABEL_FONT, font_scale, thickness)
     if side == "above":
         origin = (int(pixel[0]) - text_width // 2,
                   int(pixel[1]) - offset - baseline)
-    elif side == "below":
-        origin = (int(pixel[0]) - text_width // 2,
-                  int(pixel[1]) + offset)
     else:                                   # "left": to the left of the anchor
         origin = (int(pixel[0]) - offset - text_width,
                   int(pixel[1]) + text_height // 2)

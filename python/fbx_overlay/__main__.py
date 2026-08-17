@@ -1,31 +1,30 @@
-"""Read one line's FBX meshes and draw their triangles over the camera image.
+"""Draw one line's FBX meshes over its camera image, with real-world metres.
 
 Lines mirror the stitch chain's model — a rebuilt FBX of the same cameras is a
-new line with a ``2`` suffix (water_entry -> water_entry2, overhead ->
-overhead2). Four exist::
+new line with a ``2`` suffix. Two exist, the water-entry cameras::
 
-    .venv/bin/python -m python.fbx_overlay                  # water_entry + water_entry2
+    .venv/bin/python -m python.fbx_overlay                  # both lines
     .venv/bin/python -m python.fbx_overlay --line water_entry2
     .venv/bin/python -m python.fbx_overlay --line water_entry2 --camera gemini
     .venv/bin/python -m python.fbx_overlay --camera femto   # compat: maps to water_entry2
-    .venv/bin/python -m python.fbx_overlay --line overhead2 --texture-set dataset
 
-Base-image lines (water_entry / water_entry2): each sub-camera's FBX contains
-every mesh for that camera — the full-frame quad whose texture IS the camera
-image, plus the vertical water-plane and water-surface meshes. The base image
-is extracted from the FBX, so no separate camera image argument is needed.
+Each sub-camera's FBX contains every mesh for that camera — the full-frame quad
+whose texture IS the camera image, plus the vertical water-plane and the water
+surface. The base image comes out of the FBX, so no image argument is needed.
 
-Canvas lines (overhead / overhead2): the two planes are stitched into one
-world-projected canvas, and the overlay + meters are drawn on that canvas
-against a lane-schematic reference (``label_line.png``).
+Products per camera: one composite, one image per mesh, and ``mesh.json`` — the
+full geometry with each vertex's real-world metres (see meters.py), which is what
+the algorithm side consumes. Meshes are classified automatically (classify.py)
+and drawn in per-kind colours with metre labels; ``--no-labels`` turns the text
+off and the JSON is still written.
 
-The meshes are classified automatically (see classify.py) and drawn over the
-base image in per-kind colors. Grid lines carry real-world meters (see
-meters.py) — written per line to ``mesh.json`` with the full geometry, and
-drawn as meter labels on the overlays (``--no-labels`` turns the text off, the
-JSON is still written). Use ``--mesh FBX NODE`` to draw one explicit mesh from
-any FBX (regression path). Output goes to a directory, one composite image per
-camera plus one image per mesh.
+The overhead planes are NOT here: seen from straight above they have no camera
+image to draw on, and they are stitch lines. Their metres land in that chain's
+one document per line — ``python -m python.stitch overhead2 extract`` writes
+``outputs/overhead2/mesh.json`` with the same annotation this package supplies
+(`lane_meters`), and ``still`` draws the panorama.
+
+Use ``--mesh FBX NODE`` to draw one explicit mesh from any FBX (regression path).
 """
 import argparse
 import json
@@ -36,9 +35,7 @@ from python.common.paths import OUTPUTS, display
 from python.fbx_tools import scene as fbx_scene
 
 from .classify import MeshKind, classify_mesh
-from .meters import annotate_document, grid_annotation, pool_rightmost
-from .overlay_stitch import (build_canvas, draw_canvas_overlay,
-                             draw_label_line_compare, resolve_texture_set)
+from .meters import annotate_document, grid_annotation
 from .profiles import (PROFILES, get as get_profile,
                        line_for_camera, names as profile_names)
 from .render import (OverlayError, draw_meshes, draw_meter_labels,
@@ -57,13 +54,13 @@ def _parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--line", action="append", choices=profile_names(),
-        help="line to render; may be repeated (default: base-image lines)",
+        help="line to render; may be repeated (default: every line)",
     )
     parser.add_argument(
         "--camera", action="append",
         help="sub-camera to render within a line; may be repeated "
              "(e.g. femto, gemini, water_entry_a), or a line name for the "
-             "compat shim (e.g. overhead)",
+             "compat shim",
     )
     parser.add_argument(
         "--image", type=Path, default=None,
@@ -72,7 +69,7 @@ def _parser():
     )
     parser.add_argument(
         "--output", type=Path, default=None,
-        help="output directory (default: outputs/<line>)",
+        help="output directory (default: outputs/<line>/overlay)",
     )
     parser.add_argument(
         "--mesh", action="append", nargs=2, metavar=("FBX", "NODE"),
@@ -88,20 +85,6 @@ def _parser():
         "--no-labels", action="store_true",
         help="skip meter labels on the rendered overlays (mesh.json is still "
              "written)",
-    )
-    parser.add_argument(
-        "--texture-set", default=None,
-        help="overhead texture set: 'fbx' (embedded) or 'dataset' (default: "
-             "the profile's first set)",
-    )
-    parser.add_argument(
-        "--label-line", type=Path, default=None,
-        help="overhead reference image to compare the overlay against "
-             "(default: the profile's label_line)",
-    )
-    parser.add_argument(
-        "--no-label-line", action="store_true",
-        help="skip the label_line comparison image",
     )
     return parser
 
@@ -161,142 +144,58 @@ def _resolve_base_image(camera, meshes, image_arg):
     return load_texture(matches[0], "base image")
 
 
-def _camera_paths(out_dir, camera, meshes):
-    """(composite, per-mesh paths, mesh.json) for one camera's products.
-
-    Products live in ``<out_dir>/<camera>/`` — meshes are named the same
-    across cameras (e.g. Plane006 in both), so a flat directory would collide.
-    """
-    cam_dir = out_dir / camera.name
-    composite = cam_dir / f"{camera.name}_mesh_overlay.png"
-    per_mesh = {}
+def _draw(base, meshes, grids, args):
+    """`base` with `meshes` outlined in their kind colours, labels unless off."""
+    image = draw_meshes(
+        base, meshes, colors=[KIND_COLORS[m["kind"]] for m in meshes],
+        v_origin=args.uv_v_origin, thickness=args.line_thickness,
+        fill_alpha=args.fill_alpha, vertex_radius=args.vertex_radius,
+    )
+    if args.no_labels:
+        return image
     for mesh in meshes:
-        if mesh["kind"] is MeshKind.FULL_FRAME:
-            continue        # the base image; no separate product
-        per_mesh[mesh["node"]] = cam_dir / (
-            f"{camera.name}_{mesh['node']}_{mesh['kind'].value}_overlay.png"
-        )
-    return composite, per_mesh, cam_dir / "mesh.json"
+        image = draw_meter_labels(image, mesh, grids[mesh["node"]],
+                                  v_origin=args.uv_v_origin,
+                                  color=KIND_COLORS[mesh["kind"]])
+    return image
 
 
 def _render_camera(line, camera, args, out_dir):
-    """Render all of one sub-camera's products; returns the number of images."""
+    """One sub-camera: mesh.json, the composite, and one image per mesh.
+
+    Products live in ``<out_dir>/<camera>/`` — meshes are named the same across
+    cameras (e.g. Plane006 in both), so a flat directory would collide. The
+    document's camera field is the LINE name, so a multi-camera line's JSONs
+    self-identify.
+
+    mesh.json is written first and independently of --no-labels: it is the
+    deliverable, the images are the inspection aid.
+    """
     meshes = _discover_meshes(camera.fbx)
-    base = _resolve_base_image(camera, meshes, args.image)
-    composite, per_mesh, mesh_json = _camera_paths(out_dir, camera, meshes)
+    cam_dir = out_dir / camera.name
+    document = annotate_document(line, display(camera.fbx), meshes)
+    mesh_json = cam_dir / "mesh.json"
+    cam_dir.mkdir(parents=True, exist_ok=True)
+    mesh_json.write_text(json.dumps(document, indent=2) + "\n",
+                         encoding="utf-8")
 
     drawn = [mesh for mesh in meshes
              if mesh["kind"] is not MeshKind.FULL_FRAME]
     grids = {mesh["node"]: grid_annotation(mesh) for mesh in drawn}
+    base = _resolve_base_image(camera, meshes, args.image)
 
-    # The meters annotation is a deliverable on its own, independent of whether
-    # the labels are drawn — always write it. The camera field is the LINE name
-    # so a multi-camera line's JSONs self-identify.
-    document = annotate_document(line, display(camera.fbx), drawn)
-    mesh_json.parent.mkdir(parents=True, exist_ok=True)
-    mesh_json.write_text(json.dumps(document, indent=2) + "\n",
-                         encoding="utf-8")
-
-    colors = [KIND_COLORS[mesh["kind"]] for mesh in drawn]
-    composite_image = draw_meshes(
-        base, drawn, colors=colors,
-        v_origin=args.uv_v_origin,
-        thickness=args.line_thickness,
-        fill_alpha=args.fill_alpha,
-        vertex_radius=args.vertex_radius,
-    )
-    if not args.no_labels:
-        for mesh in drawn:
-            composite_image = draw_meter_labels(
-                composite_image, mesh, grids[mesh["node"]],
-                v_origin=args.uv_v_origin,
-                color=KIND_COLORS[mesh["kind"]])
-    write_image(composite, composite_image, "mesh overlay")
-
+    image = _draw(base, drawn, grids, args)
+    composite = cam_dir / f"{camera.name}_mesh_overlay.png"
+    write_image(composite, image, "mesh overlay")
     for mesh in drawn:
-        path = per_mesh[mesh["node"]]
-        single = draw_meshes(
-            base, [mesh], colors=[KIND_COLORS[mesh["kind"]]],
-            v_origin=args.uv_v_origin,
-            thickness=args.line_thickness,
-            fill_alpha=args.fill_alpha,
-            vertex_radius=args.vertex_radius,
-        )
-        if not args.no_labels:
-            single = draw_meter_labels(
-                single, mesh, grids[mesh["node"]],
-                v_origin=args.uv_v_origin,
-                color=KIND_COLORS[mesh["kind"]])
-        write_image(path, single, "mesh overlay")
-
+        write_image(cam_dir / f"{camera.name}_{mesh['node']}_"
+                              f"{mesh['kind'].value}_overlay.png",
+                    _draw(base, [mesh], grids, args), "mesh overlay")
     for mesh in drawn:
-        print(f"{camera.name}/{mesh['node']} ({mesh['kind'].value}): "
+        print(f"{line}/{mesh['node']} ({mesh['kind'].value}): "
               f"{len(mesh['triangles'])} triangles")
-    print(f"wrote {composite} ({composite_image.shape[1]}x"
-          f"{composite_image.shape[0]})")
     print(f"wrote {mesh_json}")
-    return 1 + len(per_mesh)
-
-
-def _render_overhead_canvas(profile, args, out_dir):
-    """Stitch the overhead planes into a canvas and overlay the grid + meters.
-
-    Products land in ``<out_dir>/`` (default ``outputs/<line>/``, e.g.
-    ``outputs/overhead2/``):
-    ``<line>_mesh_overlay_<set>.png`` (composite + edges + labels),
-    per-plane ``<line>_<node>_plane_overlay_<set>.png``, and a side-by-side
-    comparison against ``label_line.png``. The mesh.json (geometry + meters) is
-    texture-set independent, so it is written once.
-    """
-    if args.image is not None:
-        raise OverlayError(
-            "--image is not valid for the overhead canvas mode; the composite "
-            "is built from the texture set instead")
-
-    meshes = _discover_meshes(profile.fbx)
-    tex_dir, tex_names, set_name = resolve_texture_set(profile,
-                                                       args.texture_set)
-    canvas, _layers, _weights, composite = build_canvas(
-        profile, meshes, tex_dir, tex_names)
-
-    rightmost = pool_rightmost(meshes)
-    grids = {mesh["node"]: grid_annotation(mesh, rightmost_x=rightmost)
-             for mesh in meshes}
-    document = annotate_document(profile.name, display(profile.fbx), meshes,
-                                 rightmost)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "mesh.json").write_text(
-        json.dumps(document, indent=2) + "\n", encoding="utf-8")
-
-    overlay = composite.copy()
-    if not args.no_labels:
-        overlay = draw_canvas_overlay(overlay, meshes, canvas, grids)
-    composite_path = out_dir / f"{profile.name}_mesh_overlay_{set_name}.png"
-    write_image(composite_path, overlay, "mesh overlay")
-
-    for mesh in meshes:
-        single = composite.copy()
-        if not args.no_labels:
-            single = draw_canvas_overlay(single, [mesh], canvas,
-                                         {mesh["node"]: grids[mesh["node"]]})
-        path = out_dir / (f"{profile.name}_{mesh['node']}_plane_overlay_"
-                          f"{set_name}.png")
-        write_image(path, single, "mesh overlay")
-
-    if not args.no_label_line and profile.label_line is not None:
-        label_path = args.label_line or profile.label_line
-        draw_label_line_compare(
-            overlay, label_path,
-            out_dir / f"{profile.name}_label_line_compare_{set_name}.png")
-
-    for mesh in meshes:
-        print(f"{profile.name}/{mesh['node']} ({mesh['kind'].value}): "
-              f"{len(mesh['triangles'])} triangles")
-    print(f"wrote {composite_path} "
-          f"({overlay.shape[1]}x{overlay.shape[0]}) "
-          f"[{set_name}]")
-    print(f"wrote {out_dir / 'mesh.json'}")
-    return 1 + len(meshes)
+    print(f"wrote {composite} ({image.shape[1]}x{image.shape[0]})")
 
 
 def _render_explicit(specs, args, out_dir):
@@ -332,12 +231,10 @@ def _render_explicit(specs, args, out_dir):
 
 
 def _select_lines(args):
-    """The lines to render, from --line / --camera / the default.
+    """The lines to render, from --line / --camera / the default (all of them).
 
-    ``--line`` selects lines directly. ``--camera`` filters within a line; a
-    camera name with no ``--line`` resolves to its owning line (compat shim, so
-    today's ``--camera femto`` keeps working). Nothing given renders the
-    base-image lines (water_entry + water_entry2).
+    ``--camera`` filters within a line; a camera name with no ``--line`` resolves
+    to its owning line (compat shim, so today's ``--camera femto`` keeps working).
     """
     if args.line:
         return list(args.line)
@@ -345,7 +242,7 @@ def _select_lines(args):
         lines = []
         for name in args.camera:
             # A camera name resolves to its owning line (femto -> water_entry2);
-            # a bare line name (overhead) is accepted as-is.
+            # a bare line name is accepted as-is.
             try:
                 line = line_for_camera(name)
             except SystemExit:
@@ -353,21 +250,19 @@ def _select_lines(args):
             if line is not None and line not in lines:
                 lines.append(line)
         return lines
-    return [name for name in profile_names()
-            if PROFILES[name].mode != "canvas"]
+    return profile_names()
 
 
 def main(argv=None):
     args = _parser().parse_args(argv)
     try:
         if args.mesh:
-            out_dir = args.output or OUTPUTS / "water_entry"
+            out_dir = args.output or OUTPUTS / "water_entry" / "overlay"
             _render_explicit(args.mesh, args, out_dir)
             return 0
 
         wanted = set(args.camera or ())
         lines = _select_lines(args)
-        count = 0
         for name in lines:
             profile = get_profile(name)
             # --output overrides; otherwise a single line uses its own dir and
@@ -375,13 +270,9 @@ def main(argv=None):
             out_dir = (args.output if len(lines) == 1 and args.output
                        else (args.output / name if args.output
                              else profile.out_dir))
-            if profile.mode == "canvas":
-                count += _render_overhead_canvas(profile, args, out_dir)
-            else:
-                cameras = [camera for camera in profile.cameras
-                           if not wanted or camera.name in wanted]
-                for camera in cameras:
-                    count += _render_camera(name, camera, args, out_dir)
+            for camera in profile.cameras:
+                if not wanted or camera.name in wanted:
+                    _render_camera(name, camera, args, out_dir)
         return 0
     except (MediaError, OverlayError, fbx_scene.FbxError) as error:
         print(f"error: {error}")

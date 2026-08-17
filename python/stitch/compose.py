@@ -14,6 +14,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from python.common.media import read_image
 from python.stitch.profiles import StepError
 
 
@@ -86,11 +87,6 @@ class Canvas:
         return np.array([[(v["pos"][0] - self.xmin) * self.ppm,
                           self.height - 1 - (v["pos"][1] - self.ymin) * self.ppm]
                          for v in triangle], dtype)
-
-    def point(self, x, y):
-        """One world point as a canvas pixel (y down from the top)."""
-        return (int(round((x - self.xmin) * self.ppm)),
-                int(round(self.height - 1 - (y - self.ymin) * self.ppm)))
 
     def __repr__(self):
         return f"Canvas({self.width}x{self.height} @ {self.ppm:.2f}px/m)"
@@ -419,19 +415,16 @@ def draw_spans(image, spans, labels, colours=None, levels=2, scale=None,
     return image
 
 
-def draw_grid(image, meshes, canvas, colors=None):
+def draw_grid(image, meshes, canvas):
     """Overlay each mesh's triangle edges and its region outline.
 
     Projected exactly the way build_remap does, so a misalignment in the diagnostic
     is a real misalignment and not a second projection's rounding.
 
     Deliberately carries no camera names: sixteen sets of triangle edges is already
-    a dense picture, and identity is a separate question answered by draw_spans.
-
-    `colors` overrides the per-mesh palette; overhead draws both planes in one
-    colour so the overlay reads against its lane-schematic reference."""
+    a dense picture, and identity is a separate question answered by draw_spans."""
     for index, mesh in enumerate(meshes):
-        colour = (colors or LANE_COLOURS)[index % len(colors or LANE_COLOURS)]
+        colour = LANE_COLOURS[index % len(LANE_COLOURS)]
         region = np.zeros(canvas.shape, np.uint8)
         for triangle in mesh["triangles"]:
             dst = canvas.project(triangle, np.int32)
@@ -441,6 +434,28 @@ def draw_grid(image, meshes, canvas, colors=None):
                                        cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(image, contours, -1, colour, 3, cv2.LINE_AA)
     return image
+
+
+def draw_label_line(image, reference_path, background_min=200):
+    """Stamp a lane schematic's ink onto the composite, paper left transparent.
+
+    The schematic is the only reference that carries the distance marks, so the
+    check it answers — do the designer's metres land on the lane the photograph
+    shows — needs the two in ONE frame at one scale, not side by side. It is
+    resized to the composite (the aspect ratios agree within 0.4%) and every
+    pixel light in all three channels is its paper, dropped so the pool shows
+    through.
+
+    Drawn on the plain composite, never on the grid: the mesh edges and the
+    schematic's own lane lines are the same ink at the same places, and stacking
+    them makes a disagreement unreadable."""
+    reference = read_image(reference_path, "label line")
+    reference = cv2.resize(reference, (image.shape[1], image.shape[0]),
+                           interpolation=cv2.INTER_LINEAR)
+    ink = ~np.all(reference >= background_min, axis=2)
+    result = image.copy()
+    result[ink] = reference[ink]
+    return result
 
 
 def fusion_heatmap(weights, canvas):

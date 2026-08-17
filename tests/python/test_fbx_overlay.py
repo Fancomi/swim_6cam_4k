@@ -10,8 +10,7 @@ import numpy as np
 from python.common.media import MediaError
 from python.fbx_overlay.classify import (MeshKind, classify_mesh)
 from python.fbx_overlay.meters import (annotate_document, grid_annotation,
-                                       inline_vertex_meters, label_anchors,
-                                       label_anchors_world)
+                                       inline_vertex_meters, label_anchors)
 from python.fbx_overlay.render import (OverlayError, draw_mesh, draw_meshes,
                                        draw_meter_labels, load_texture,
                                        uv_to_pixel)
@@ -35,17 +34,6 @@ CAMERAS = {
         ("Plane007", 126, MeshKind.VERTICAL),
         ("Plane009", 64, MeshKind.SURFACE),
         ("Rectangle005", 2, MeshKind.FULL_FRAME),
-    )),
-}
-# The overhead/overhead2 canvas lines: name -> (fbx, [(node, triangles)]).
-OVERHEAD_LINES = {
-    "overhead": (ROOT / "inputs/overhead/models/002.fbx", (
-        ("Plane001", 204),
-        ("Plane002", 120),
-    )),
-    "overhead2": (ROOT / "inputs/overhead/models/25 水面.fbx", (
-        ("Plane002", 200),
-        ("Plane011", 340),
     )),
 }
 
@@ -348,24 +336,6 @@ class MetersTest(unittest.TestCase):
                          [(32.19, 0.0), (33.065, 0.875),
                           (33.815, 1.625), (34.69, 2.5)])
 
-    def test_label_anchors_world_positions(self):
-        def uv_of(x, y):
-            return ((x + 2.5) / 5.0, 0.5)
-        mesh = _grid_mesh(_VERTICAL_XS, _VERTICAL_YS, uv_of)
-        mesh["kind"] = MeshKind.VERTICAL
-        grid = grid_annotation(mesh)
-        anchors = label_anchors_world(mesh, grid)
-        x_anchors = [a for a in anchors if a[3] == "above"]
-        y_anchors = [a for a in anchors if a[3] == "left"]
-        self.assertEqual(len(x_anchors), 10)
-        self.assertEqual(len(y_anchors), 6)
-        # X anchors at the column's physical top edge (max y); Y at the row's
-        # right end (max x) — mirrors label_anchors' UV placement.
-        for wx, wy, _text, side in x_anchors:
-            self.assertAlmostEqual(wy, _VERTICAL_YS[-1], places=3)
-        for wx, wy, _text, side in y_anchors:
-            self.assertAlmostEqual(wx, _VERTICAL_XS[-1], places=3)
-
 
 class MetersDocumentTest(unittest.TestCase):
     def _document(self):
@@ -474,14 +444,6 @@ def _have_camera_assets(camera):
     return spec.fbx.is_file() and (
         (texture / "333.jpg").is_file() if camera == "femto"
         else (texture / "gemini_camera_1_mask_merged.png").is_file())
-
-
-def _have_overhead_assets(line):
-    """True when the canvas line's FBX + .fbm textures exist."""
-    from python.fbx_overlay.profiles import get as get_profile
-    profile = get_profile(line)
-    return profile.fbx.is_file() and profile.tex_dir.is_dir() and any(
-        profile.tex_dir.iterdir())
 
 
 @unittest.skipUnless(
@@ -669,107 +631,6 @@ class CameraAssetTest(unittest.TestCase):
             self.assertGreater(np.count_nonzero(labeled[:, :, 2] >= 120), 0)
             self.assertGreater(
                 np.count_nonzero(np.abs(labeled.astype(int) - plain.astype(int))), 0)
-
-
-def _have_overhead_assets(line):
-    from python.fbx_overlay.profiles import get as get_profile
-    profile = get_profile(line)
-    return profile.fbx.is_file() and profile.tex_dir.is_dir() and any(
-        profile.tex_dir.iterdir())
-
-
-@unittest.skipUnless(
-    all(_have_overhead_assets(line) for line in OVERHEAD_LINES),
-    "overhead/overhead2 FBX or their .fbm textures are not available",
-)
-class OverheadAssetTest(unittest.TestCase):
-    def test_planes_discover_and_classify(self):
-        from python.fbx_overlay.__main__ import _discover_meshes
-        from python.fbx_overlay.profiles import get as get_profile
-        for line, (fbx, expected) in OVERHEAD_LINES.items():
-            profile = get_profile(line)
-            self.assertEqual(profile.fbx, fbx)
-            meshes = _discover_meshes(profile.fbx)
-            by_node = {m["node"]: m for m in meshes}
-            self.assertEqual(set(by_node), {node for node, _t in expected})
-            for node, triangles in expected:
-                self.assertEqual(len(by_node[node]["triangles"]), triangles)
-                self.assertIs(by_node[node]["kind"], MeshKind.PLANE)
-
-    def test_cli_overhead_products(self):
-        from python.fbx_overlay.__main__ import main
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory)
-            self.assertEqual(main(["--line", "overhead",
-                                   "--output", str(out)]), 0)
-            self.assertTrue((out / "overhead_mesh_overlay_fbx.png").is_file())
-            self.assertTrue(
-                (out / "overhead_Plane001_plane_overlay_fbx.png").is_file())
-            self.assertTrue(
-                (out / "overhead_Plane002_plane_overlay_fbx.png").is_file())
-            self.assertTrue((out / "overhead_label_line_compare_fbx.png").is_file())
-            # The compare image is the canvas width doubled side by side.
-            compare = cv2.imread(str(out / "overhead_label_line_compare_fbx.png"))
-            self.assertEqual(compare.shape[1], 4255 * 2)
-            doc = json.loads((out / "mesh.json").read_text(encoding="utf-8"))
-            self.assertEqual(doc["camera"], "overhead")
-
-    def test_cli_overhead2_products(self):
-        from python.fbx_overlay.__main__ import main
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory)
-            self.assertEqual(main(["--line", "overhead2",
-                                   "--output", str(out)]), 0)
-            self.assertTrue((out / "overhead2_mesh_overlay_fbx.png").is_file())
-            self.assertTrue(
-                (out / "overhead2_Plane002_plane_overlay_fbx.png").is_file())
-            self.assertTrue(
-                (out / "overhead2_Plane011_plane_overlay_fbx.png").is_file())
-            self.assertTrue(
-                (out / "overhead2_label_line_compare_fbx.png").is_file())
-            doc = json.loads((out / "mesh.json").read_text(encoding="utf-8"))
-            self.assertEqual(doc["camera"], "overhead2")
-            by_node = {m["node"]: m for m in doc["meshes"]}
-            plane011 = by_node["Plane011"]
-            xs = {v["meter"]["x"] for t in plane011["triangles"]
-                  for v in t if "x" in v.get("meter", {})}
-            ys = {v["meter"]["y"] for t in plane011["triangles"]
-                  for v in t if "y" in v.get("meter", {})}
-            self.assertAlmostEqual(min(xs), 0.0, places=4)
-            self.assertAlmostEqual(max(xs), 17.5, places=4)
-            self.assertEqual({round(y, 3) for y in ys},
-                             {0.0, 0.875, 1.625, 2.5})
-
-    def test_cli_overhead2_dataset_texture_set(self):
-        from python.fbx_overlay.__main__ import main
-        from python.fbx_overlay.profiles import get as get_profile
-        import tempfile
-
-        dataset_dir = get_profile("overhead2").texture_sets[1][1]
-        if not (dataset_dir / "overhead5_merged.png").is_file():
-            self.skipTest("dataset texture set not available")
-        with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory)
-            self.assertEqual(main(["--line", "overhead2",
-                                   "--texture-set", "dataset",
-                                   "--output", str(out)]), 0)
-            self.assertTrue(
-                (out / "overhead2_mesh_overlay_dataset.png").is_file())
-
-    def test_camera_overhead_compat_shim(self):
-        from python.fbx_overlay.__main__ import main
-        import tempfile
-
-        # Bare --camera overhead (no --line) maps to the overhead line.
-        with tempfile.TemporaryDirectory() as directory:
-            out = Path(directory)
-            self.assertEqual(main(["--camera", "overhead",
-                                   "--output", str(out)]), 0)
-            self.assertTrue((out / "overhead_mesh_overlay_fbx.png").is_file())
 
 
 if __name__ == "__main__":

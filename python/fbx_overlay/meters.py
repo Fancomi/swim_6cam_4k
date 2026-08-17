@@ -18,7 +18,7 @@ testable on a machine that only has Python.
 """
 from collections import Counter
 
-from .classify import MeshKind
+from .classify import MeshKind, classify_mesh
 
 
 # Rounding key shared with render.py's label lookup — a value grouped here must
@@ -198,29 +198,44 @@ def pool_rightmost(meshes):
     return max(xs) if xs else 0.0
 
 
-def annotate_document(camera, source, meshes, rightmost_x=None):
-    """The per-camera JSON document dict: {"source", "camera", "meshes"}.
+def annotate_meshes(meshes):
+    """Annotate `meshes` IN PLACE with their kind and per-vertex metres.
 
-    Each entry is a shallow copy of the extract_mesh dict plus "kind" (a plain
-    string for JSON); its "triangles" are replaced by the vertex-annotated copy
-    from ``inline_vertex_meters`` so each vertex carries its own meter. FULL_FRAME
-    meshes are skipped — they only supply the base image. When any mesh is a
-    PLANE, the pool-wide rightmost X is derived unless passed in. Pure and
-    json.dumps-able.
+    The one entry point for "a list of extracted meshes gains metres": each mesh
+    gets a ``kind`` string (classified, never a hard-coded node name) and its
+    triangles are replaced by the vertex-annotated copies. Any mesh already
+    carrying a ``kind`` keeps it, so a caller that classified first is not
+    re-guessed.
+
+    FULL_FRAME meshes are only a base image and have no grid — they are left
+    untouched. When any mesh is a PLANE the pool-wide rightmost X is derived
+    across the whole list, because a plane's X metres are measured from the
+    pool's right end rather than its own.
     """
-    has_plane = any(mesh["kind"] is MeshKind.PLANE for mesh in meshes)
-    if rightmost_x is None and has_plane:
-        rightmost_x = pool_rightmost(meshes)
-    document = {"source": source, "camera": camera, "meshes": []}
-    for mesh in meshes:
-        kind = mesh["kind"]
+    kinds = [_as_kind(mesh.get("kind"), mesh) if mesh.get("kind") is not None
+             else classify_mesh(mesh) for mesh in meshes]
+    rightmost = (pool_rightmost(meshes)
+                 if any(kind is MeshKind.PLANE for kind in kinds) else None)
+    for mesh, kind in zip(meshes, kinds):
+        mesh["kind"] = kind.value
         if kind is MeshKind.FULL_FRAME:
             continue
-        entry = dict(mesh)
-        entry["kind"] = kind.value
-        entry["triangles"] = inline_vertex_meters(mesh, kind, rightmost_x)
-        document["meshes"].append(entry)
-    return document
+        mesh["triangles"] = inline_vertex_meters(mesh, kind, rightmost)
+    return meshes
+
+
+def annotate_document(camera, source, meshes):
+    """The per-line JSON document dict: {"source", "camera", "meshes"}.
+
+    ``annotate_meshes`` applied to shallow copies, so the caller's meshes keep
+    their raw triangles (the renderer still needs them, and their ``kind`` stays
+    a MeshKind rather than a string) and FULL_FRAME entries are dropped — they
+    only supply the base image. Pure and json.dumps-able.
+    """
+    entries = annotate_meshes([dict(mesh) for mesh in meshes])
+    return {"source": source, "camera": camera,
+            "meshes": [entry for entry in entries
+                       if entry["kind"] != MeshKind.FULL_FRAME.value]}
 
 
 def inline_vertex_meters(mesh, kind=None, rightmost_x=None):
@@ -260,51 +275,6 @@ def inline_vertex_meters(mesh, kind=None, rightmost_x=None):
             new_triangle.append(new)
         out.append(new_triangle)
     return out
-
-
-def label_anchors_world(mesh, grid):
-    """Deduplicated [(world_x, world_y, text, side)] for canvas-projected labels.
-
-    Like ``label_anchors`` but in WORLD coordinates (pos[0]/pos[1]) instead of
-    UV, for the overhead canvas renderer which projects world -> canvas pixels.
-    X labels anchor at the column's top edge (max pos[1]); Y labels at the
-    row's right end (max pos[0]), deduplicated by meter.
-    """
-    anchors = []
-    if not grid:
-        return anchors
-    columns = {}
-    rows = {}
-    for triangle in mesh.get("triangles", ()):
-        for vertex in triangle:
-            x = round(vertex["pos"][0], METER_PRECISION)
-            y = round(vertex["pos"][1], METER_PRECISION)
-            columns.setdefault(x, []).append(vertex["pos"])
-            rows.setdefault(y, []).append(vertex["pos"])
-    for entry in grid.get("x", ()):
-        points = columns.get(round(entry["x"], METER_PRECISION))
-        if not points:
-            continue
-        wx = sum(p[0] for p in points) / len(points)
-        wy = max(p[1] for p in points)           # the column's top edge
-        anchors.append((wx, wy, f"{entry['meter']:g}", "above"))
-    seen = set()
-    for entry in grid.get("y", ()):
-        meter = entry["meter"]
-        if meter in seen:
-            continue
-        seen.add(meter)
-        points = []
-        for y, group in rows.items():
-            if any(round(e["y"], METER_PRECISION) == y and e["meter"] == meter
-                   for e in grid["y"]):
-                points.extend(group)
-        if not points:
-            continue
-        wx = max(p[0] for p in points)           # the row's right end
-        wy = sum(p[1] for p in points) / len(points)
-        anchors.append((wx, wy, f"{meter:g}", "left"))
-    return anchors
 
 
 def label_anchors(mesh, grid):

@@ -1,7 +1,7 @@
 """One record per camera line. Every difference between lines lives here.
 
-A line is "N planes covering one area, driven by N cameras". Five exist, covering
-three physical areas — two of them twice, because a rebuilt FBX of the same
+A line is "N planes covering one area, driven by N cameras". Six exist, covering
+three physical areas — each of them twice, because a rebuilt FBX of the same
 cameras is a new line, not a new step:
 
     pool         6 cameras over a 50m pool, two rows, distance-feathered
@@ -9,9 +9,10 @@ cameras is a new line, not a new step:
     underwater   16 planes down one lane, seen from below, hard vertical seams
     underwater2  the same 16, re-surveyed against a changed calibration target
     overhead     2 planes down the same lane, seen from above
+    overhead2    the same 2, rebuilt with the 2.5m lane's middle line
 
 They share every step — extract, still, video, asset, build, live — and differ
-only in the fields below. Adding a sixth line means adding a record here and
+only in the fields below. Adding a seventh line means adding a record here and
 nothing else; if it needs a new field, that field is the thing to think about.
 
 Field pairs that look redundant but are not:
@@ -99,6 +100,17 @@ class Profile:
     still_margin: int = 2
     sync: str = "none"                   # "manifest" | "none"
     ref_tex: str = "video"               # "snapshot" | "video"
+    # A lane schematic carrying the designer's distance marks. The still stamps
+    # its ink on the composite as a fifth product, which is the only way to check
+    # the declared metres against the photographed lane. None for lines that
+    # have no schematic.
+    label_line: Path | None = None
+    # Annotate the mesh JSON's gridlines with real-world metres (see
+    # python/fbx_overlay/meters.py). On for the overhead lines, whose planes ARE
+    # the calibration target the algorithm side measures against; off for the
+    # rest, whose meshes carry no agreed distance marks and whose JSON the
+    # runtime asset is compiled from byte-for-byte.
+    lane_meters: bool = False
     # Path, or a zero-argument callable resolved at use time (see
     # still_textures) for a directory that follows an environment variable.
     still_tex_dir: Path | None = None
@@ -355,6 +367,38 @@ PROFILES = {
         # apart: the same swimmer from above and below.
         sync="manifest",
         ref_tex="video",
+        label_line=INPUTS / "overhead" / " label_line.png",
+        lane_meters=True,
+    ),
+    # Same two cameras and the same clips as `overhead`, rebuilt by hand: the
+    # 2.5m lane gained a middle strung line (200/340 triangles against the old
+    # 120/204) and the model moved up in world Y ([31.94, 34.94] against
+    # [20.47, 23.47]) — a translation, so nothing downstream changes. ppm,
+    # blend_px and clip_uv are identical, which is what makes the two lines
+    # comparable: both land on the same 4255x515 canvas.
+    #
+    # Camera identity verified by pixel correlation against the clips' first
+    # frames rather than by filename: overhead5_merged.png -> overhead5 (0.858
+    # vs 0.372 next-best), `overhead6_merged 拷贝.png` -> overhead6 (0.843 vs
+    # 0.377). Positional order after the world-X sort agrees, so camera_ids is
+    # unchanged.
+    "overhead2": Profile(
+        name="overhead2",
+        fbx=_OVERHEAD_MODELS / "25 水面.fbx",
+        tex_dir=_OVERHEAD_MODELS / "25 水面.fbm",
+        camera_ids=("overhead5", "overhead6"),
+        clip_suffix=".ts",
+        ppm=170.0,
+        source_size=(3840, 2160),
+        blend_px=85.0,
+        clip_uv=True,
+        full_res=False,
+        crop_bottom="none",
+        planes_only=False,
+        sync="manifest",
+        ref_tex="video",
+        label_line=INPUTS / "overhead" / " label_line.png",
+        lane_meters=True,
     ),
 }
 

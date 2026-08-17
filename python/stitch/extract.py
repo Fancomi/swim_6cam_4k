@@ -4,10 +4,18 @@ Ordering is a profile field, not a default: the plane lines sort left-to-right b
 world X so camera identity follows position, while pool keeps the FBX's declared
 order because its six meshes sit in two rows and sorting by X would interleave
 the banks.
+
+The one place this chain reaches outside itself: a line with `lane_meters` set
+has its gridlines annotated with real-world metres by ``python.fbx_overlay``.
+Those rules (which column is 0 m, whether a row is skipped) are calibration
+knowledge, not stitching, and `classify.py`/`meters.py` are pure — no FBX SDK, no
+OpenCV. Importing them beats a second copy of the rules, and beats a second
+mesh.json sitting beside this one saying almost the same thing.
 """
 import json
 
 from python.common.paths import display
+from python.fbx_overlay.meters import annotate_meshes
 from python.fbx_tools import scene as F
 from python.stitch.profiles import StepError
 
@@ -76,11 +84,17 @@ def extract(profile, dst=None):
             f"{profile.name}: {len(meshes)} meshes for "
             f"{len(profile.camera_ids)} cameras in {profile.fbx}")
 
+    # Metres go in the same file as the geometry: the algorithm side wants one
+    # document per line, and a vertex's metre is a property of that vertex.
+    if profile.lane_meters:
+        annotate_meshes(meshes)
+
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text(json.dumps({"source": display(profile.fbx), "meshes": meshes}),
                    encoding="utf-8")
     for camera, mesh in zip(profile.camera_ids, meshes):
         print(f"  {camera:10s} <- {mesh['node']:12s} tris={len(mesh['triangles']):4d} "
-              f"tex={mesh['texture_basename']}")
+              f"tex={mesh['texture_basename']}"
+              + (f" kind={mesh['kind']}" if profile.lane_meters else ""))
     print(f"wrote {dst}")
     return meshes

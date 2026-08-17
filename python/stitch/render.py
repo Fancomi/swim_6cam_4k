@@ -2,7 +2,8 @@
 
 The four outputs come from one pass over the same layers, because a grid drawn
 from a second projection would show rounding differences that are not really
-there.
+there. A line carrying a lane schematic (`label_line`) gets a fifth, the
+schematic's ink stamped on the composite.
 
 Why the span map is its own file rather than more ink on the grid: the grid answers
 "is the geometry right" and is already dense (sixteen sets of triangle edges),
@@ -18,7 +19,7 @@ from python.stitch.profiles import StepError
 
 def render(profile, tex_dir, out_prefix, ppm=None, blend_px=None,
            full_res=None, tex_names=None, grid=True, heatmap=True, spans=True):
-    """Write `<out_prefix>{,_grid,_spans,_heat}.png`. Returns (width, height)."""
+    """Write `<out_prefix>{,_grid,_spans,_heat,_label}.png`. Returns (width, height)."""
     tex_dir = profile.still_textures if tex_dir is None else tex_dir
     if not tex_dir.is_dir():
         raise StepError(f"texture directory missing: {tex_dir}")
@@ -69,6 +70,13 @@ def render(profile, tex_dir, out_prefix, ppm=None, blend_px=None,
         images.append((f"{out_prefix}_heat.png",
                        C.fusion_heatmap(weights, canvas),
                        cv2.INTER_NEAREST, "heatmap"))
+    if profile.label_line is not None:
+        # Only the lines that HAVE a lane schematic (overhead*) get this one, and
+        # it goes on the plain composite: the question is whether the designer's
+        # distance marks land on the lane the photograph shows.
+        images.append((f"{out_prefix}_label.png",
+                       C.draw_label_line(composite, profile.label_line),
+                       cv2.INTER_LINEAR, "label line"))
 
     # Trim the ragged uncovered rows BEFORE rescaling, so the rescale never
     # stretches black. Only meaningful with full_res, which is what defines a

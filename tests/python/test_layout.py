@@ -8,12 +8,25 @@ ROOT = Path(__file__).resolve().parents[2]
 PACKAGES = {
     "common": "paths, media I/O, CSV tables, HTML pages",
     "fbx_tools": "the only place that imports the FBX SDK",
-    "fbx_overlay": "line-organized FBX grid overlays (water_entry/overhead + 2) with meters",
-    "stitch": "the three camera lines: pool, underwater, overhead",
+    "fbx_overlay": "FBX gridline metres, and the water-entry mesh overlays",
+    "stitch": "the six camera lines: pool, underwater, overhead, + 2 each",
     "water_entry": "the single water-entry camera",
     "labeling": "browser labelers over the dataset snapshots",
     "keypoints": "COCO-17 annotation review pages",
     "benchmarks": "runtime metrics validation and summaries",
+}
+
+# Chains may lean on python/common freely; anything else crossing between them is
+# listed here, so a new one is a decision rather than a drift. Both entries are a
+# chain reaching for a PURE module (no FBX SDK, no OpenCV) that owns a rule it
+# would otherwise copy.
+CROSS_CHAIN_IMPORTS = {
+    # underwater's reference textures come from the labeling dataset's snapshot
+    # index; that line has no per-session clips to take a first frame from.
+    ("stitch", "labeling"),
+    # the overhead lines' gridlines ARE the calibration target, so extract writes
+    # their metres into the one mesh.json using fbx_overlay's rules.
+    ("stitch", "fbx_overlay"),
 }
 
 
@@ -44,6 +57,26 @@ class LayoutTest(unittest.TestCase):
             if "import fbx" in path.read_text(encoding="utf-8"))
         self.assertEqual(importers, ["python/fbx_tools/bake_uv.py",
                                      "python/fbx_tools/scene.py"])
+
+    def test_chains_cross_only_where_declared(self):
+        """A chain importing another chain is the exception, not the pattern.
+
+        python/common is shared by design and exempt; fbx_tools is the FBX SDK
+        gate every chain that reads a model goes through. Everything else must be
+        in CROSS_CHAIN_IMPORTS with a reason."""
+        import re
+        exempt = {"common", "fbx_tools"}
+        found = set()
+        for path in (ROOT / "python").rglob("*.py"):
+            owner = path.relative_to(ROOT / "python").parts[0]
+            if owner in exempt:
+                continue
+            text = path.read_text(encoding="utf-8")
+            for other in re.findall(r"^\s*from python\.(\w+)", text, re.M) + \
+                    re.findall(r"^\s*(?:import|from) python\.(\w+)", text, re.M):
+                if other != owner and other not in exempt:
+                    found.add((owner, other))
+        self.assertEqual(found, CROSS_CHAIN_IMPORTS)
 
     def test_paths_are_derived_from_one_root(self):
         from python.common import paths

@@ -24,6 +24,7 @@ except Exception:
 ROOT = Path(__file__).resolve().parents[2]
 POOL_FBX = ROOT / "inputs" / "pool" / "models" / "pool.fbx"
 OVERHEAD_FBX = ROOT / "inputs" / "overhead" / "models" / "002.fbx"
+OVERHEAD2_FBX = ROOT / "inputs" / "overhead" / "models" / "25 水面.fbx"
 
 
 def _quad(x0, x1, y0, y1, uv=(0.0, 1.0)):
@@ -349,10 +350,10 @@ class LaneSpanTest(unittest.TestCase):
         canvas = C.Canvas(meshes, 32.0, margin=0)
         base = np.zeros((canvas.height, canvas.width, 3), np.uint8)
         import inspect
-        # Only an optional palette override is allowed — never a label/name
-        # mechanism (identity is a separate question, answered by draw_spans).
+        # No label/name mechanism at all — identity is a separate question,
+        # answered by draw_spans.
         self.assertEqual(list(inspect.signature(C.draw_grid).parameters),
-                         ["image", "meshes", "canvas", "colors"])
+                         ["image", "meshes", "canvas"])
         self.assertIsNotNone(C.draw_grid(base, meshes, canvas))
 
 
@@ -409,7 +410,7 @@ class ProfileTest(unittest.TestCase):
     def test_registry_holds_every_line(self):
         self.assertEqual(P.names(),
                          ["pool", "pool2", "underwater", "underwater2",
-                          "overhead"])
+                          "overhead", "overhead2"])
 
     def test_pool2_mirrors_both_axes_to_land_on_pools_layout(self):
         """pool2 是同一批相机、同一批片段，只换了设计师手工重建的 FBX。
@@ -433,7 +434,8 @@ class ProfileTest(unittest.TestCase):
 
     def test_only_pool2_needs_the_x_mirror(self):
         """neg_u 是这个文件的属性，不是全局默认——其余线一个都不该开。"""
-        for name in ("pool", "underwater", "underwater2", "overhead"):
+        for name in ("pool", "underwater", "underwater2", "overhead",
+                     "overhead2"):
             self.assertFalse(P.get(name).neg_u, name)
 
     def test_pool2_lays_the_banks_out_opposite_to_pool(self):
@@ -526,6 +528,7 @@ class ProfileTest(unittest.TestCase):
         line = P.get("underwater2")
         self.assertEqual(line.still_textures, line.tex_dir)
 
+    def test_overhead_pins_the_native_density(self):
         line = P.get("overhead")
         self.assertEqual(line.camera_ids, ("overhead5", "overhead6"))
         self.assertEqual(line.ppm, 170.0)
@@ -539,6 +542,33 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(line.ref_tex, "video")
         self.assertEqual(line.fbx.name, "002.fbx")
 
+    def test_overhead2_is_the_same_shaping_against_a_rebuilt_fbx(self):
+        """同一批相机、同一批片段，只换了手工重建的 FBX——所以只有 fbx/tex_dir
+        两个字段变。渲染口径必须与 overhead 逐字段相同，两条线才落在同一张
+        4255x515 画布上、可逐块比对。"""
+        overhead, overhead2 = P.get("overhead"), P.get("overhead2")
+        self.assertEqual(overhead2.fbx.name, "25 水面.fbx")
+        for field in ("camera_ids", "ppm", "blend_px", "clip_uv", "full_res",
+                      "crop_bottom", "planes_only", "sync", "source_size",
+                      "ref_tex", "still_margin", "clip_suffix", "order",
+                      "neg_u", "neg_v", "label_line", "lane_meters"):
+            self.assertEqual(getattr(overhead2, field),
+                             getattr(overhead, field), field)
+        # 产物分开放，不覆盖旧线
+        self.assertNotEqual(overhead2.out_dir, overhead.out_dir)
+
+    def test_only_the_overhead_lines_carry_a_lane_schematic(self):
+        """两个字段都是"这条线的网格是双方约定的标定物"的两个侧面：`label_line`
+        是设计师给的刻度示意图，`lane_meters` 是网格线换算成米数写进 mesh.json。
+        只有俯视线有，其余线的 mesh.json 是 .swasset 逐字节编译的输入。"""
+        for name in ("overhead", "overhead2"):
+            self.assertTrue(P.get(name).label_line.name.strip()
+                            == "label_line.png", name)
+            self.assertTrue(P.get(name).lane_meters, name)
+        for name in ("pool", "pool2", "underwater", "underwater2"):
+            self.assertIsNone(P.get(name).label_line, name)
+            self.assertFalse(P.get(name).lane_meters, name)
+
     def test_pool_keeps_declared_order_because_its_meshes_are_two_rows(self):
         # World-X order would interleave the banks and pair each camera with the
         # opposite one's plane; only the plane lines are a single row.
@@ -546,6 +576,7 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(P.get("underwater").order, "world_x")
         self.assertEqual(P.get("underwater2").order, "world_x")
         self.assertEqual(P.get("overhead").order, "world_x")
+        self.assertEqual(P.get("overhead2").order, "world_x")
 
     def test_unknown_name_lists_the_registered_ones(self):
         with self.assertRaises(SystemExit) as caught:
@@ -571,7 +602,7 @@ class ProfileTest(unittest.TestCase):
     def test_still_textures_default_to_the_model_directory(self):
         # Only underwater splits them: its canonical grids live in the dataset,
         # while the .fbm copies are stale.
-        for name in ("pool", "pool2", "underwater2", "overhead"):
+        for name in ("pool", "pool2", "underwater2", "overhead", "overhead2"):
             line = P.get(name)
             self.assertEqual(line.still_textures, line.tex_dir)
         self.assertNotEqual(P.get("underwater").still_textures,
@@ -1157,7 +1188,10 @@ class RenderTest(unittest.TestCase):
 
     def _fixture(self, td, value=200, size=(16, 32)):
         import cv2
-        line = self._line(td, tex_dir=Path(td), still_tex_dir=Path(td))
+        # label_line off: the real schematic is a gitignored input, and the
+        # tests that care about it supply their own.
+        line = self._line(td, tex_dir=Path(td), still_tex_dir=Path(td),
+                          label_line=None)
         _mesh_json(td, [_mesh("Plane002", 0.0, 10.0, 0.0, 3.0, tex="05-02.jpg"),
                         _mesh("Plane001", 7.5, 25.0, 0.0, 3.0, tex="C06.jpg")])
         for name in ("05-02.jpg", "C06.jpg", "overhead5.png", "overhead6.png"):
@@ -1176,6 +1210,38 @@ class RenderTest(unittest.TestCase):
             image = cv2.imread(str(Path(td) / "out.png"))
             self.assertEqual((image.shape[1], image.shape[0]), (width, height))
             self.assertGreater(int(image.max()), 0)           # not all black
+
+    def test_the_lane_schematic_stamps_its_ink_on_the_composite(self):
+        """只有带 label_line 的线多出这第五张，画在未加网格的成品上——要问的是
+        设计师的米数刻度落不落在实拍的泳道上，网格线会和示意图自己的线抢。
+
+        示意图用临时纸白+一条墨线合成（真图 inputs/overhead/*.png 被 gitignore）。
+        """
+        import cv2
+        import dataclasses
+        from python.stitch import render as R
+        with tempfile.TemporaryDirectory() as td:
+            reference = np.full((40, 100, 3), 255, np.uint8)   # 纸白
+            reference[10:12, :] = (0, 0, 255)                  # 一条墨线
+            schematic = Path(td) / "schematic.png"
+            cv2.imwrite(str(schematic), reference)
+
+            line = dataclasses.replace(self._fixture(td),
+                                       label_line=schematic)
+            R.render(line, None, Path(td) / "out", ppm=8.0)
+            self.assertTrue((Path(td) / "out_label.png").is_file())
+            plain = cv2.imread(str(Path(td) / "out.png"))
+            labeled = cv2.imread(str(Path(td) / "out_label.png"))
+            self.assertEqual(labeled.shape, plain.shape)
+            # 纸白透明：白底原样透出成品；墨线覆盖
+            self.assertTrue(np.array_equal(labeled[0], plain[0]))
+            self.assertGreater(np.count_nonzero(np.any(labeled != plain,
+                                                       axis=2)), 0)
+
+            # 没有示意图的线不多出这张产物
+            R.render(dataclasses.replace(line, label_line=None), None,
+                     Path(td) / "bare", ppm=8.0)
+            self.assertFalse((Path(td) / "bare_label.png").is_file())
 
     def test_positional_names_render_the_same_as_basenames(self):
         import cv2
@@ -1379,6 +1445,54 @@ class FbxIntegrationTest(unittest.TestCase):
             with self.assertRaises(P.StepError) as caught:
                 E.extract(line)
             self.assertIn("6", str(caught.exception))
+
+    @unittest.skipUnless(HAS_FBX, "FBX SDK not available")
+    @unittest.skipUnless(OVERHEAD2_FBX.is_file(), "25 水面.fbx not present")
+    def test_lane_meters_annotates_the_mesh_json_in_place(self):
+        """一条线只有一份 mesh.json：`lane_meters` 让米数写进它，而不是旁边再放
+        一份几乎一样的文档。米数规则来自 python.fbx_overlay（纯模块），这里只验
+        它落到了顶点上、且是俯视线的世界差口径。"""
+        import dataclasses
+        import json
+        from python.stitch import extract as E
+        with tempfile.TemporaryDirectory() as td:
+            line = dataclasses.replace(P.get("overhead2"), _out_dir=Path(td))
+            E.extract(line)
+            doc = json.loads(line.mesh_json.read_text(encoding="utf-8"))
+        by_node = {m["node"]: m for m in doc["meshes"]}
+        for node, x_range in (("Plane011", (0.0, 17.5)),
+                              ("Plane002", (15.0, 25.0))):
+            mesh = by_node[node]
+            self.assertEqual(mesh["kind"], "plane")     # 分类不硬编码节点名
+            xs = {v["meter"]["x"] for t in mesh["triangles"]
+                  for v in t if "x" in v.get("meter", {})}
+            ys = {v["meter"]["y"] for t in mesh["triangles"]
+                  for v in t if "y" in v.get("meter", {})}
+            # X 是泳道全长口径（两 plane 合起来 0..25m），不是每块自己从 0 起
+            self.assertAlmostEqual(min(xs), x_range[0], places=4)
+            self.assertAlmostEqual(max(xs), x_range[1], places=4)
+            # 重建版的 2.5m 泳道多了一条中间拉线：四行而非两行
+            self.assertEqual({round(y, 3) for y in ys},
+                             {0.0, 0.875, 1.625, 2.5})
+
+    @unittest.skipUnless(HAS_FBX, "FBX SDK not available")
+    @unittest.skipUnless(POOL_FBX.is_file(), "pool.fbx not present")
+    def test_lines_without_lane_meters_keep_a_bare_geometry_json(self):
+        """只有俯视线的网格是双方约定的标定物。其余线的 mesh.json 是 .swasset
+        逐字节编译的输入，多写键会改哈希，也没有可信的米数可写。"""
+        import dataclasses
+        import json
+        from python.stitch import extract as E
+        self.assertFalse(P.get("pool").lane_meters)
+        with tempfile.TemporaryDirectory() as td:
+            line = dataclasses.replace(P.get("pool"), _out_dir=Path(td))
+            E.extract(line)
+            doc = json.loads(line.mesh_json.read_text(encoding="utf-8"))
+        for mesh in doc["meshes"]:
+            self.assertNotIn("kind", mesh)
+            for triangle in mesh["triangles"]:
+                for vertex in triangle:
+                    self.assertEqual(sorted(vertex), ["pos", "uv"])
 
 
 if __name__ == "__main__":
