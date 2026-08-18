@@ -68,21 +68,26 @@ def find_source(directory, camera, pattern=None):
 
     Ambiguity is an error, not a coin toss: two candidates for one camera means
     aligning against the wrong session, which shows up as a plausible-looking
-    transform that makes everything worse."""
+    transform that makes everything worse.
+
+    `._name` AppleDouble stubs are filtered for the same reason
+    ``Profile.clip_for`` filters them: a dataset copied through a Mac or an
+    exFAT/SMB share carries one 4KB resource-fork stub per file, sharing the name
+    and matching the glob, which turns every camera into "ambiguous"."""
     directory = Path(directory)
     if not directory.is_dir():
         raise ProbeError(f"probe directory does not exist: {directory}")
     if pattern:
-        candidates = sorted(directory.glob(pattern.format(camera=camera)))
+        globs = [pattern.format(camera=camera)]
     else:
         # `*_<camera>.<ext>` for clips, `<camera>*.<ext>` for per-camera images.
         # The camera id is anchored either way, so underA1 cannot match underA16.
-        candidates = []
-        for suffix in CLIP_SUFFIXES:
-            candidates += sorted(directory.glob(f"*_{camera}{suffix}"))
-        for suffix in IMAGE_SUFFIXES:
-            candidates += sorted(directory.glob(f"{camera}{suffix}"))
-            candidates += sorted(directory.glob(f"{camera}_*{suffix}"))
+        globs = [f"*_{camera}{suffix}" for suffix in CLIP_SUFFIXES]
+        globs += [f"{camera}{suffix}" for suffix in IMAGE_SUFFIXES]
+        globs += [f"{camera}_*{suffix}" for suffix in IMAGE_SUFFIXES]
+    candidates = sorted(found for glob in globs
+                        for found in directory.glob(glob)
+                        if not found.name.startswith("._"))
     if not candidates:
         raise ProbeError(f"no clip or image for {camera} in {directory}")
     if len(candidates) > 1:

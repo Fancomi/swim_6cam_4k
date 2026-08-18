@@ -314,6 +314,13 @@ class CacheTest(unittest.TestCase):
                          {"cam": current if current is not None else self.current},
                          model="translation", cache_path=self.path, force=force)
 
+    def stored_key(self):
+        """The cached entry's key. `encoding` is explicit everywhere a text file
+        is read in this repo: a bare read decodes in the host locale, which is
+        GBK on the Windows box this also runs on."""
+        document = json.loads(self.path.read_text(encoding="utf-8"))
+        return document["cameras"]["cam"]["key"]
+
     def test_a_solved_alignment_round_trips(self):
         first = self.resolve()["cam"]
         second = self.resolve()["cam"]
@@ -324,20 +331,17 @@ class CacheTest(unittest.TestCase):
         """Fingerprints are over the pixels, because these textures get re-baked
         in place without ever changing name."""
         self.resolve()
-        stored = json.loads(self.path.read_text(encoding="utf-8"))
-        key = stored["cameras"]["cam"]["key"]
+        key = self.stored_key()
         self.resolve(current=shifted_pair(-9, 2)[1])
-        reloaded = json.loads(self.path.read_text(encoding="utf-8"))
-        self.assertNotEqual(reloaded["cameras"]["cam"]["key"], key)
+        self.assertNotEqual(self.stored_key(), key)
 
     def test_identical_pixels_in_a_different_encoding_reuse_the_entry(self):
         self.resolve()
-        key = json.loads(self.path.read_text())["cameras"]["cam"]["key"]
+        key = self.stored_key()
         self.assertEqual(C.fingerprint(self.current.copy()),
                          C.fingerprint(self.current))
         self.resolve()
-        self.assertEqual(json.loads(self.path.read_text())["cameras"]["cam"]["key"],
-                         key)
+        self.assertEqual(self.stored_key(), key)
 
     def test_a_foreign_format_is_discarded_rather_than_misread(self):
         self.path.write_text(json.dumps({"format": "align/v0", "cameras": {}}),

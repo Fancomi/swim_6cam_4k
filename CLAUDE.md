@@ -217,10 +217,11 @@ bash scripts/run_frames.sh products --dry-run       # 只打印要跑什么
 - Python：4 空格、小写下划线，模块入口一律 `python -m python.<pkg>[.<mod>]`。C++20：`swim::core` / `swim::d3d11` / `swim::cudagl`，成员变量带尾下划线。
 - 源码 UTF-8；注释解释**为什么**，尤其是「看起来可以简化但实际不能」的地方。
 - `scripts/**/*.bat` 必须 UTF-8 无 BOM + CRLF，第三行 `goto :run`，中文只放在被 goto 跳过的说明区，执行区注释一律 ASCII；改动后运行 `scripts\checks\check_bat_format.ps1`。
-- **Windows 上跑通的四条踩坑口径**（都已修在源码里，遇到同类症状先想这四条）：
+- **Windows / 跨平台搬数据的五条踩坑口径**（都已修在源码里，遇到同类症状先想这五条）：
   - 图像 IO 一律走 `python.common.media` 的 `read_image`/`write_image`（内部 `imdecode`/`imencode` + Python 开文件）。`cv2.imread`/`imwrite` 在中文机器上按 ANSI 解路径，`25 水面.fbm` 这种路径会报「can't open/read file」，看着像文件缺失。
   - `.sh` 里选解释器要先试 `.venv/Scripts/python.exe` 再 fallback：Windows 的 `python3` 是 WindowsApps 别名，会弹应用商店并以 49 退出、**什么都不打印**。
   - 测试里读带中文的源码/脚本必须显式 `encoding="utf-8"`，裸 `open()` 按 GBK 解会 UnicodeDecodeError。
   - `shasum`/`sha256sum` 传 Windows 路径时按 GNU 惯例转义反斜杠、整行前加 `\`，`awk '{print $1}'` 会取到带前导反斜杠的哈希；改成从 stdin 读。
+  - **按相机名找文件必须滤掉 `._` 前缀**：数据集经 macOS 或 exFAT/SMB 搬过一手会给每个文件带一个 4KB AppleDouble 残根，同名且能被 glob 命中，症状是每台相机都报「ambiguous」。目前两处按相机名查文件都滤了：`profiles.Profile.clip_for` 与 `align/probe.py` 的 `find_source`；再加第三处也得滤。「拒绝在两个候选里猜」的行为不变——猜错会把相机配到别的平面上。
 - 提交信息 `type(scope): 简短祈使句`，与现有历史一致。
 - 不提交：`build/`、`outputs/`、`third_party/`、`*.pt`、大视频、`.swasset`、`.venv`、**`inputs/` 除 `configs/` 外的全部**（见开头「标定数据不在 git 里」）。`outputs/pool/mesh.json` 被 gitignore 却是 CMake 硬依赖（缺了任何 target 都编不过），用 `./scripts/run_stitch.sh pool extract` 生成。
