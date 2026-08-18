@@ -22,6 +22,7 @@ from pathlib import Path
 
 import cv2
 
+from python.align.mesh import warp_meshes
 from python.common.media import close_encoder, open_encoder
 from python.stitch import compose as C
 from python.stitch.profiles import StepError
@@ -137,14 +138,20 @@ def loop_period_ms(profile, video_dir, offsets):
 
 
 def render(profile, video_dir, out_path, seconds=None, ppm=None, blend_px=None,
-           full_res=None, align=True):
-    """Composite every lane's clip into one mp4. Returns (width, height, frames)."""
+           full_res=None, align=True, alignments=None):
+    """Composite every lane's clip into one mp4. Returns (width, height, frames).
+
+    `align` is TIME alignment (which frame of each clip is t=0); `alignments` is
+    drift correction on the UVs (python/align). Two different problems that both
+    ended up called alignment — the first is about when, the second about where.
+    """
     video_dir = Path(video_dir)
     if not video_dir.is_dir():
         raise StepError(f"video directory does not exist: {video_dir}")
 
     meshes = C.load_meshes(profile.mesh_json, neg_v=profile.neg_v,
                           neg_u=profile.neg_u)
+    meshes = warp_meshes(meshes, alignments)
     cameras = list(profile.camera_ids)
     if len(cameras) != len(meshes):
         raise StepError(f"{len(cameras)} cameras for {len(meshes)} meshes")

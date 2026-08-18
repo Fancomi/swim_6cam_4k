@@ -4,6 +4,7 @@
     python -m python.stitch overhead extract,still
     python -m python.stitch underwater still --real --blend-px 120
     python -m python.stitch underwater2 still --tex-dir DIR
+    python -m python.stitch underwater still --align-from CLIP_DIR
     python -m python.stitch overhead extract,asset,build,live --video-dir DIR
 
 The line is an argument and the steps are a table. The alternative — a subcommand
@@ -21,6 +22,7 @@ executable is newer than every C++ and CMake file it is built from.
 import argparse
 from pathlib import Path
 
+from python.align.aligner import DEFAULT_MODEL as ALIGN_MODEL, MODELS as ALIGN_MODELS
 from python.stitch import export_ref_tex, profiles as P, render as R
 from python.stitch import render_video as RV
 from python.stitch import run as realtime
@@ -48,8 +50,27 @@ def step_still(profile, args):
     KIND of texture set from another but NOT one dataset from another: two dates'
     `{camera}_background.png` would both land on stitch_background.png and the
     second would silently overwrite the first. Name the product with
-    --still-suffix whenever more than one set is in play."""
-    if args.tex_dir is not None:
+    --still-suffix whenever more than one set is in play.
+
+    --align-from corrects for camera drift against that directory's clips or
+    images (python/align). It stitches the probed images themselves, so the
+    aligned still and its unaligned counterpart differ only in the UVs."""
+    alignments, textures = None, None
+    if args.align_from is not None:
+        from python.stitch import align as A
+        alignments, probes, key = A.resolve(
+            profile, args.align_from, model=args.align_model,
+            key=args.align_cache_key, use_cache=not args.no_align_cache,
+            force=args.force)
+        textures = [probes.get(camera) for camera in profile.camera_ids]
+        if any(texture is None for texture in textures):
+            missing = [camera for camera, texture
+                       in zip(profile.camera_ids, textures) if texture is None]
+            raise StepError(f"no probe image for {', '.join(missing)} in "
+                            f"{args.align_from}")
+        tex_dir, names = None, None
+        suffix = args.still_suffix or f"_align_{key}"
+    elif args.tex_dir is not None:
         tex_dir = args.tex_dir
         names = [args.tex_pattern.format(camera=camera)
                  for camera in profile.camera_ids]
@@ -64,7 +85,8 @@ def step_still(profile, args):
         tex_dir, names, suffix = profile.still_textures, None, ""
     R.render(profile, tex_dir, profile.out_dir / f"stitch{suffix}",
              ppm=args.ppm, blend_px=args.blend_px,
-             full_res=False if args.no_full_res else None, tex_names=names)
+             full_res=False if args.no_full_res else None, tex_names=names,
+             textures=textures, alignments=alignments)
 
 
 def _suffix_of(pattern):
@@ -79,11 +101,23 @@ def _suffix_of(pattern):
 
 
 def step_video(profile, args):
-    """Stitch every camera's clip into one panorama mp4."""
+    """Stitch every camera's clip into one panorama mp4.
+
+    Note the two unrelated senses of "align" on this command line: --no-align is
+    TIME alignment (which frame of each clip is t=0), while --align-from is drift
+    correction (which pixel each UV samples). Passing `--align-from <video-dir>`
+    corrects the drift of the very clips being rendered, which is the usual case."""
+    alignments = None
+    if args.align_from is not None:
+        from python.stitch import align as A
+        alignments, _probes, _key = A.resolve(
+            profile, args.align_from, model=args.align_model,
+            key=args.align_cache_key, use_cache=not args.no_align_cache,
+            force=args.force)
     RV.render(profile, args.video_dir, profile.out_dir / "stitch.mp4",
               seconds=args.seconds_float, ppm=args.ppm, blend_px=args.blend_px,
               full_res=False if args.no_full_res else None,
-              align=not args.no_align)
+              align=not args.no_align, alignments=alignments)
 
 
 # Offline first, then the realtime chain — the order a new line gets brought up.
@@ -130,6 +164,19 @@ def parse_args(argv=None):
                         help="skip the rescale back to source height")
     parser.add_argument("--no-align", action="store_true",
                         help="read every clip from frame 0")
+    parser.add_argument("--align-from", type=Path, default=None,
+                        metavar="DIR",
+                        help="still/video: correct camera drift against this "
+                             "directory's clips or per-camera images "
+                             "(python/align); off when not given")
+    parser.add_argument("--align-model", default=ALIGN_MODEL,
+                        choices=tuple(ALIGN_MODELS),
+                        help="drift transform to fit (default: %(default)s)")
+    parser.add_argument("--align-cache-key", default=None, metavar="NAME",
+                        help="name the solved alignments' cache directory "
+                             "(default: derived from --align-from)")
+    parser.add_argument("--no-align-cache", action="store_true",
+                        help="solve the drift every run instead of caching it")
     parser.add_argument("--seconds", type=int, default=30,
                         help="live: run duration (default: %(default)s)")
     parser.add_argument("--seconds-float", type=float, default=None,

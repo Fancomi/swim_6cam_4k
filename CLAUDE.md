@@ -26,9 +26,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | 数据集标注 | `scripts/run_label.sh` | `python/labeling/`、`python/keypoints/` |
 | 性能取证 | `scripts/run_bench.sh` | `python/benchmarks/` |
 
-- 改哪条链路只看哪条；共用 `python/common/`（路径 / 图像 IO / CSV / HTML）与 `.venv`。**跨链路依赖只有两处**，都登记在 `tests/python/test_layout.py` 的 `CROSS_CHAIN_IMPORTS` 里（新增一条得先改那个断言）：`python/stitch/export_ref_tex.py` import `python.labeling.snapshots`（水下线没有按次片段可采首帧）；`python/stitch/extract.py` import `python.fbx_overlay.meters`（俯视线的网格就是标定物，米数规则不复制第二份）。
+- 改哪条链路只看哪条；共用 `python/common/`（路径 / 图像 IO / CSV / HTML）与 `.venv`。**跨链路依赖登记在 `tests/python/test_layout.py` 的 `CROSS_CHAIN_IMPORTS` 里**（新增一条得先改那个断言），每条都是「某链路去拿一个纯模块，否则就要复制一份规则」：`python/stitch/export_ref_tex.py` import `python.labeling.snapshots`（水下线没有按次片段可采首帧）；`python/stitch/extract.py` import `python.fbx_overlay.meters`（俯视线的网格就是标定物，米数规则不复制第二份）；stitch 与 fbx_overlay 都 import `python.align`（相机微动修正只有一套规则，见下）。
 - 三个 `.sh` 入口无参数或 `--help` 打印自身用法；`run_win.bat` / `install.bat` 是双击入口，无参数即执行。新增脚本延续「一条链路一个入口」口径。
-- 另有两个辅助入口：`scripts/run_fbx_overlay.sh`（入水机位网格叠加，见下）与 `scripts/check_inputs.sh`（标定数据验收，`python/dataset/`）。
+- 另有三个辅助入口：`scripts/run_fbx_overlay.sh`（入水机位网格叠加，见下）、`scripts/run_align.sh`（相机微动自动对齐，见下）与 `scripts/check_inputs.sh`（标定数据验收，`python/dataset/`）。
 
 ## 相机拼接关键口径
 
@@ -48,6 +48,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 步骤：`extract`（FBX→`outputs/<line>/mesh.json`）、`tex`、`still`（静图+网格诊断+**视野区间图**+融合热图+示意图叠加）、`video`、`asset`（→`build/assets/generated/<line>.swasset`）、`build`、`live`。`extract`/`asset`/`build` 按 mtime/口令跳过，`still`/`video` 每次都渲。
 - **一条线只有一份 mesh.json**。`lane_meters=True` 的线（目前 overhead*）在 extract 时顺带写进每块的 `kind` 和每个顶点的 `meter: {x, y}`（规则见下面 fbx_overlay 一节，那是纯模块，import 来的不是复制的）；其余线保持裸几何 `{pos, uv}`，因为它们的网格不是双方约定的标定物，且 mesh.json 是 `.swasset` 逐字节编译的输入——多写键会改 sha256（实测只差头部那 32 字节，几何完全一致）。
 - `still` 的产物各答一个问题：`stitch` 成品、`_grid` 几何（只画网格不写字）、`_spans` 每台相机的视野区间（`|--- ---|`：实线独占、虚线过渡、端点视野边界、相邻交替高度、字号统一）、`_heat` 融合权重、`_label` 泳道示意图墨迹叠加（**只有声明了 `label_line` 的线才出**，目前 overhead*）。`_label` 由 `compose.draw_label_line` 把示意图缩放到画布后**只取墨迹**（三通道都 ≥200 视为纸白，透明）画在**未加网格的**成品上——要问的是示意图刻度落不落在实拍泳道上，网格线会和示意图自己的线抢。`--tex-dir` + `--tex-pattern` 可换任意一批每相机贴图（如数据集的 `_background.png`），`--still-suffix` 给产物命名——两批数据同 pattern 会互相覆盖。
+- `still`/`video` 的 `--align-from <目录>` 开相机微动修正（见「相机微动自动对齐」），贴图直接用配准所用的那批中值探针图，产物后缀 `_align_<key>`。注意 `video` 上「align」有两个不相干的意思：`--no-align` 是**时间**对齐（哪一帧是 t=0），`--align-from` 是**空间**漂移修正（每个 UV 采哪个像素）。
 - `overhead2` 是 `25 水面.fbx` 的那条线：与 overhead 同一批相机、同一批片段，**渲染口径逐字段相同**（170ppm / 85blend / clip_uv / manifest 同步），所以两条线落在同一张 4255×515 画布上、可逐块比对。模型改动是 2.5m 泳道多了一条中间拉线（200/340 三角 vs 旧 120/204）+ 整体上移 11.47m（纯平移，下游不受影响）。相机身份按贴图像素相关认过：`overhead5_merged.png`→overhead5（corr 0.858，次高 0.372）、`overhead6_merged 拷贝.png`→overhead6（0.843/0.377），与世界 X 排序一致。
 - 运行时 config 每次按片段目录重新生成到 `inputs/configs/<line>_<backend>.conf`，声明顺序即通道顺序，不手工维护。
 - `.swasset` v1 格式真值：Python 在 `python/stitch/asset_format.py`，C++ 在 `cpp/core/src/asset.cpp` 与 `cpp/core/include/swim/core/asset_format.hpp`。改动几何/资产编译的验收是**逐字节**一致（比 sha256）。
@@ -87,6 +88,13 @@ cd build/metal-release && ctest
 # FBX 网格叠加（入水机位两线：water_entry/water_entry2）
 ./scripts/run_fbx_overlay.sh [输出目录] [--line water_entry|water_entry2 ...]
 
+# 相机微动自动对齐（标定版本 × 数据日期 交叉矩阵）
+./scripts/run_align.sh                                # 全部单元
+./scripts/run_align.sh --only underwater --dry-run    # 挑线路 / 只打印
+# 单点复核（不出矩阵）
+./scripts/run_stitch.sh underwater still --align-from <片段目录>
+./scripts/run_fbx_overlay.sh --line water_entry2 --align-to femto=<新图>
+
 # 标定数据验收（inputs/ 不在 git，搬运后跑这个）
 ./scripts/check_inputs.sh                             # 两代
 ./scripts/check_inputs.sh v2                          # 只校验二代
@@ -123,7 +131,7 @@ cd build/metal-release && ctest
 
 - 每个子相机一个 FBX，自带全屏矩形（纹理=相机原图）作底图；`CameraSpec` 支持一线多 FBX（femto+gemini 同属 water_entry2）。
 - **俯视线（overhead*）不在这里**：自上往下看，UV 不映射到任何单张相机帧，它们是 **stitch 的第 5、6 条线**。米数由 `lane_meters` 写进 stitch 那份 `outputs/<line>/mesh.json`（规则仍是本包的 `meters.annotate_meshes`），**一条线只有一份 mesh.json**。曾经在这里重造过一遍 canvas 拼接（`overlay_stitch.py`，stitch 五步的逐行复制）并额外写过一份 `overlay/mesh.json`，两者都已删除。
-- **CLI**：`--line`（可重复，默认全部）；`--camera` 线内子相机过滤，`--camera femto|gemini` 无 `--line` 时兼容映射到所属线。`--mesh FBX NODE` 旧回归路径不变。
+- **CLI**：`--line`（可重复，默认全部）；`--camera` 线内子相机过滤，`--camera femto|gemini` 无 `--line` 时兼容映射到所属线。`--align-to [CAMERA=]图` 对齐微动（见「相机微动自动对齐」）。`--mesh FBX NODE` 旧回归路径不变。
 - 语义分类自动判定（`classify.py`，不硬编码节点名）：tris≤4 且 UV du≈dv≈1 → 全屏矩形；dv≥0.3 → 垂直水面；dv<0.3 且 v_min≥0.2 且 tris≥100 → **plane**（俯视泳道平面）；否则 → 水面（图像底部横带）。阈值是 `classify.py` 顶部常量，数据驱动。
 - **网格米数**（`meters.py`，纯模块——无 FBX SDK / OpenCV / NumPy，所以 stitch 也能 import）：两种规则按 kind 分发——
   - vertical/surface：锚点 + 实测 step（"以网格为准"）：右列跳过（右2=0.5m，向左 +step）；垂直跳最下/最上行（下1=0m，向上 +0.25m）；水面 Y 按 gap 聚类成带（下带=0m，向上每带 +实测带距）。
@@ -135,6 +143,20 @@ cd build/metal-release && ctest
 - 默认 UV V 原点 `bottom`（FBX 惯例，像素 `y=(1-v)*(height-1)`）；模型按图像坐标制作时用 `--uv-v-origin top`。坐标不钳制，越界交给 OpenCV 裁剪。
 - 渲染纯函数在 `render.py`（不 import fbx，可无 SDK 测试）；`classify.py`/`meters.py` 也是纯函数。CLI 在 `__main__.py` 负责场景生命周期（`read_scene` 的 `manager.Destroy()`）、分类与产物落盘。
 - 本机 FBX SDK 读取会生成 `.mayaSwatches/*.swatch` 缓存文件，属本地产物，不要提交。
+
+## 相机微动自动对齐（align）
+
+`scripts/run_align.sh` → `python -m python.align`（`python/align/`，纯 cv2+numpy 模块，不 import fbx）。标定绑的是「制作标定时那一张图」的 UV，相机一被碰 UV 就整体偏：underwater 十六台在 202607→202608 之间各偏最多 ~66px，femto 偏 ~50px。现场新数据没有标定，只能拿「已标定的历史图 + 新图 + 配准」推。
+
+- **修正只作用在 UV 上，绝不动 pos**：相机动了，泳池没动，所以世界几何与由它导出的米数一个字都不改。`outputs/<line>/mesh.json` 也不重写（那是 `.swasset` 逐字节编译的输入），对齐后的产物另落 `outputs/<line>/align/<key>/`。
+- **参考图必须是该 mesh 自己的 `.fbm` 贴图**，不是同名的数据集背景图。underwater2 的 A10 用 `10.png`（带泳者的片段首帧），UV 就是照它标的；换成 `underA10_background.png` 反而让 A10 两侧接缝变差，整线接缝增益从 +0.039 掉到 +0.001。入水机位同理，`align.calibration_image` 是这个问题的唯一答案（`_resolve_base_image` 也走它，标定图和底图必须是同一张，否则画在一张、对齐到另一张）。旧 005/006 线的 mesh 贴图**不是**标定帧（与 `background.jpg` 相关系数 −0.10），所以它声明 `base_image_path`。
+- **估计器不是 SIFT**：泳池瓷砖周期性纹理会让特征匹配在错一格的位置上自信锁死——underA1/underA9 实测报 −116px/−106px 而真值约 0，NCC 沿 x 在 ±200px 内是一片高原。用的是**相位相关播种 + 3 层金字塔 ECC**，默认 `homography`（ECC 直接在原图起步在 A1/A9 上不收敛，播种后 16/16 全收敛）。`--model` 可选 translation/euclidean/affine。
+- **两道门，任一不过整台相机回退原标定**（每相机独立，不因为第 16 台没配上就丢掉前 15 台的修正）：`sane()`（缩放 ∈[1/1.15,1.15]、旋转 ≤6°、中心位移 ≤15% 画幅、透视项 ≤0.35）与 **gain > 0**（参考图按矩阵 warp 后 NCC 必须比不 warp 高）。门槛不要提到 `gain ≥ 0.005`：实测会误杀 3~5 台有效相机、整线收益下降。
+- 缓存按 **(参考图内容, 探针图内容, model) 的 sha256** 落 `outputs/<line>/align/<key>/align.json`——不是路径也不是 mtime，因为这批贴图被原地重烤过（8.14-02 把 mask 合成图换成裸背景却没改名）。整线约 10s，`--force` 重算。
+- 「新数据」的底图是**片段等间隔 9 帧取中值**（`probe.py`），不是首帧：首帧常带泳者水花，会把配准往人身上拉。
+- 拼接线的评分是 `seams.py`：相邻两块重叠区在**零位移**下的 NCC。曾经报「最佳位移」，但水下重叠只有 0.5m 近乎均匀的池底瓷砖，搜索会顶到自己的边界（25px 半径报 24px）、对齐前后都一样，等于不区分。
+- 实测收益（`outputs/align/summary.csv`）：underwater×202608 接缝 0.627→0.676（15 条里 11 好 3 坏）、underwater×202607 0.651→0.685、underwater2×202608 0.789→0.828；water_entry femto 对**真值**（water_entry2/femto 是同一份几何在同一帧上手工重标的，顶点逐位相同只有 UV 不同）50.0px→17.2px。
+- **已知局限，不是 bug**：每台相机独立对齐而接缝属于两台，均值涨 0.03~0.05 但仍有 2~6 条接缝略变差（两侧修正方向不一致）。彻底解决要在接缝残差上做全局联合优化，本次不做，方向写在 `python/align/__init__.py`。
 
 ## 快照整理/合成/标注/拼接（frames）
 

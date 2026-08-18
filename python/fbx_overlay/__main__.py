@@ -30,10 +30,14 @@ import argparse
 import json
 from pathlib import Path
 
+from python.align.aligner import DEFAULT_MODEL as ALIGN_MODEL
+from python.align.aligner import MODELS as ALIGN_MODELS
+from python.align.mesh import warp_uv
 from python.common.media import MediaError, read_image, write_image
 from python.common.paths import OUTPUTS, display
 from python.fbx_tools import scene as fbx_scene
 
+from . import align as ALIGN
 from .classify import MeshKind, classify_mesh
 from .meters import annotate_document, grid_annotation
 from .profiles import (PROFILES, get as get_profile,
@@ -78,6 +82,18 @@ def _parser():
     )
     parser.add_argument("--uv-v-origin", choices=("bottom", "top"),
                         default="bottom")
+    parser.add_argument(
+        "--align-to", action="append", metavar="[CAMERA=]IMAGE",
+        help="correct camera drift against this newly captured image "
+             "(python/align); repeat as CAMERA=IMAGE for a line with several "
+             "cameras. Products gain an _aligned twin; mesh.json gains an "
+             "`align` block",
+    )
+    parser.add_argument("--align-model", default=ALIGN_MODEL,
+                        choices=tuple(ALIGN_MODELS),
+                        help="drift transform to fit (default: %(default)s)")
+    parser.add_argument("--no-align-cache", action="store_true",
+                        help="solve the drift every run instead of caching it")
     parser.add_argument("--line-thickness", type=int, default=2)
     parser.add_argument("--fill-alpha", type=float, default=0.0)
     parser.add_argument("--vertex-radius", type=int, default=0)
@@ -128,20 +144,14 @@ def _discover_meshes(fbx):
 def _resolve_base_image(camera, meshes, image_arg):
     """The camera image to draw on: --image, else the camera's base image.
 
-    New models carry a full-frame quad whose texture IS the camera image; the
-    legacy 005/006 models have no quad and declare ``base_image_path`` instead.
+    Delegates to ``align.calibration_image``, which owns the same question from
+    the other side — the frame the UVs were calibrated against IS the frame they
+    should be drawn over, and two answers to that would let the overlay draw on
+    one image while aligning to another.
     """
     if image_arg is not None:
         return read_image(image_arg, "base image")
-    if camera.base_image_path is not None:
-        return read_image(camera.base_image_path, "base image")
-    matches = [mesh for mesh in meshes
-               if mesh["kind"] is MeshKind.FULL_FRAME]
-    if not matches:
-        raise OverlayError(
-            f"no full-frame mesh in {camera.fbx} to extract the base image"
-        )
-    return load_texture(matches[0], "base image")
+    return ALIGN.calibration_image(camera, meshes)
 
 
 def _draw(base, meshes, grids, args):
@@ -160,7 +170,7 @@ def _draw(base, meshes, grids, args):
     return image
 
 
-def _render_camera(line, camera, args, out_dir):
+def _render_camera(line, camera, args, out_dir, align_target=None):
     """One sub-camera: mesh.json, the composite, and one image per mesh.
 
     Products live in ``<out_dir>/<camera>/`` — meshes are named the same across
@@ -170,19 +180,38 @@ def _render_camera(line, camera, args, out_dir):
 
     mesh.json is written first and independently of --no-labels: it is the
     deliverable, the images are the inspection aid.
+
+    With `align_target`, a second set of products is written with `_aligned` in
+    the name, drawn on the NEW image rather than the calibration one — the two
+    together are the before/after, and drawing the corrected mesh on the old
+    frame would compare nothing. Metre labels are unchanged either way: the pool
+    did not move, only the camera did, so a vertex's metre is still its metre.
     """
     meshes = _discover_meshes(camera.fbx)
     cam_dir = out_dir / camera.name
     document = annotate_document(line, display(camera.fbx), meshes)
-    mesh_json = cam_dir / "mesh.json"
-    cam_dir.mkdir(parents=True, exist_ok=True)
-    mesh_json.write_text(json.dumps(document, indent=2) + "\n",
-                         encoding="utf-8")
 
     drawn = [mesh for mesh in meshes
              if mesh["kind"] is not MeshKind.FULL_FRAME]
     grids = {mesh["node"]: grid_annotation(mesh) for mesh in drawn}
     base = _resolve_base_image(camera, meshes, args.image)
+
+    alignment = probe_image = None
+    if align_target is not None:
+        alignment, probe_image = ALIGN.resolve(
+            line, camera.name, base, align_target, model=args.align_model,
+            cache_path=None if args.no_align_cache
+            else cam_dir / "align" / "align.json")
+        document["align"] = {
+            "target": display(align_target),
+            "camera": camera.name,
+            **(alignment.as_dict() if alignment is not None else {}),
+        }
+
+    cam_dir.mkdir(parents=True, exist_ok=True)
+    mesh_json = cam_dir / "mesh.json"
+    mesh_json.write_text(json.dumps(document, indent=2) + "\n",
+                         encoding="utf-8")
 
     image = _draw(base, drawn, grids, args)
     composite = cam_dir / f"{camera.name}_mesh_overlay.png"
@@ -196,6 +225,37 @@ def _render_camera(line, camera, args, out_dir):
               f"{len(mesh['triangles'])} triangles")
     print(f"wrote {mesh_json}")
     print(f"wrote {composite} ({image.shape[1]}x{image.shape[0]})")
+
+    if probe_image is not None:
+        _write_aligned(line, camera, drawn, grids, args, cam_dir, probe_image,
+                       alignment)
+
+
+def _write_aligned(line, camera, drawn, grids, args, cam_dir, probe_image,
+                   alignment):
+    """The before/after pair on the NEW image: uncorrected UVs, then corrected.
+
+    Both are written even when the alignment was rejected, and the uncorrected
+    one always is: the question the pair answers is "how far off was the old
+    calibration on this frame, and did the correction close it", which needs the
+    off case visible on the same pixels."""
+    plain = _draw(probe_image, drawn, grids, args)
+    write_image(cam_dir / f"{camera.name}_mesh_overlay_new_off.png", plain,
+                "mesh overlay")
+    if alignment is None or not alignment.accepted:
+        reason = "rejected" if alignment is not None else "unsolved"
+        print(f"  alignment {reason}; wrote the uncorrected overlay on the new "
+              f"image only")
+        return
+    warped = [warp_uv(mesh, alignment.H) for mesh in drawn]
+    for mesh, source in zip(warped, drawn):
+        mesh["kind"] = source["kind"]
+    aligned = _draw(probe_image, warped,
+                    {mesh["node"]: grids[mesh["node"]] for mesh in warped},
+                    args)
+    path = cam_dir / f"{camera.name}_mesh_overlay_new_on.png"
+    write_image(path, aligned, "mesh overlay")
+    print(f"wrote {path} (aligned; gain {alignment.gain:+.4f})")
 
 
 def _render_explicit(specs, args, out_dir):
@@ -265,6 +325,9 @@ def main(argv=None):
         lines = _select_lines(args)
         for name in lines:
             profile = get_profile(name)
+            targets = (ALIGN.parse_targets(
+                args.align_to, [c.name for c in profile.cameras])
+                if args.align_to else {})
             # --output overrides; otherwise a single line uses its own dir and
             # multiple lines group under the default outputs root.
             out_dir = (args.output if len(lines) == 1 and args.output
@@ -272,9 +335,11 @@ def main(argv=None):
                              else profile.out_dir))
             for camera in profile.cameras:
                 if not wanted or camera.name in wanted:
-                    _render_camera(name, camera, args, out_dir)
+                    _render_camera(name, camera, args, out_dir,
+                                   align_target=targets.get(camera.name))
         return 0
-    except (MediaError, OverlayError, fbx_scene.FbxError) as error:
+    except (MediaError, OverlayError, ValueError,
+            fbx_scene.FbxError) as error:
         print(f"error: {error}")
         return 2
 

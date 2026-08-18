@@ -9,6 +9,7 @@ PACKAGES = {
     "common": "paths, media I/O, CSV tables, HTML pages",
     "fbx_tools": "the only place that imports the FBX SDK",
     "fbx_overlay": "FBX gridline metres, and the water-entry mesh overlays",
+    "align": "camera-drift correction for the calibrated UVs",
     "stitch": "the six camera lines: pool, underwater, overhead, + 2 each",
     "dataset": "custody of inputs/, which git does not carry",
     "water_entry": "the single water-entry camera",
@@ -32,6 +33,17 @@ CROSS_CHAIN_IMPORTS = {
     # the manifest is derived rather than typed.
     ("dataset", "stitch"),
     ("dataset", "fbx_overlay"),
+    # drift correction is one rule — register the new image against the one the
+    # UVs were drawn on, then move the UVs — and both chains whose calibrations
+    # drift need exactly it. A second copy would be two chances to get the
+    # UV-origin flip backwards.
+    ("stitch", "align"),
+    ("fbx_overlay", "align"),
+    # align's own entry point drives both chains to build the comparison matrix,
+    # and scores a stitch line through that chain's own projection rather than a
+    # second one of its own.
+    ("align", "stitch"),
+    ("align", "fbx_overlay"),
 }
 
 

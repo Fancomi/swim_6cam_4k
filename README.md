@@ -27,8 +27,8 @@
 | **数据集标注** | 浏览器标注器、快照合成、关键点复核页 | `scripts/run_label.sh` | `python/labeling/`、`python/keypoints/` |
 | **性能取证** | 48 格性能矩阵、十分钟 soak | `scripts/run_bench.sh` | `python/benchmarks/` |
 
-另有两个辅助入口：`scripts/run_fbx_overlay.sh`（入水机位网格叠加 + 米数）与
-`scripts/check_inputs.sh`（标定数据验收）。
+另有三个辅助入口：`scripts/run_fbx_overlay.sh`（入水机位网格叠加 + 米数）、
+`scripts/run_align.sh`（相机微动自动对齐，见下）与 `scripts/check_inputs.sh`（标定数据验收）。
 
 Windows 双击入口 `scripts\run_win.bat` 走的就是第一条链路。三个 `.sh` 入口不带参数或
 `--help` 就打印自己的完整用法，不必先读本文；两个 `.bat` 是双击入口，不带参数即执行，
@@ -280,6 +280,57 @@ overhead` 会把它按 FBX 自己的 UV 推导出来补画进去（`--dry-run` �
 
 overhead 单路解码明显低是像素总量所致（两路 4K 约为 16 路 720p 的 2.4 倍），渲染不受影响。
 
+## 相机微动自动对齐
+
+标定是「Mesh 顶点 → 某一张图的 UV」的绑定，绑定对象是制作标定时那张 `.fbm` 贴图。
+入水机位（femto/gemini）和水下 16 相机都不是拧死的：202607 → 202608 之间十六台各偏最多
+~66px，femto 偏 ~50px。UV 还指着泳池原来的位置，于是拼接错缝、入水距离读数偏移。现场
+新拍的数据自己没有标定，唯一的出路是把新图与已标定的那张图配准，把变换搬到 UV 上。
+
+```bash
+./scripts/run_align.sh                                # 标定版本 × 数据日期 交叉矩阵
+./scripts/run_align.sh --only underwater --dry-run
+./scripts/run_stitch.sh underwater still --align-from <片段目录>      # 单点复核
+./scripts/run_fbx_overlay.sh --line water_entry2 --align-to femto=<新图>
+```
+
+矩阵而不是单跑一次：修正只有和它的替代方案比才知道值不值。每格固定一份标定、一份数据，
+用**同一批像素**渲两遍——`off` 是原标定，`on` 是 UV 被修正过的，差别只有 UV。
+
+| 单元 | 问的问题 | 接缝 NCC / UV 误差 |
+| --- | --- | --- |
+| underwater × 202607 | 老标定 + 同期数据：无微动时的地板线 | 0.651 → 0.685 |
+| underwater × 202608 | 同一份标定六周后：微动最大，最像现场 | 0.627 → **0.676** |
+| underwater2 × 202608 | 重标的标定 + 同期数据 | 0.789 → 0.828 |
+| water_entry × 0807 | 老 femto UV 打到新帧，对**真值**评分 | 50.0px → **17.2px** |
+| water_entry2 × 0807 | 那份真值本身，作对照 | 位移 0.2px（本就对齐） |
+
+真值这一格能成立，是因为 `water_entry2/femto` 就是 `water_entry/water_entry_a` 的同一份
+几何在 0807 那一帧上手工重标的：顶点坐标逐位相同，只有 UV 不同。这是本仓库唯一一处
+微动修正可以被**打分**而不只是被比较的地方。
+
+产物：`outputs/<line>/align/<key>/`（`stitch_{off,on}{,_grid,_spans,_heat}.png` 或
+`overlay_{off,on}.png`，加 `align.json`/`cameras.csv` 记每台相机的矩阵与是否采纳），
+汇总 `outputs/align/summary.csv` 与 `index.html`。**`outputs/<line>/mesh.json` 不动**——
+它是 `.swasset` 逐字节编译的输入。
+
+- **修正只作用在 UV，不动 pos**：相机动了，泳池没动，世界几何与米数一个字都不改。
+- **参考图必须是该 mesh 自己的贴图**。underwater2 的 A10 用的是 `10.png`（带泳者的片段
+  首帧），UV 就是照它标的；换成看起来更「干净」的 `underA10_background.png`，A10 两侧接缝
+  反而变差，整线增益从 +0.039 掉到 +0.001。规则很简单：对着 UV 当初画在哪张图上配准，
+  那张图里有什么不重要。
+- **估计器不是 SIFT**。池底瓷砖是周期性的，特征匹配会在错一格的位置上找到几百个互相
+  一致的匹配：underA1/underA9 实测报 −116px / −106px，真值约 0，位移一致性过滤救不了
+  ——错的答案本身就是一致的。用的是相位相关播种 + 3 层金字塔 ECC，默认 homography。
+- **两道门，任一不过就整台相机回退原标定**：参数合理性（缩放 ±15%、旋转 ≤6°、
+  中心位移 ≤15% 画幅）与 gain > 0（按矩阵 warp 后 NCC 必须真的变高）。逐台判定，
+  第 16 台配不上不影响前 15 台。
+- 缓存键是 (参考图内容, 探针图内容, model) 的哈希，不是路径也不是 mtime——这批贴图被
+  原地重烤过。整线约 10s，`--force` 重算。
+- **已知局限**：每台相机独立对齐而接缝属于两台，均值涨 0.03~0.05，但 15 条接缝里仍有
+  2~6 条略变差（两侧修正方向不一致）。彻底解决要在接缝残差上做全局联合优化，
+  本次不做，方向写在 `python/align/__init__.py`。
+
 ## 入水检测机位
 
 `python/water_entry/` 是第四类相机：水下 0 号平面正上方的单个 Orbbec 机位
@@ -438,16 +489,20 @@ swim_fbx_demo/
 ├── python/
 │   ├── common/                  # paths / media / tables / page —— 跨链路共用
 │   ├── fbx_tools/               # 唯一 import fbx 的地方（scene、bake_uv）
-│   ├── stitch/                  # 三条相机线：profiles 是差异的唯一来源
+│   ├── stitch/                  # 六条相机线：profiles 是差异的唯一来源
+│   ├── fbx_overlay/             # 入水机位网格叠加 + 网格线米数（纯模块）
+│   ├── align/                   # 相机微动修正：配准 → 修 UV（纯 cv2+numpy）
 │   ├── water_entry/             # 入水检测机位
 │   ├── labeling/                # 浏览器标注器 + 快照索引
 │   ├── keypoints/               # COCO-17 复核页
 │   └── benchmarks/              # 指标校验与汇总
 ├── scripts/
-│   ├── run_stitch.{sh,ps1}      # 相机拼接（三条线）
+│   ├── run_stitch.{sh,ps1}      # 相机拼接（六条线）
 │   ├── run_water_entry.sh       # 入水检测全流程
 │   ├── run_label.sh             # 标注工具
 │   ├── run_bench.sh             # 性能矩阵 / soak
+│   ├── run_fbx_overlay.sh       # 入水机位网格叠加
+│   ├── run_align.sh             # 相机微动对齐交叉矩阵
 │   ├── run_win.bat              # Windows 双击入口（走 run_stitch 那条链路）
 │   ├── install.bat              # Windows 一键装环境
 │   └── checks/check_bat_format.ps1
@@ -464,8 +519,9 @@ swim_fbx_demo/
 └── outputs/                     # 全部渲染产物与指标（本机产物）
 ```
 
-`outputs/` 下一个目录对应一个包：`pool/`、`underwater/`、`overhead/`（三条相机线）、
-`water_entry/`、`labeling/`、`keypoints/`、`benchmarks/`，加一个共用的 `videos/`。
+`outputs/` 下一个目录对应一个包：`pool/`、`underwater/`、`overhead/`（六条相机线各一个）、
+`water_entry/`、`labeling/`、`keypoints/`、`benchmarks/`，加一个共用的 `videos/`，
+以及微动对齐的汇总 `align/`（每格的图落在 `outputs/<line>/align/<key>/`）。
 
 `build/` 与 `outputs/` 都被 gitignore，不放手写源码或文档。
 
@@ -548,7 +604,10 @@ cd build/metal-release && ctest                               # CLI 契约与 Me
   （位移 +322~+470px），说明那些片段里确实有人跳水，上游为何判为误触发在选人层面看不出来。
 - 默认外部数据集路径都是本机绝对路径。换机器后设置对应环境变量：
   `SWIMMING_DATASET_DIR`（pool 片段）、`SWIM_UNDER_GRIDS_ROOT`（水下快照与标注网格，也可用
-  `STITCH_GRID_DIR` 直接指到 grid 目录）、`WATER_ENTRY_DATASET_ROOT`（入水检测）、
+  `STITCH_GRID_DIR` 直接指到 grid 目录）、`SWIM_UNDER_VIDEOS_ROOT`（水下片段，微动对齐矩阵
+  的数据来源）、`WATER_ENTRY_DATASET_ROOT`（入水检测）、
   `SWIM_KEYPOINT_DATASET_ROOT`（COCO-17 标注数据集）。输出根也可以搬走：
   `SWIM_LABELING_OUTPUT_ROOT`、`WATER_ENTRY_OUTPUT_ROOT`。
+- 微动对齐是**逐相机独立**的，而接缝属于相邻两台：接缝 NCC 均值涨 0.03~0.05，但 15 条里仍
+  有 2~6 条略微变差。要全部变好需要在接缝残差上联合求解所有相机的变换，尚未实现。
 - `.venv/` 只保证当前 macOS / Python 3.10 组合；其他平台需自备兼容环境。

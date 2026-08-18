@@ -9,27 +9,42 @@ Why the span map is its own file rather than more ink on the grid: the grid answ
 "is the geometry right" and is already dense (sixteen sets of triangle edges),
 while the span map answers "which camera covers this stretch, and where does it
 hand over". Overlaying the second on the first buried both.
+
+`alignments` corrects for camera drift (python/align): a knocked camera makes the
+calibrated UVs point at the wrong pixels, and the correction goes on the UVs right
+after they are loaded. Everything below that line — canvas, remap, blend — is
+untouched, because what moved is where each vertex samples, not where the pool is.
 """
 import cv2
 
+from python.align.mesh import warp_meshes
 from python.common.media import read_image, write_image
 from python.stitch import compose as C
 from python.stitch.profiles import StepError
 
 
 def render(profile, tex_dir, out_prefix, ppm=None, blend_px=None,
-           full_res=None, tex_names=None, grid=True, heatmap=True, spans=True):
-    """Write `<out_prefix>{,_grid,_spans,_heat,_label}.png`. Returns (width, height)."""
-    tex_dir = profile.still_textures if tex_dir is None else tex_dir
-    if not tex_dir.is_dir():
-        raise StepError(f"texture directory missing: {tex_dir}")
+           full_res=None, tex_names=None, grid=True, heatmap=True, spans=True,
+           textures=None, alignments=None):
+    """Write `<out_prefix>{,_grid,_spans,_heat,_label}.png`. Returns (width, height).
 
+    `textures` supplies the per-lane images directly, in profile camera order,
+    for callers holding images that are not files on disk — the align chain's
+    probes are medians over a clip. `tex_dir`/`tex_names` are then unused.
+    """
     meshes = C.load_meshes(profile.mesh_json, neg_v=profile.neg_v,
                           neg_u=profile.neg_u)
-    names = tex_names or [mesh["texture_basename"] for mesh in meshes]
-    if len(names) != len(meshes):
-        raise StepError(f"{len(names)} texture names for {len(meshes)} meshes")
-    textures = [read_image(tex_dir / name, "texture") for name in names]
+    if textures is None:
+        tex_dir = profile.still_textures if tex_dir is None else tex_dir
+        if not tex_dir.is_dir():
+            raise StepError(f"texture directory missing: {tex_dir}")
+        names = tex_names or [mesh["texture_basename"] for mesh in meshes]
+        if len(names) != len(meshes):
+            raise StepError(f"{len(names)} texture names for {len(meshes)} meshes")
+        textures = [read_image(tex_dir / name, "texture") for name in names]
+    elif len(textures) != len(meshes):
+        raise StepError(f"{len(textures)} textures for {len(meshes)} meshes")
+    meshes = warp_meshes(meshes, alignments)
 
     full_res = profile.full_res if full_res is None else full_res
     if ppm is None:

@@ -8,18 +8,20 @@
 
 | 链路 | 入口 | 代码 |
 | --- | --- | --- |
-| 相机拼接（pool / pool2 / underwater / underwater2 / overhead 五条相机线） | `scripts/run_stitch.{sh,ps1}` | `python/stitch/` + `cpp/` |
+| 相机拼接（pool / pool2 / underwater / underwater2 / overhead / overhead2 六条相机线） | `scripts/run_stitch.{sh,ps1}` | `python/stitch/` + `cpp/` |
 | 入水检测机位 | `scripts/run_water_entry.sh` | `python/water_entry/` |
 | 数据集标注 | `scripts/run_label.sh` | `python/labeling/`、`python/keypoints/` |
 | 性能取证 | `scripts/run_bench.sh` | `python/benchmarks/` |
 
-`scripts\run_win.bat` 是 Windows 双击入口，走第一条链路——它与 `install.bat` 是两个例外：双击就要干活，所以不带参数即执行，用法写在顶部被 `goto` 跳过的说明区里。三个 `.sh` 入口不带参数或 `--help` 打印自己的用法，且说明只存在脚本顶部一处（用法函数把那段注释打出来，不再复制）；`run_bench.sh` 的选项清单是个例外，它带默认值太多，另用一段 heredoc。另有两个辅助入口 `run_fbx_overlay.sh`（入水机位网格叠加 + 米数）与 `check_inputs.sh`（标定数据验收），同样把用法写在顶部注释里。新增脚本请延续「一条链路一个入口」的口径，不要再按平台或语言拆。
+`scripts\run_win.bat` 是 Windows 双击入口，走第一条链路——它与 `install.bat` 是两个例外：双击就要干活，所以不带参数即执行，用法写在顶部被 `goto` 跳过的说明区里。三个 `.sh` 入口不带参数或 `--help` 打印自己的用法，且说明只存在脚本顶部一处（用法函数把那段注释打出来，不再复制）；`run_bench.sh` 的选项清单是个例外，它带默认值太多，另用一段 heredoc。另有三个辅助入口 `run_fbx_overlay.sh`（入水机位网格叠加 + 米数）、`run_align.sh`（相机微动自动对齐）与 `check_inputs.sh`（标定数据验收），同样把用法写在顶部注释里。新增脚本请延续「一条链路一个入口」的口径，不要再按平台或语言拆。
 
-Python 侧一个包一件事：`common/` 是跨链路共用的路径 / 图像 IO / CSV / HTML 页面骨架，`fbx_tools/` 是**唯一** import `fbx` 的地方，`dataset/` 看管不在 git 里的 `inputs/`，其余包对应上表四条链路——`labeling` 与 `keypoints` 同属标注链路。`tests/python/test_layout.py` 把这些约束写成了断言——包清单、每个包必须有 docstring、`import fbx` 只允许出现在 `fbx_tools/`、除 `common/paths.py` 外任何模块都不许自己算仓库根、**链路之间的 import 必须登记在 `CROSS_CHAIN_IMPORTS` 里**（目前四条，新增一条得先改断言）。测试在 `tests/`（`cpp/`、`python/`、`fixtures/`），运行时 config 在 `inputs/configs/`，`build/` 与 `outputs/` 是本机产物，不放手写源码或文档。
+Python 侧一个包一件事：`common/` 是跨链路共用的路径 / 图像 IO / CSV / HTML 页面骨架，`fbx_tools/` 是**唯一** import `fbx` 的地方，`dataset/` 看管不在 git 里的 `inputs/`，`align/` 是相机微动修正（纯 cv2+numpy，两条会漂的链路共用），其余包对应上表四条链路——`labeling` 与 `keypoints` 同属标注链路。`tests/python/test_layout.py` 把这些约束写成了断言——包清单、每个包必须有 docstring、`import fbx` 只允许出现在 `fbx_tools/`、除 `common/paths.py` 外任何模块都不许自己算仓库根、**链路之间的 import 必须登记在 `CROSS_CHAIN_IMPORTS` 里**（新增一条得先改断言）。测试在 `tests/`（`cpp/`、`python/`、`fixtures/`），运行时 config 在 `inputs/configs/`，`build/` 与 `outputs/` 是本机产物，不放手写源码或文档。
 
 六条相机线共用一套拼接代码，**差异全部是 `python/stitch/profiles.py` 里的数据**（模型、相机 id、网格排序、每米像素、融合方式、时间对齐策略、参考贴图来源、泳道示意图、是否标米数）。加一条线应当只加一条 profile 记录；如果它需要一个新字段，那个字段本身就是需要先想清楚的东西。不要在 `python/stitch/` 的其他模块里按线路名分支。三个物理机位各有两条线：同一批相机换一份重建的 FBX 就是一条新线（`pool`/`pool2`、`underwater`/`underwater2`、`overhead`/`overhead2`），产物各自落 `outputs/<line>/`，两条线才能逐帧对比。
 
 相机数量、相机 ID、输出尺寸都是**数据而非代码**：`kMaxCameras = 16`（`cpp/core/include/swim/core/camera_capacity.hpp`），config 里 `source.<id>=<path>` 的声明顺序即通道顺序。新增机位布局应通过 config + `.swasset` 表达，不要在 C++ 里加分支。
+
+**标定会因为相机微动而失效，修正在 `python/align/`**（`scripts/run_align.sh`，详见 README 的「相机微动自动对齐」）。要点只有四条：修正只作用在 UV，世界几何与米数不动；参考图必须是该 mesh 自己的 `.fbm` 贴图（不是同名的「更干净」的数据集背景图）；估计器是相位相关播种的金字塔 ECC 而**不是** SIFT（池底瓷砖周期性纹理会让特征匹配错一格自信锁死）；每台相机独立过 `sane()` 与 gain>0 两道门，不过就回退原标定。`outputs/<line>/mesh.json` 永远不被改写——它是 `.swasset` 逐字节编译的输入。
 
 ## 构建、测试与开发命令
 
