@@ -638,22 +638,38 @@ class ProfileTest(unittest.TestCase):
             with self.assertRaises(P.StepError):
                 P.get("overhead").clip_for(td, "overhead5")
 
+    def test_clip_for_skips_appledouble_sidecars(self):
+        # A dataset copied through a Mac or an exFAT/SMB share carries a 4KB
+        # `._name` stub beside every file. It matches the glob, so without the
+        # filter every camera reads as "ambiguous" — and the wrong pick would
+        # hand the decoder a resource fork instead of video.
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            (td / "20260730_170731_cam5.mp4").write_bytes(b"")
+            (td / "._20260730_170731_cam5.mp4").write_bytes(b"")
+            self.assertEqual(P.get("pool").clip_for(td, "cam5").name,
+                             "20260730_170731_cam5.mp4")
+
     def test_grid_dir_honours_the_explicit_override(self):
         # Resolved at use time, not at import, so setting the variable in a shell
         # before the command still takes effect.
+        #
+        # Compared as Path, not str: Path("/tmp/x") stringifies with backslashes
+        # on Windows, so a str comparison tests the host's separator rather than
+        # the override being honoured.
         import os
         from unittest.mock import patch
         with patch.dict(os.environ, {"STITCH_GRID_DIR": "/tmp/grids-xyz"}):
-            self.assertEqual(str(P.get("underwater").still_textures),
-                             "/tmp/grids-xyz")
+            self.assertEqual(P.get("underwater").still_textures,
+                             Path("/tmp/grids-xyz"))
 
     def test_grid_dir_falls_back_to_the_dataset_root(self):
         import os
         from unittest.mock import patch
         with patch.dict(os.environ, {"SWIM_UNDER_GRIDS_ROOT": "/tmp/ds-xyz"}):
             os.environ.pop("STITCH_GRID_DIR", None)
-            self.assertEqual(str(P.get("underwater").still_textures),
-                             "/tmp/ds-xyz/annotation-grids")
+            self.assertEqual(P.get("underwater").still_textures,
+                             Path("/tmp/ds-xyz/annotation-grids"))
 
 
 class AssetTest(unittest.TestCase):

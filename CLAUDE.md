@@ -21,7 +21,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 | 链路 | 入口 | 代码 |
 | --- | --- | --- |
-| 相机拼接（pool / pool2 / underwater / underwater2 / overhead / overhead2 六条相机线） | `scripts/run_stitch.{sh,ps1}` | `python/stitch/` + `cpp/` |
+| 相机拼接（pool / pool2 / underwater / underwater2 / overhead / overhead2 六条相机线） | `scripts/run_stitch.{sh,ps1}`、`scripts\run_win.bat` | `python/stitch/` + `cpp/` |
 | 入水检测机位 | `scripts/run_water_entry.sh` | `python/water_entry/` |
 | 数据集标注 | `scripts/run_label.sh` | `python/labeling/`、`python/keypoints/` |
 | 性能取证 | `scripts/run_bench.sh` | `python/benchmarks/` |
@@ -81,6 +81,10 @@ cd build/metal-release && ctest
 ./scripts/run_stitch.sh overhead tex,still --real --video-dir /path/to/dir
 ./scripts/run_stitch.sh overhead2 extract,still        # 重建 FBX，同一批片段
 
+# 拼接线（Windows 双击入口；片段目录按机位写在 bat 的 DIR_* 变量里）
+scripts\run_win.bat                # 默认 pool2 + d3d11 + 30s
+scripts\run_win.bat under2 12      # 换线；over2 / pool / under / over 同理
+
 # 入水检测全流程
 ./scripts/run_water_entry.sh
 ./scripts/run_water_entry.sh --skip-predict   # 复用已有预测
@@ -110,7 +114,7 @@ cd build/metal-release && ctest
 ./scripts/run_frames.sh label                         # 打开浏览器 mask 标注器
 ```
 
-环境：`.venv`（Python 3.10）+ `requirements-win.txt`（numpy / opencv-python-headless）+ Autodesk FBX SDK + `requirements-pose.txt`（torch/ultralytics，约 2.5GB，**仅**入水检测链路需要，由 `install.bat pose` 安装）。macOS 手工准备检查：`.venv/bin/python -c "import fbx, numpy, cv2, PIL"`。
+环境：`.venv`（Python 3.10）+ `requirements-win.txt`（numpy / opencv-python-headless / pillow）+ Autodesk FBX SDK + `requirements-pose.txt`（torch/ultralytics，约 2.5GB，**仅**入水检测链路需要，由 `install.bat pose` 安装）。手工准备检查（两平台同口径）：`python -c "import fbx, numpy, cv2, PIL"`——pillow 是 frames 链路的硬依赖（`labeling/merge_overhead.py` 模块级 import），曾漏在 requirements 外导致 Windows 上该链路直接 ImportError。
 
 ## 入水检测链路（water_entry）
 
@@ -213,5 +217,10 @@ bash scripts/run_frames.sh products --dry-run       # 只打印要跑什么
 - Python：4 空格、小写下划线，模块入口一律 `python -m python.<pkg>[.<mod>]`。C++20：`swim::core` / `swim::d3d11` / `swim::cudagl`，成员变量带尾下划线。
 - 源码 UTF-8；注释解释**为什么**，尤其是「看起来可以简化但实际不能」的地方。
 - `scripts/**/*.bat` 必须 UTF-8 无 BOM + CRLF，第三行 `goto :run`，中文只放在被 goto 跳过的说明区，执行区注释一律 ASCII；改动后运行 `scripts\checks\check_bat_format.ps1`。
+- **Windows 上跑通的四条踩坑口径**（都已修在源码里，遇到同类症状先想这四条）：
+  - 图像 IO 一律走 `python.common.media` 的 `read_image`/`write_image`（内部 `imdecode`/`imencode` + Python 开文件）。`cv2.imread`/`imwrite` 在中文机器上按 ANSI 解路径，`25 水面.fbm` 这种路径会报「can't open/read file」，看着像文件缺失。
+  - `.sh` 里选解释器要先试 `.venv/Scripts/python.exe` 再 fallback：Windows 的 `python3` 是 WindowsApps 别名，会弹应用商店并以 49 退出、**什么都不打印**。
+  - 测试里读带中文的源码/脚本必须显式 `encoding="utf-8"`，裸 `open()` 按 GBK 解会 UnicodeDecodeError。
+  - `shasum`/`sha256sum` 传 Windows 路径时按 GNU 惯例转义反斜杠、整行前加 `\`，`awk '{print $1}'` 会取到带前导反斜杠的哈希；改成从 stdin 读。
 - 提交信息 `type(scope): 简短祈使句`，与现有历史一致。
 - 不提交：`build/`、`outputs/`、`third_party/`、`*.pt`、大视频、`.swasset`、`.venv`、**`inputs/` 除 `configs/` 外的全部**（见开头「标定数据不在 git 里」）。`outputs/pool/mesh.json` 被 gitignore 却是 CMake 硬依赖（缺了任何 target 都编不过），用 `./scripts/run_stitch.sh pool extract` 生成。

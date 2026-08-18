@@ -61,8 +61,14 @@ class LayoutTest(unittest.TestCase):
                             f"python/{name} has no module docstring")
 
     def test_no_package_beyond_the_declared_set(self):
+        # A package is a directory holding .py source. Retired packages leave a
+        # __pycache__ full of .pyc behind (git does not remove empty directories,
+        # and the bytecode is ignored), so a directory-name scan alone reports
+        # long-deleted packages — python/underwater, python/assets and friends —
+        # as if they were back.
         found = {path.name for path in (ROOT / "python").iterdir()
-                 if path.is_dir() and not path.name.startswith("__")}
+                 if path.is_dir() and not path.name.startswith("__")
+                 and any(path.glob("*.py"))}
         self.assertEqual(found, set(PACKAGES))
 
     def test_the_fbx_sdk_is_imported_in_exactly_one_package(self):

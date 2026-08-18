@@ -9,6 +9,31 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
+BENCH = ROOT / "scripts" / "run_bench.sh"
+
+
+def bench(*arguments, **keywords):
+    """Run scripts/run_bench.sh through bash, whatever the platform.
+
+    Handing the .sh straight to CreateProcess fails on Windows with WinError 193
+    ("not a valid Win32 application") — the shebang means nothing to the loader
+    there. Naming the interpreter is also what the executable bit cannot do: git
+    tracks mode 100755, but NTFS has no exec bit for os.access to read.
+    """
+    return subprocess.run(["bash", str(BENCH), *arguments], cwd=ROOT, text=True,
+                          capture_output=True, **keywords)
+
+
+def is_executable(path):
+    """True when git records the file as mode 755.
+
+    Not os.access(X_OK): on Windows that answers "does it exist". The mode in
+    git's index is what actually ships, and it is the same answer on every
+    platform."""
+    entry = subprocess.check_output(
+        ["git", "ls-files", "-s", "--", str(path.relative_to(ROOT).as_posix())],
+        cwd=ROOT, text=True)
+    return entry.split(" ", 1)[0] == "100755"
 
 
 class BenchmarkScriptsTest(unittest.TestCase):
@@ -58,35 +83,21 @@ class BenchmarkScriptsTest(unittest.TestCase):
         return config, executable, log
 
     def test_matrix_runner_lists_each_required_cell_once(self):
-        script = ROOT / "scripts" / "run_bench.sh"
-        result = subprocess.run(
-            [str(script), "matrix", "--list-cells"],
-            cwd=ROOT,
-            text=True,
-            capture_output=True,
-            check=True,
-        )
+        result = bench("matrix", "--list-cells", check=True)
         cells = result.stdout.splitlines()
         self.assertEqual(len(cells), 48)
         self.assertEqual(len(set(cells)), 48)
         self.assertIn("decode-only,1,paced", cells)
         self.assertIn("full,6,unpaced", cells)
-        self.assertTrue(os.access(script, os.X_OK))
+        self.assertTrue(is_executable(BENCH))
 
     def test_soak_help_exposes_safety_defaults(self):
-        script = ROOT / "scripts" / "run_bench.sh"
-        result = subprocess.run(
-            [str(script), "soak", "--help"],
-            cwd=ROOT,
-            text=True,
-            capture_output=True,
-            check=True,
-        )
+        result = bench("soak", "--help", check=True)
         self.assertIn("600", result.stdout)
         self.assertIn("29.0", result.stdout)
         self.assertIn("67108864", result.stdout)
         self.assertIn("33554432", result.stdout)
-        self.assertTrue(os.access(script, os.X_OK))
+        self.assertTrue(is_executable(BENCH))
 
     def test_external_executable_is_preflighted_and_latest_stays_inside_outputs(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -94,19 +105,9 @@ class BenchmarkScriptsTest(unittest.TestCase):
             config, executable, log = self.make_fake_run(directory)
             output = directory / "external results with spaces"
             environment = dict(os.environ, FAKE_EXEC_LOG=str(log))
-            subprocess.run(
-                [
-                    str(ROOT / "scripts" / "run_bench.sh"),
-                    "matrix",
-                    "--quick", "--config", str(config), "--executable", str(executable),
-                    "--output-dir", str(output),
-                ],
-                cwd=ROOT,
-                env=environment,
-                text=True,
-                capture_output=True,
-                check=True,
-            )
+            bench("matrix", "--quick", "--config", str(config),
+                  "--executable", str(executable), "--output-dir", str(output),
+                  env=environment, check=True)
             self.assertEqual(len(log.read_text().splitlines()), 49)
             manifest = json.loads((output / "manifest.json").read_text())
             expected_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
@@ -125,17 +126,9 @@ class BenchmarkScriptsTest(unittest.TestCase):
             directory = Path(temporary)
             config, executable, log = self.make_fake_run(directory)
             environment = dict(os.environ, FAKE_EXEC_LOG=str(log), FAKE_GIT_SHA="c" * 40)
-            result = subprocess.run(
-                [
-                    str(ROOT / "scripts" / "run_bench.sh"),
-                    "matrix",
-                    "--quick", "--config", str(config), "--executable", str(executable),
-                    "--output-dir", str(directory / "mismatch"),
-                ],
-                cwd=ROOT,
-                env=environment,
-                text=True,
-                capture_output=True,
-            )
+            result = bench("matrix", "--quick", "--config", str(config),
+                           "--executable", str(executable),
+                           "--output-dir", str(directory / "mismatch"),
+                           env=environment)
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(log.read_text().splitlines(), ["render-only"])

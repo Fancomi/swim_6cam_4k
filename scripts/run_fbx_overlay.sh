@@ -33,7 +33,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The venv interpreter sits in bin/ on POSIX and Scripts/ on Windows. Check both
+# before falling back: on Windows `python3` resolves to the WindowsApps App
+# Execution Alias, which opens the Microsoft Store and exits 49 printing nothing
+# — the script looks like it did no work at all.
 PY="$ROOT/.venv/bin/python"
+[[ -x "$PY" ]] || PY="$ROOT/.venv/Scripts/python.exe"
 [[ -x "$PY" ]] || PY="$(command -v python3)"
 
 if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then

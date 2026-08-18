@@ -67,8 +67,13 @@ EOF
 }
 
 python_bin() {
+  # bin/ on POSIX, Scripts/ on Windows. Check both before falling back: on
+  # Windows `python3` resolves to the WindowsApps App Execution Alias, which
+  # opens the Microsoft Store and exits 49 printing nothing.
   if [[ -x "$ROOT/.venv/bin/python" ]]; then
     printf '%s\n' "$ROOT/.venv/bin/python"
+  elif [[ -x "$ROOT/.venv/Scripts/python.exe" ]]; then
+    printf '%s\n' "$ROOT/.venv/Scripts/python.exe"
   else
     command -v python3
   fi
@@ -114,7 +119,12 @@ resolve_path() {
     fi
     value="${value//\$\{$name\}/${!name}}"
   done
-  if [[ "$value" = /* ]]; then
+  # Absolute means "do not prepend $ROOT". A leading / covers POSIX; a drive
+  # letter covers Windows, where python.stitch writes config paths as
+  # `D:/WindowsProject/...` (Path.as_posix) — without this branch every one of
+  # them is pasted onto $ROOT and the preflight rejects the config with
+  # "benchmark input does not exist: /d/.../D:/...".
+  if [[ "$value" = /* || "$value" =~ ^[A-Za-z]:[/\\] ]]; then
     printf '%s\n' "$value"
   else
     printf '%s/%s\n' "$ROOT" "$value"
@@ -122,10 +132,16 @@ resolve_path() {
 }
 
 sha256_file() {
+  # Read from stdin rather than passing the name: both tools follow the GNU
+  # convention of escaping a filename that contains a backslash, prefixing the
+  # whole line with one — so a Windows path yields
+  # `\53a76a...  *D:\\Win\\...` and awk's first field is the hash with a stray
+  # leading backslash. The downstream validator then rejects it as "must be 64
+  # hexadecimal digits". Content is what is being hashed; the name is incidental.
   if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" | awk '{print $1}'
+    shasum -a 256 < "$1" | awk '{print $1}'
   else
-    sha256sum "$1" | awk '{print $1}'
+    sha256sum < "$1" | awk '{print $1}'
   fi
 }
 
