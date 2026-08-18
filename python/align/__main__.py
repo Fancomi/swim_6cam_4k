@@ -148,6 +148,14 @@ SUMMARY_COLUMNS = ["cell", "kind", "cross", "line", "key", "note", "cameras",
 
 
 def cell_dir(cell):
+    """Where a cell's products land: outputs/<line>/align/<key>.
+
+    The water_entry chain now splits its outputs into pose/ and calib/, and the
+    calibration side (this matrix included) lives under calib/. The stitch lines
+    keep their flat outputs/<line>/align/ layout, so only the water-entry line
+    takes the calib/ hop."""
+    if cell.line == "water_entry":
+        return OUTPUTS / "water_entry" / "calib" / "align" / cell.key
     return OUTPUTS / cell.line / "align" / cell.key
 
 
@@ -388,7 +396,8 @@ def _figure(path):
     try:
         relative = path.relative_to(OUTPUTS / "align")
     except ValueError:
-        # Cells write under outputs/<line>/align/; link back out.
+        # Cells write under outputs/<line>/align/ (water_entry under
+        # calib/align/); link back out to the outputs root either way.
         relative = Path("..") / path.relative_to(OUTPUTS)
     source = page.escape(relative.as_posix())
     caption = page.escape(path.name)

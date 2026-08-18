@@ -378,12 +378,14 @@ overhead 单路解码明显低是像素总量所致（两路 4K 约为 16 路 72
 
 `python/water_entry/` 是第四类相机：水下 0 号平面正上方的单个 Orbbec 机位
 （RGB 1280×720 @30fps），用于仰泳蹬壁出发的**空中反弓与入水姿态**识别。与三条拼接线
-互不依赖，产物写入 `outputs/water_entry/`。
+互不依赖。姿态检测产物写入 **`outputs/pose/`**（预测/筛选/质检/交付/复核/权重，单独
+拎出该链路目录之外），标定产物写入 `outputs/water_entry/calib/`（对齐缓存、叠图）。
 
 ```bash
-./scripts/run_water_entry.sh                  # 全流程：预测 → 选帧 → 质检页 → 交付包
+./scripts/run_water_entry.sh                  # 全流程：预测 → 选帧 → 质检页 → 交付包 → 标定叠图
 ./scripts/run_water_entry.sh --skip-predict   # 复用已有预测，只重跑后续
 ./scripts/run_water_entry.sh --kp 0.10        # 收紧关键点分歧阈值，选出更少
+./scripts/run_water_entry.sh --no-overlay     # 最后一步不画标定叠图
 ```
 
 数据集默认指向本机路径，可用 `WATER_ENTRY_DATASET_ROOT` 覆盖；它需要
@@ -391,8 +393,25 @@ overhead 单路解码明显低是像素总量所致（两路 4K 约为 16 路 72
 `<clip>.mp4` 与 `<clip>_res.json`，以及两个 `.pt` 权重。**新增片段后重跑这一个脚本即可
 全量刷新**：流程内没有增量状态，不存在只更新一半的可能。
 
-四个流程步骤各自也能单独调：`python -m python.water_entry.{predict,select_frames,annotate_preview,export_package}`，
+五个流程步骤各自也能单独调：`python -m python.water_entry.{predict,select_frames,annotate_preview,export_package,overlay}`，
 另有 `review` 出逐帧复核页。
+
+### 标定叠图（overlay，最后一步）
+
+`python -m python.water_entry.overlay [--line water_entry|water_entry2]` 把水面/纵向两套
+标定网格画成透明 RGBA 叠图，作用于入水机位相机原图（1280×720），供下游对着真实泳道
+核对泳道边界、深度与距离刻度。`water_entry` 旧线一图；`water_entry2` 按子相机出
+`overlay_femto.png` / `overlay_gemini.png`：
+
+- **(1)** 水面网格横向线（y 带）：0-1 左水线与 3-4 右水线两条水线带**黄色填充**；
+- **(2)** 水面网格纵向线（x 列）：**红色线段**，跳过最右列（右水线），只画水道内；
+- **(3)** 纵向网格横向线（0.0~1.5m 深度）：**绿色线段**；
+- **(4)** 纵向网格纵向线（全部 x 列）：**蓝色线段**；
+- **(5)** 纵向网格侧标：**右侧**写高度米标（各 y 行），**上侧**写横向米标（各 x 列）。
+
+所有线段画在**带 meter 的顶点**上（测试断言逐顶点覆盖）。`--align-to 现场新图` 复用
+python.align 对微动做修正后再画；`--image 图` 换叠加目标图；默认产物
+`outputs/water_entry/calib/overlay/<line>/overlay*.png` + `overlay*.composite.png`。
 
 ### 三条经过验证的结论
 

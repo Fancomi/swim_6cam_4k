@@ -119,11 +119,12 @@ scripts\run_win.bat under2 12      # 换线；over2 / pool / under / over 同理
 
 ## 入水检测链路（water_entry）
 
-单机位 YOLO-pose 难例筛选：`predict.py` → `select_frames.py` → `annotate_preview.py` → `export_package.py`（`scripts/run_water_entry.sh` 顺序调用；`review.py` 是基于已有 per-frame JSON 的独立复核入口）。manifest.csv 是片段唯一来源，后续步骤全量重算、无增量状态。
+单机位 YOLO-pose 难例筛选：`predict.py` → `select_frames.py` → `annotate_preview.py` → `export_package.py` → `overlay.py`（`scripts/run_water_entry.sh` 顺序调用；`review.py` 是基于已有 per-frame JSON 的独立复核入口）。manifest.csv 是片段唯一来源，后续步骤全量重算、无增量状态。
 
-- 数据集根默认 `/Users/penghaotian/Downloads/DATAS/SWIMMING/swimming-up/swimming-gz-bad`，用 `WATER_ENTRY_DATASET_ROOT` 覆盖；产物默认 `outputs/water_entry/`，用 `WATER_ENTRY_OUTPUT_ROOT` 覆盖。
+- 数据集根默认 `/Users/penghaotian/Downloads/DATAS/SWIMMING/swimming-up/swimming-gz-bad`，用 `WATER_ENTRY_DATASET_ROOT` 覆盖。产物分两处：**姿态检测链落 `outputs/pose/`**（predict / select_frames 候选 / annotate_preview / annotate_package / review / weights，单独拎出该链路目录之外，`WATER_ENTRY_OUTPUT_ROOT` 只影响它）；标定任务落 `outputs/water_entry/calib/`。
 - 判据集中在 `common.py`：入水帧取 `backstroke.entry_frame`（`res.json`）优先，`manifest.water_frame` 只作对照——`water_frame` 在 `backstroke_applied=False` 时不可信。
 - 筛选阈值唯一来源是 `select_frames.py` 的 `DEFAULT_*`，`run_water_entry.sh` 运行时读取而非复制。
+- **最后一步 `overlay.py` 画水面/纵向标定叠图**（`outputs/water_entry/calib/overlay/<line>/overlay*.png`，透明 RGBA + `*.composite.png` 合成到相机原图；`--line water_entry|water_entry2`，新线按子相机出 `overlay_femto/gemini`）：水面网格画「0-1/3-4 水线带黄色填充 + 纵向红色刻度（跳过最右列右水线）」；纵向网格画「0.0~1.5m 深度绿色横向线 + 全部蓝色纵向线 + 右侧高度米标 + 上侧横向米标」。**所有线段画在带 meter 的顶点上**（tests/python/test_water_entry_overlay.py 断言每个带米标顶点都被同 meter 边覆盖）。`--align-to 新图` 复用 python.align 对现场新图做微动修正后再画；`--image 图` 直接换叠加目标图；`--no-overlay` 跳过这步。
 
 ## FBX 网格叠加（fbx_overlay）
 

@@ -5,7 +5,7 @@
 的信号与分数，便于判断「这一帧到底值不值得花标注预算」。
 
 复用 review.py 的绘制与裁剪函数，不重新推理。
-产物：outputs/water_entry/annotate_preview/{crops/,index.html}
+产物：outputs/pose/annotate_preview/{crops/,index.html}
 """
 import argparse
 import json
@@ -150,9 +150,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--candidates",
-                    default=os.path.join(C.OUTPUT_ROOT, "annotate_candidates.csv"),
+                    default=os.path.join(C.POSE_ROOT, "annotate_candidates.csv"),
                     help="select_frames 输出的 CSV（默认 %(default)s）")
-    ap.add_argument("--predict-dir", default=os.path.join(C.OUTPUT_ROOT, "predict"))
+    ap.add_argument("--predict-dir", default=os.path.join(C.POSE_ROOT, "predict"))
     ap.add_argument("--limit", type=int, default=100,
                     help="只渲染前 N 帧（默认 %(default)s；0 = 全部）")
     ap.add_argument("--order", choices=("score", "asc"), default="score",
@@ -162,7 +162,7 @@ def main():
     ap.add_argument("--full-frame", action="store_true", help="不裁剪，输出整帧")
     ap.add_argument("--cell-width", type=int, default=300, help="单元显示宽度 px")
     ap.add_argument("--output-dir",
-                    default=os.path.join(C.OUTPUT_ROOT, "annotate_preview"))
+                    default=os.path.join(C.POSE_ROOT, "annotate_preview"))
     args = ap.parse_args()
 
     if not os.path.exists(args.candidates):

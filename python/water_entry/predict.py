@@ -13,7 +13,7 @@
 `water_frame`——后者在 `backstroke_applied=False` 的 47 条片段上偏早 3~36 帧
 （见 common.Clip 的说明）。两者都作为列写进 metrics.csv 以便对照。
 
-产物：outputs/water_entry/predict/<model>/metrics.csv 与 per_frame/<clip>.json。
+产物：outputs/pose/predict/<model>/metrics.csv 与 per_frame/<clip>.json。
 """
 import argparse
 import json
@@ -157,7 +157,7 @@ def main():
                     help="每次 predict 的帧数（默认 %(default)s）")
     ap.add_argument("--no-verify-empty", action="store_true",
                     help="窗口全空时不做 CPU 复算（默认复算，用于排除 GPU 偶发全零）")
-    ap.add_argument("--output-dir", default=os.path.join(C.OUTPUT_ROOT, "predict"))
+    ap.add_argument("--output-dir", default=os.path.join(C.POSE_ROOT, "predict"))
     args = ap.parse_args()
 
     if not os.path.isdir(C.CLIP_DIR):

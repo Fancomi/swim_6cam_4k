@@ -44,6 +44,9 @@ CROSS_CHAIN_IMPORTS = {
     # second one of its own.
     ("align", "stitch"),
     ("align", "fbx_overlay"),
+    # the water-entry chain's final overlay step reuses the same drift
+    # correction (reference image + solve + warp) instead of re-implementing it.
+    ("water_entry", "align"),
 }
 
 

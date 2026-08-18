@@ -7,7 +7,7 @@
 同一帧的多个模型横向拼成一行，便于直接对比。
 
 依赖 predict.py 已写出的 per_frame/<clip>.json；不重新推理。
-产物：outputs/water_entry/review/{crops/,index.html}
+产物：outputs/pose/review/{crops/,index.html}
 """
 import argparse
 import glob
@@ -196,7 +196,7 @@ def write_page(path, sections, models, radius, cell_width):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--predict-dir", default=os.path.join(C.OUTPUT_ROOT, "predict"),
+    ap.add_argument("--predict-dir", default=os.path.join(C.POSE_ROOT, "predict"),
                     help="predict.py 的输出目录（默认 %(default)s）")
     ap.add_argument("--models", nargs="+", default=C.DEFAULT_MODELS,
                     help="要横向对比的模型子目录名，顺序即页面列顺序")
@@ -209,7 +209,7 @@ def main():
     ap.add_argument("--full-frame", action="store_true",
                     help="不裁剪，输出整帧（看池边干扰目标时用）")
     ap.add_argument("--cell-width", type=int, default=300, help="页面单元显示宽度 px")
-    ap.add_argument("--output-dir", default=os.path.join(C.OUTPUT_ROOT, "review"))
+    ap.add_argument("--output-dir", default=os.path.join(C.POSE_ROOT, "review"))
     args = ap.parse_args()
 
     preds = load_predictions(args.predict_dir, args.models,

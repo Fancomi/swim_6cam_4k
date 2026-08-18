@@ -8,7 +8,7 @@
 预标注默认取 `swimup_bk`（实测空中段与入水段检出率最高）；该帧若 bk 缺检则退回
 `swimup`，两者都缺检时只给图不给预标注，并在清单里标出来。
 
-产物（--output-dir，默认 outputs/water_entry/annotate_package/）：
+产物（--output-dir，默认 outputs/pose/annotate_package/）：
   images/<clip>_f<frame>.jpg    原始帧，1280×720 无叠加
   manifest.csv                  逐帧的信号、分数、阶段、偏移与预标注来源
   prelabel_coco.json            COCO keypoints 格式的模型预标注
@@ -262,15 +262,15 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--candidates",
-                    default=os.path.join(C.OUTPUT_ROOT, "annotate_candidates.csv"),
+                    default=os.path.join(C.POSE_ROOT, "annotate_candidates.csv"),
                     help="select_frames 输出的 CSV（默认 %(default)s）")
-    ap.add_argument("--predict-dir", default=os.path.join(C.OUTPUT_ROOT, "predict"))
+    ap.add_argument("--predict-dir", default=os.path.join(C.POSE_ROOT, "predict"))
     ap.add_argument("--limit", type=int, default=0,
                     help="只导出前 N 帧（CSV 已按分数降序，默认 0 = 全部）")
     ap.add_argument("--quality", type=int, default=95,
                     help="JPEG 质量，标注用不宜过低（默认 %(default)s）")
     ap.add_argument("--output-dir",
-                    default=os.path.join(C.OUTPUT_ROOT, "annotate_package"))
+                    default=os.path.join(C.POSE_ROOT, "annotate_package"))
     ap.add_argument("--zip", dest="zip_path", default=None,
                     help="打包路径（默认 <output-dir>.zip；--no-zip 可跳过）")
     ap.add_argument("--no-zip", action="store_true", help="只导出目录，不打包")

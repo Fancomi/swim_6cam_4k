@@ -26,10 +26,16 @@ MANIFEST = os.path.join(DATASET, "bk_export_manifest.csv")
 OUTPUT_ROOT = str(dataset_root("WATER_ENTRY_OUTPUT_ROOT",
                                OUTPUTS / "water_entry"))
 
+# 姿态检测链（预测/筛选/质检/交付/复核/权重）**单独拎出** water_entry 之外，
+# 落在顶层 outputs/pose/——它是通用检测产物，不该埋在该链路的目录里。
+# 标定任务（对齐缓存与叠图）留在 outputs/water_entry/calib/。
+POSE_ROOT = str(OUTPUTS / "pose")
+CALIB_ROOT = os.path.join(OUTPUT_ROOT, "calib")
+
 # 模型注册：现网特化版、随包微调版、通用 COCO 版、基于难例数据再训练的 yolo26m 版。
-# 通用版不随数据集提供，首次使用时由 ultralytics 下载到 outputs/water_entry/weights/，
+# 通用版不随数据集提供，首次使用时由 ultralytics 下载到 pose/weights/，
 # 不落在仓库根目录（ultralytics 默认写 cwd）。
-WEIGHTS_DIR = os.path.join(OUTPUT_ROOT, "weights")
+WEIGHTS_DIR = os.path.join(POSE_ROOT, "weights")
 MODELS = {
     "swimup": os.path.join(DATASET, "yolo11n-pose-swimup_20250919.pt"),
     "swimup_bk": os.path.join(DATASET, "yolo11n-pose-swimup-bk.pt"),

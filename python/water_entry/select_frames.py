@@ -344,7 +344,7 @@ def summarize(rows, totals, label):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--predict-dir", default=os.path.join(C.OUTPUT_ROOT, "predict"))
+    ap.add_argument("--predict-dir", default=os.path.join(C.POSE_ROOT, "predict"))
     ap.add_argument("--clips", nargs="*", default=None, help="只看指定片段")
     ap.add_argument("--include-false-positive", action="store_true",
                     help="把 note=suspected_false_positive 的片段也纳入（默认排除，"
@@ -370,7 +370,7 @@ def main():
                     help="每片段最多保留几帧（默认 0 = 不限）")
     ap.add_argument("--top", type=int, default=0,
                     help="全局只保留分数最高的 N 帧（默认 0 = 不限）")
-    ap.add_argument("--output", default=os.path.join(C.OUTPUT_ROOT,
+    ap.add_argument("--output", default=os.path.join(C.POSE_ROOT,
                                                     "annotate_candidates.csv"))
     args = ap.parse_args()
 
