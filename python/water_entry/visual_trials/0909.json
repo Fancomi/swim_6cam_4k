@@ -1,0 +1,388 @@
+{
+  "size": [
+    1280,
+    720
+  ],
+  "status": "user accepted visual result; metric accuracy not independently measured",
+  "method": "Assistant visually traced the physical cord in each source; no segmentation or foreground fusion. Samples are image pixels, origin top-left. Faint traces need review.",
+  "distance_interpretation": "filename integer / 100 metres from pool wall; retained from accepted trial",
+  "lane_width_m": 2.5,
+  "lane_width_status": "2.5m retained from accepted trial; not independently measured",
+  "scope": "second lane counting away from the camera; user confirmed",
+  "far_boundary": [
+    [
+      0,
+      591
+    ],
+    [
+      360,
+      594
+    ],
+    [
+      600,
+      595
+    ],
+    [
+      810,
+      599
+    ]
+  ],
+  "near_boundary": [
+    [
+      0,
+      624
+    ],
+    [
+      270,
+      626
+    ],
+    [
+      600,
+      627
+    ],
+    [
+      925,
+      632
+    ]
+  ],
+  "boundary_half_width_px": [
+    5,
+    6
+  ],
+  "lines": [
+    {
+      "file": "0909-025.jpg",
+      "metres": 0.25,
+      "samples": [
+        [
+          816,
+          604
+        ],
+        [
+          867,
+          620
+        ]
+      ],
+      "confidence": "high",
+      "sha256": "24b2e8faaa60eea229a998353de69e91c26643d28458312026fe997ccb05e896"
+    },
+    {
+      "file": "0909-050.jpg",
+      "metres": 0.5,
+      "samples": [
+        [
+          794,
+          607
+        ],
+        [
+          832,
+          620
+        ]
+      ],
+      "confidence": "high",
+      "sha256": "cf1bc4738d30a9dce005afb36d82dd2f7cca740615e5de815813ae7dfded1359"
+    },
+    {
+      "file": "0909-075.jpg",
+      "metres": 0.75,
+      "samples": [
+        [
+          764,
+          609
+        ],
+        [
+          805,
+          625
+        ]
+      ],
+      "confidence": "low",
+      "note": "Cord is faint over the wall reflection in lane 2; review against source.",
+      "sha256": "66c9d1e16ee8e9f220b3098bd6b4f464a2d66a6be24ec74e79d21b919aa8fadf"
+    },
+    {
+      "file": "0909-100.jpg",
+      "metres": 1.0,
+      "samples": [
+        [
+          745,
+          611
+        ],
+        [
+          769,
+          624
+        ]
+      ],
+      "confidence": "low",
+      "note": "Cord is faint over the wall reflection in lane 2; review against source.",
+      "sha256": "e3165d6755228af9082cff9fb1ad93044c025721337d1686098e4086874b1513"
+    },
+    {
+      "file": "0909-125.jpg",
+      "metres": 1.25,
+      "samples": [
+        [
+          728,
+          610
+        ],
+        [
+          752,
+          622
+        ]
+      ],
+      "confidence": "high",
+      "sha256": "5882d11a3c06df2f9562288414b15f0af1d45dd2cfe4a1ebb2d53b09b2b8ae4e"
+    },
+    {
+      "file": "0909-150.jpg",
+      "metres": 1.5,
+      "samples": [
+        [
+          694,
+          606
+        ],
+        [
+          710,
+          616
+        ]
+      ],
+      "confidence": "high",
+      "sha256": "2649051eed35de69e93a7bf8ace542094e026b96984d267a93a6834952961ee4"
+    },
+    {
+      "file": "0909-175.jpg",
+      "metres": 1.75,
+      "samples": [
+        [
+          668,
+          604
+        ],
+        [
+          686,
+          618
+        ]
+      ],
+      "confidence": "high",
+      "sha256": "ad9f85570607b87037fe4973435fca3f3a50714918ea662cb181e3fba7530aae"
+    },
+    {
+      "file": "0909-200.jpg",
+      "metres": 2.0,
+      "samples": [
+        [
+          638,
+          605
+        ],
+        [
+          647,
+          617
+        ]
+      ],
+      "confidence": "high",
+      "sha256": "b4f95d618c447d432b82d3a530ccf68648c9a1cbd893c1ca3517f075b4b243cc"
+    },
+    {
+      "file": "0909-225.jpg",
+      "metres": 2.25,
+      "samples": [
+        [
+          606,
+          604
+        ],
+        [
+          611,
+          617
+        ]
+      ],
+      "confidence": "high",
+      "sha256": "a296bde11fa139c38787c732bd937d9dd0db38ff90205916f64ae4d1b4fe5ff5"
+    },
+    {
+      "file": "0909-250.jpg",
+      "metres": 2.5,
+      "samples": [
+        [
+          574,
+          604
+        ],
+        [
+          574,
+          617
+        ]
+      ],
+      "confidence": "high",
+      "sha256": "a2c95cfb4a1f0454605f63983d7509d5ea2eb6c2253884d1a59ff3e9b3284d35"
+    },
+    {
+      "file": "0909-275.jpg",
+      "metres": 2.75,
+      "samples": [
+        [
+          544,
+          604
+        ],
+        [
+          538,
+          617
+        ]
+      ],
+      "confidence": "high",
+      "sha256": "557b2bcdea9f974092ba9525b1b587505c2b3e38d34e09b1c80d85f920546fd5"
+    },
+    {
+      "file": "0909-300.jpg",
+      "metres": 3.0,
+      "samples": [
+        [
+          515,
+          604
+        ],
+        [
+          505,
+          617
+        ]
+      ],
+      "confidence": "high",
+      "sha256": "7718228e49ddd932f5e335915af8ecbeb01b7c897b5ab69dbc8e83f4e98e80ef"
+    },
+    {
+      "file": "0909-325.jpg",
+      "metres": 3.25,
+      "samples": [
+        [
+          485,
+          604
+        ],
+        [
+          468,
+          617
+        ]
+      ],
+      "confidence": "high",
+      "sha256": "09a671a51958e21a22f04f0f933c01dd113d1767fd0448a12f1d4f7d1af8ce42"
+    },
+    {
+      "file": "0909-350.jpg",
+      "metres": 3.5,
+      "samples": [
+        [
+          459,
+          604
+        ],
+        [
+          439,
+          617
+        ]
+      ],
+      "confidence": "high",
+      "sha256": "09427464da2cd1f4f45ee2cedc0f494e7a384d88de3f86d37c9ea7d7568e740b"
+    },
+    {
+      "file": "0909-375.jpg",
+      "metres": 3.75,
+      "samples": [
+        [
+          420,
+          604
+        ],
+        [
+          393,
+          617
+        ]
+      ],
+      "confidence": "medium",
+      "note": "Trace the upper main cord, not its lower reflection.",
+      "sha256": "fa67a9ded805d06fcd9034f020fa91469b0c40818115b6ef4ef0450b9a6da4b2"
+    },
+    {
+      "file": "0909-400.jpg",
+      "metres": 4.0,
+      "samples": [
+        [
+          392,
+          604
+        ],
+        [
+          363,
+          617
+        ]
+      ],
+      "confidence": "medium",
+      "note": "Trace the upper main cord, not its lower reflection.",
+      "sha256": "5f1f8b12f39a553dd07865e08a7bbb20af0d9159218a3319ca13c189a1be63db"
+    },
+    {
+      "file": "0909-425.jpg",
+      "metres": 4.25,
+      "samples": [
+        [
+          359,
+          605
+        ],
+        [
+          327,
+          618
+        ]
+      ],
+      "confidence": "medium",
+      "note": "Trace the upper main cord, not its lower reflection.",
+      "sha256": "13c32cb32227b0fc7886148bcffb30294c666d0e133bdf2f2d45859ac20fb27d"
+    },
+    {
+      "file": "0909-450.jpg",
+      "metres": 4.5,
+      "samples": [
+        [
+          329,
+          604
+        ],
+        [
+          289,
+          617
+        ]
+      ],
+      "confidence": "medium",
+      "note": "Trace the upper main cord, not its lower reflection.",
+      "sha256": "c5c622d52c8c7a58350868cb172cefd6df04e089405c898cd378cdc63c7bb445"
+    },
+    {
+      "file": "0909-475.jpg",
+      "metres": 4.75,
+      "samples": [
+        [
+          310,
+          604
+        ],
+        [
+          267,
+          617
+        ]
+      ],
+      "confidence": "medium",
+      "note": "Trace the upper main cord, not its lower reflection.",
+      "sha256": "58766baa12b1e7da9509e51628611212451e0e750282b17393b9e1b2e88ede46"
+    }
+  ],
+  "lane_index_from_camera": 2,
+  "label_offsets_px": [
+    18,
+    34
+  ],
+  "schema_version": 1,
+  "dataset_id": "0909",
+  "accepted_on": "2026-09-11",
+  "base_image": "0909-250.jpg",
+  "reference_render": {
+    "python": "3.12.10",
+    "pillow": "12.3.0",
+    "numpy": "2.5.3",
+    "rgba_sha256": {
+      "overlay.png": "a8760245c222ce4ea654bbd369c51c81f44d17187ffc6f75d0d57867e32ce735",
+      "overlay.white.png": "26f09c29bdc8a805c176f43b178ad71fbc68ecfa8c2f15a4df9d541ae1a9275c",
+      "overlay.composite.png": "684d64d72185976339746eb122bf5addc3696ff1a3dc64032c0e0f9d483e620d"
+    },
+    "file_sha256": {
+      "overlay.svg": "9b2e1809449cb8de3e7a976186bfc85e0452063d8192e6c4535bcbb5b36330e4",
+      "surface.trial.fbx": "5d13bf45ae26748bb767cc2e19985d3d7c3fdbabd350d1864c2c33468da0aeff"
+    }
+  }
+}

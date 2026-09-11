@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>水面视觉描线验收</title>
+<style>
+body{font:16px system-ui;margin:24px;background:#20242a;color:#eee}
+button,select,input{margin:8px}a{color:#9de}
+.view{position:relative;width:100%;max-width:1280px}
+.view img{width:100%;display:block}
+.view svg,.view .overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.controls{display:flex;flex-wrap:wrap;align-items:center;gap:4px}
+button,select{font:inherit;padding:5px}button{cursor:pointer}
+#note{min-height:1.5em}#error{color:#ffb49d}
+</style>
+<h1 id="heading"></h1>
+<p id="scope"></p><p id="status"></p><p id="summary"></p>
+<p>红线为距离线，黄带为泳道边界。米数在近侧黄带下方分行显示；短引线仅用于标签，不属于标定网格。青色为当前照片的描线与采样点。</p>
+<div class="controls">
+<label>原图<select id="pick"></select></label>
+<button id="previous">上一张</button><button id="next">下一张</button>
+<label><input type="checkbox" id="all" checked>全部叠图</label>
+<label><input type="checkbox" id="trace" checked>当前描线（青色）</label>
+<label>叠图透明度<input id="opacity" type="range" min="0" max="1" step="0.05" value="0.8"></label>
+</div>
+<p id="note"></p><p id="error" role="alert"></p>
+<div class="view" id="view">
+<img id="base" alt="当前拉线原图">
+<img class="overlay" id="overlay" src="overlay.png" alt="透明距离叠图">
+<svg id="cord" aria-label="当前照片的视觉采样点与描线"></svg>
+</div>
+<p><a href="overlay.png">透明 PNG</a> · <a href="overlay.white.png">白底预览</a> ·
+<a href="overlay.composite.png">原图合成</a> · <a href="overlay.svg">矢量图</a> ·
+<a href="surface.trial.fbx">FBX</a> · <a href="surface.json">网格坐标</a> ·
+<a href="annotations.json">视觉采样记录</a> · <a href="verification.json">验证结果</a> ·
+<a href="review_metrics.json">图像复核指标</a></p>
+<script id="review-data" type="application/json">__REVIEW_DATA__</script>
+<script>
+'use strict';
+const data=JSON.parse(document.getElementById('review-data').textContent);
+const rows=data.rows;
+const $=id=>document.getElementById(id);
+const pick=$('pick'),all=$('all'),trace=$('trace'),opacity=$('opacity');
+document.title=`${data.dataset_id} · 水面视觉描线验收`;
+$('heading').textContent=`${data.dataset_id} · 从镜头往远处数第 ${data.lane} 条泳道`;
+$('scope').textContent=`原位尺寸 ${data.size[0]}×${data.size[1]}；泳道宽 ${data.lane_width}m。${data.width_status}。距离口径：${data.distance_interpretation}`;
+$('status').textContent=`状态：${data.status}。视觉验收与实测误差验证分别记录。`;
+const low=rows.filter(r=>r.confidence==='low').map(r=>`${r.metres.toFixed(2)}m`);
+const outside=rows.filter(r=>[r.far_px,r.near_px].some(([x,y])=>x<0||x>data.size[0]||y<0||y>data.size[1]));
+$('summary').textContent=`${rows.length} 条距离线；${outside.length} 条含画外交点。低置信度：${low.join('、')||'无'}。未提供独立实测像素误差。`;
+$('view').style.maxWidth=data.size[0]+'px';
+$('cord').setAttribute('viewBox',`0 0 ${data.size[0]} ${data.size[1]}`);
+rows.forEach((r,i)=>pick.add(new Option(`${r.file} · ${r.metres.toFixed(2)}m · ${r.confidence}`,i)));
+function update(){
+ const r=rows[Number(pick.value)];
+ $('error').textContent='';
+ $('base').src='sources/'+encodeURIComponent(r.file);
+ $('overlay').style.opacity=all.checked?opacity.value:'0';
+ $('note').textContent=`${r.file} · ${r.confidence} ${r.note||''}`;
+ const p=r.far_px,q=r.near_px;
+ $('cord').innerHTML=trace.checked?
+  `<path d="M ${p} L ${q}" fill="none" stroke="cyan" stroke-width="1"/>`+
+  r.samples.map(([x,y])=>`<circle cx="${x}" cy="${y}" r="3" fill="none" stroke="cyan"/>`).join(''):'';
+}
+function step(delta){pick.selectedIndex=(pick.selectedIndex+delta+rows.length)%rows.length;update();}
+$('previous').addEventListener('click',()=>step(-1));
+$('next').addEventListener('click',()=>step(1));
+[pick,all,trace,opacity].forEach(e=>e.addEventListener('input',update));
+$('base').addEventListener('error',()=>{$('error').textContent='原图读取失败，请保留交付目录中的 sources/。';});
+$('overlay').addEventListener('error',()=>{$('error').textContent='overlay.png 读取失败，请重新生成完整交付。';});
+update();
+</script>
+</html>

@@ -413,6 +413,60 @@ overhead 单路解码明显低是像素总量所致（两路 4K 约为 16 路 72
 python.align 对微动做修正后再画；`--image 图` 换叠加目标图；默认产物
 `outputs/water_entry/calib/overlay/<line>/overlay*.png` + `overlay*.composite.png`。
 
+### 视觉描线与新会话复现（0909 已通过视觉验收）
+
+`python.water_entry.visual_trial` 是独立试验入口：由助手逐张看拉线照片，
+把主绳的像素采样点写入 `python/water_entry/visual_trials/0909.json`，
+脚本只负责直线延伸至泳道边界、绘图和导出，不运行前背景分离或 Mask 融合。
+当前按用户确认覆盖从镜头往远处数的第二条泳道（画面约 y=595–632），
+采样点取自这条泳道内的主绳。重跑能复现已记录坐标，尚不代表能自动处理新一批照片；
+新会话入口是 [水面拉线视觉提示词](docs/prompts/water_entry_visual.md)，
+用户只需让助手读取它并指定原图目录。它规定了重新视觉取点、坐标格式、
+透明图/FBX/离线验收页的交付格式及检查步骤，不依赖旧设计图或历史会话。
+
+```powershell
+python -m python.water_entry.visual_trial --source "D:\PROJECT\LABEL\datas\swim-water-entry-0911\20260909-xlj"
+```
+
+入口先按整批文件名和 SHA-256 匹配已验收坐标，不能仅凭目录同名复用。
+新照片需要助手先视觉取点，保存新的 JSON 后传 `--annotations <记录.json>`。
+删除 `outputs/` 不影响重建；保留源码中的提示词、坐标 JSON、渲染器与 HTML 模板。
+默认输出按 `dataset_id` 分目录；`index.html` 的标题、尺寸、帧数与复核项来自当前数据。
+
+产物在 `outputs/water_entry/calib/visual_trial_0909/`：`index.html` 可逐张切换原图、
+总叠图与当前青色描线；`overlay.png` 为原位 1280×720 透明图，另有白底预览、
+原图合成与 SVG，另有 `annotations.json`（输入记录副本）、`verification.json`
+（来源指纹、版本及参考摘要比对）。`surface.trial.fbx` 和 `surface.json` 共用同一批交点，
+X 为离壁米数、Y 为泳道远侧到近侧、Z 向上，UV 原点在左下；未附材质。
+暂按文件名÷100 为米数、泳道宽 2.5m；未映射到旧 FBX 的世界原点。
+19 条距离线两端均在画内；0.75m、1.00m 因反光需重点复核。
+米数分两行置于近侧黄带下方，短引线仅用于标签，不属于标定网格。
+黄带宽度仅为展示样式，不是泳道绳的实测宽度。
+
+2026-09-11 本机无项目 `.venv`/FBX SDK，此纯坐标试验临时用 Python 3.12 +
+Pillow/NumPy 执行，不改变项目 Python 3.10 要求。布局测试 7 项通过；
+ufbx 独立读回确认 1 个网格、38 顶点、36 三角形及 38 个 UV。
+这是文件结构验证，用户已确认视觉效果，尚无像素真值误差。
+复现检查命令：`py -3.12 -m python.water_entry.visual_trial --source <0909原图目录>
+--output outputs/water_entry/calib/visual_rebuild_check`。空目录重建的三张 PNG 解码像素摘要、
+SVG/FBX 文件摘要均与已验收版一致；不依赖任何旧 outputs 文件。
+`py -3.12 -m unittest tests.python.test_water_entry_visual_trial tests.python.test_layout`
+共 12 项通过，覆盖换源拒绝、整批指纹匹配、跨线拒绝、新数据页面和重复渲染。
+Edge 的 `file://` 实测通过 19 帧切换、前后循环、青线同步、两个开关、透明度及全部交付链接，
+无 JavaScript 错误；独立 FBX 读回的顶点和 UV 与 JSON 在 1e-10 容差内一致。
+
+每次渲染还会生成 `review_metrics.json` 与 `review/` 原图/描线核对图：
+Python 在人工选定线段附近检查局部灰度对比度、支撑比例和 ±6px 法向候选。
+提示词要求基准渲染后看图复核疑点、修正一轮、再次跑指标；候选不会自动改坐标。
+已验收记录及参考摘要保持原样，待验收修正版存 `visual_trials/revisions/`，
+显式传 `--annotations` 使用，不参与基准的自动指纹匹配。
+首轮 `revisions/0909_review.json` 修正 0.50m、1.25m、2.25m；1.25m 法向偏移约 3px，
+灰度对比度由 −5.22 升到 27.57，支撑比例由 19.5% 升到 100%。
+0.75m、1.00m、4.00m、4.25m、4.50m 仍有倒影/弱线歧义，保留坐标并标 low。
+这些指标仅衡量原图局部支撑，不是物理主绳身份或实测精度的证明。
+`py -3.12 -m unittest tests.python.test_water_entry_visual_trial tests.python.test_water_entry_visual_metrics tests.python.test_layout`
+共 15 项通过；原始基准的五项参考摘要仍全部一致。
+
 ### 三条经过验证的结论
 
 **基准入水帧取 `res.json` 的 `metadata.backstroke.entry_frame`，不是 `manifest.csv` 的
